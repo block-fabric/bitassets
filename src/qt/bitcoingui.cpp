@@ -334,6 +334,15 @@ void BitcoinGUI::createActions()
     connect(historyAction, &QAction::triggered, this, &BitcoinGUI::gotoHistoryPage);
     connect(sidechainAction, &QAction::triggered, [this]{ showNormalIfMinimized(); });
     connect(sidechainAction, &QAction::triggered, this, &BitcoinGUI::gotoSidechainPage);
+
+    assetsAction = new QAction(platformStyle->SingleColorIcon(":/icons/tx_inout"), tr("&Assets"), this);
+    assetsAction->setStatusTip(tr("Assets: create one, trade in pools, sell and buy by auction"));
+    assetsAction->setToolTip(assetsAction->statusTip());
+    assetsAction->setCheckable(true);
+    assetsAction->setShortcut(QKeySequence(QStringLiteral("Alt+6")));
+    tabGroup->addAction(assetsAction);
+    connect(assetsAction, &QAction::triggered, [this]{ showNormalIfMinimized(); });
+    connect(assetsAction, &QAction::triggered, this, &BitcoinGUI::gotoAssetsPage);
 #endif // ENABLE_WALLET
 
     quitAction = new QAction(tr("E&xit"), this);
@@ -644,6 +653,7 @@ void BitcoinGUI::createMenuBar()
     }
 
     QMenu* use{appMenuBar->addMenu(tr("&Use %1").arg(CLIENT_NAME))};
+    use->addAction(assetsAction);
     window_action(use, tr("Timestamp &File"), tr("Prove that a file existed, by publishing its fingerprint on the chain"), m_timestamp_dialog);
     if (walletFrame) {
         use->addSeparator();
@@ -817,6 +827,7 @@ void BitcoinGUI::createToolBars()
         entry(historyAction);
 
         section(tr("Chain"));
+        entry(assetsAction);
         entry(sidechainAction);
         window_entry(":/icons/eye", tr("Block Explorer"), tr("Browse blocks and the transactions waiting to be mined"), m_block_explorer);
 
@@ -1136,6 +1147,7 @@ void BitcoinGUI::setWalletActionsEnabled(bool enabled)
     receiveCoinsAction->setEnabled(enabled);
     historyAction->setEnabled(enabled && !isPrivacyModeActivated());
     sidechainAction->setEnabled(enabled);
+    assetsAction->setEnabled(enabled);
     encryptWalletAction->setEnabled(enabled);
     backupWalletAction->setEnabled(enabled);
     changePassphraseAction->setEnabled(enabled);
@@ -1302,6 +1314,12 @@ void BitcoinGUI::gotoReceiveCoinsPage()
 {
     receiveCoinsAction->setChecked(true);
     if (walletFrame) walletFrame->gotoReceiveCoinsPage();
+}
+
+void BitcoinGUI::gotoAssetsPage()
+{
+    assetsAction->setChecked(true);
+    if (walletFrame) walletFrame->gotoAssetsPage();
 }
 
 void BitcoinGUI::gotoSidechainPage()

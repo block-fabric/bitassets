@@ -5,6 +5,8 @@
 
 #include <txmempool.h>
 
+#include <bitassets/state.h>
+
 #include <chain.h>
 #include <coins.h>
 #include <common/system.h>
@@ -249,6 +251,13 @@ void CTxMemPool::addNewTransaction(CTxMemPool::txiter newit)
     for (const CTxOut& out : tx.vout) {
         if (const auto refund{sidechain::ParseRefundScript(out.scriptPubKey)}) m_refunds[refund->withdrawal] = tx.GetHash();
     }
+    if (const auto marker{bitassets::GetMarker(tx)}) {
+        m_bitassets_txs.insert(tx.GetHash());
+        if (marker->operation) {
+            if (const auto* reg{std::get_if<bitassets::Register>(&*marker->operation)}) m_bitassets_registrations[reg->name] = tx.GetHash();
+            if (const auto* release{std::get_if<bitassets::ReleaseAsset>(&*marker->operation)}) m_bitassets_releases[release->asset] = tx.GetHash();
+        }
+    }
     // Don't bother worrying about child transactions of this one.
     // Normal case of a new transaction arriving is that there can't be any
     // children, because such children would be orphans.
@@ -312,6 +321,11 @@ void CTxMemPool::removeUnchecked(txiter it, MemPoolRemovalReason reason)
                 m_refunds.erase(entry);
             }
         }
+    }
+
+    if (m_bitassets_txs.erase(it->GetTx().GetHash()) > 0) {
+        std::erase_if(m_bitassets_registrations, [&](const auto& entry) { return entry.second == it->GetTx().GetHash(); });
+        std::erase_if(m_bitassets_releases, [&](const auto& entry) { return entry.second == it->GetTx().GetHash(); });
     }
 
     RemoveUnbroadcastTx(it->GetTx().GetHash(), true /* add logging because unchecked */);

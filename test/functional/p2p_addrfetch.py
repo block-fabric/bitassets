@@ -24,7 +24,7 @@ ADDR = CAddress()
 ADDR.time = int(time.time())
 ADDR.nServices = P2P_SERVICES
 ADDR.ip = "192.0.0.8"
-ADDR.port = 29655
+ADDR.port = 29355
 
 
 class P2PAddrFetch(BitcoinTestFramework):

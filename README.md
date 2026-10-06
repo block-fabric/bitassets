@@ -1,90 +1,162 @@
-Sidechain template
-==================
+# BitAssets
 
-A sidechain of the Chains mainchain with nothing in it but what every sidechain
-needs: blind merged mining, deposits from the mainchain and withdrawals to it.
-Copy it to make a sidechain. See [doc/sidechain.md](doc/sidechain.md) for how it
-works, how to try it, and how to make your own.
+BitAssets is a sidechain of Chains on which anyone can create assets (shares, points, tickets,
+stablecoins) and trade them: in pools, an automated market maker, and by Dutch auction.
 
-It is derived from the Chains mainchain, which is derived from Bitcoin Core;
-the rest of this file is from there.
+| | |
+|---|---|
+| Slot on the mainchain | 4 |
+| Coin | CHN, deposited from [Chains](https://github.com/block-fabric/chains) and withdrawn back to it |
+| Addresses | `ba1…` (`tba1…` on the test networks) |
+| P2P port | 9355 (testnet 19355, signet 39355, regtest 29355) |
+| RPC port | 9354 (testnet 19354, signet 39354, regtest 29354) |
 
-Bitcoin Core integration/staging tree
-=====================================
+BitAssets is the [sidechain template](doc/sidechain.md) of Chains with assets added. A BitAssets node needs a
+Chains node (`chainsd` or `chains-qt`) to follow, reached over its RPC interface.
 
-https://bitcoincore.org
+## Installing
 
-For an immediately usable, binary version of the Bitcoin Core software, see
-https://bitcoincore.org/en/download/.
+There is no packaged build yet: build it from source, below.
 
-What is Bitcoin Core?
----------------------
+## Building from source
 
-Bitcoin Core connects to the Bitcoin peer-to-peer network to download and fully
-validate blocks and transactions. It also includes a wallet and graphical user
-interface, which can be optionally built.
+On Debian or Ubuntu (24.04):
 
-Further information about Bitcoin Core is available in the [doc folder](/doc).
+```sh
+sudo apt install build-essential cmake pkgconf python3 libevent-dev libboost-dev \
+    libsqlite3-dev libzmq3-dev qt6-base-dev qt6-tools-dev qt6-l10n-tools libqrencode-dev
+git clone https://github.com/block-fabric/bitassets.git
+cd bitassets
+cmake -B build -DBUILD_GUI=ON
+cmake --build build -j$(nproc)
+```
 
-License
--------
+Leave out `-DBUILD_GUI=ON` (and the Qt packages) for a node without a window. Other systems and
+options: [doc/build-unix.md](doc/build-unix.md) and the other `doc/build-*.md`.
 
-Bitcoin Core is released under the terms of the MIT license. See [COPYING](COPYING) for more
-information or see https://opensource.org/license/MIT.
+The programs, in `build/bin`:
 
-Development Process
--------------------
+| Program | What it is |
+|---|---|
+| `bitassets-qt` | the wallet, with its window |
+| `bitassetsd` | the node, without a window |
+| `bitassets-cli` | commands for a running node or wallet |
+| `bitassets-wallet`, `bitassets-tx`, `bitassets-util` | tools that work without a node |
 
-The `master` branch is regularly built (see `doc/build-*.md` for instructions) and tested, but it is not guaranteed to be
-completely stable. [Tags](https://github.com/bitcoin/bitcoin/tags) are created
-regularly from release branches to indicate new official, stable release versions of Bitcoin Core.
+Tests: `ctest --test-dir build` (unit tests) and `build/test/functional/test_runner.py`. The
+sidechain tests need a built Chains tree next to this one (`../chains`), or `MAINCHAIN_BIN_DIR`
+set to the folder of its programs.
 
-The https://github.com/bitcoin-core/gui repository is used exclusively for the
-development of the GUI. Its master branch is identical in all monotree
-repositories. Release branches and tags do not exist, so please do not fork
-that repository unless it is for development reasons.
+## Running it
 
-The contribution workflow is described in [CONTRIBUTING.md](CONTRIBUTING.md)
-and useful hints for developers can be found in [doc/developer-notes.md](doc/developer-notes.md).
+First a Chains node, with RPC on (`server=1` in `chains.conf`, or `-server`), on the same network.
 
-Testing
--------
+The simplest is to let the Chains wallet run BitAssets: in its **Sidechain Nodes** window, select
+BitAssets, press **Locate programs…** and choose the folder with `bitassetsd` and `bitassets-qt`, then **Start node**
+or **Open wallet**.
 
-Testing and code review is the bottleneck for development; we get more pull
-requests than we can review and test on short notice. Please be patient and help out by testing
-other people's pull requests, and remember this is a security-critical project where any mistake might cost people
-lots of money.
+By hand, on the same computer as the Chains node:
 
-### Automated Testing
+```sh
+bitassets-qt                 # the main network
+bitassets-qt -testnet        # the test network
+```
 
-Developers are strongly encouraged to write [unit tests](src/test/README.md) for new code, and to
-submit new unit tests for old code. Unit tests can be compiled and run
-(assuming they weren't disabled during the generation of the build system) with: `ctest`. Further details on running
-and extending unit tests can be found in [/src/test/README.md](/src/test/README.md).
+It finds the Chains node by itself: RPC on 127.0.0.1 at the port of the network, and the cookie
+file in the Chains data folder (`~/.chains/.cookie`, `~/.chains/testnet/.cookie`). Options for
+anything else:
 
-There are also [regression and integration tests](/test), written
-in Python.
-These tests can be run (if the [test dependencies](/test) are installed) with: `build/test/functional/test_runner.py`
-(assuming `build` is your build directory).
+| Option | What it is |
+|---|---|
+| `-mainchainrpcconnect=<ip>` | address of the Chains node (default 127.0.0.1) |
+| `-mainchainrpcport=<port>` | its RPC port (default 9554, testnet 19554, signet 39554, regtest 29554) |
+| `-mainchainrpccookiefile=<file>` | its cookie file |
+| `-mainchaindatadir=<dir>` | its data folder, where the cookie file is looked for (default `~/.chains`) |
+| `-mainchainrpcuser=<user>`, `-mainchainrpcpassword=<pw>` | credentials, instead of the cookie |
+| `-mainchainrpcwallet=<name>` | the Chains wallet that pays for merged mining (default: its only loaded wallet) |
 
-The CI (Continuous Integration) systems make sure that every pull request is tested on Windows, Linux, and macOS.
-The CI must pass on all commits before merge to avoid unrelated CI failures on new pull requests.
+The slot is fixed on the main and test networks; `-sidechainslot=<n>` is for regtest only, where
+it makes the chain a sidechain in slot `n` (see [doc/sidechain.md](doc/sidechain.md)).
 
-### Manual Quality Assurance (QA) Testing
+Data and the configuration file `bitassets.conf` are in `~/.bitassets`; the test network has a subfolder
+`testnet`. The networks have no DNS seeds: give the node a peer with `addnode`. A sample
+`~/.bitassets/bitassets.conf`:
 
-Changes should be tested by somebody other than the developer who wrote the
-code. This is especially important for large or high-risk changes. It is useful
-to add a test plan to the pull request description if testing the changes is
-not straightforward.
+```ini
+server=1
+fallbackfee=0.0002
 
-Translations
-------------
+# For the test network instead, uncomment:
+# testnet=1
 
-Changes to translations as well as new translations can be submitted to
-[Bitcoin Core's Transifex page](https://explore.transifex.com/bitcoin/bitcoin/).
+[main]
+addnode=<peer>:9355
+mainchainrpcwallet=<wallet of the Chains node>
 
-Translations are periodically pulled from Transifex and merged into the git repository. See the
-[translation process](doc/translation_process.md) for details on how this works.
+[test]
+addnode=<peer>:19355
+mainchainrpcwallet=<wallet of the Chains node>
+```
 
-**Important**: We do not accept translation changes as GitHub pull requests because the next
-pull from Transifex would automatically overwrite them again.
+On the test network, the `-mainchainrpcport`, `-mainchainrpccookiefile` and `-mainchainrpcwallet`
+options are read only from the `[test]` section.
+
+## Coins in and out
+
+- **Deposit.** In BitAssets, get a deposit address (`getdepositaddress`, or the **Mainchain** page):
+  `s4_<address>_<checksum>`. In Chains, send to it from the **Sidechains** page, or
+  `chains-cli createsidechaindeposit 4 <deposit address> <amount>`. The coins appear with the
+  next BitAssets block.
+- **Withdraw.** `createwithdrawal <Chains address> <amount> ( <fee for Chains miners> )`, or the
+  **Mainchain** page. Withdrawals are paid in bundles that Chains miners vote on (about three
+  months on the main network, 600 blocks on the test network). A withdrawal not in the bundle
+  being voted on can be taken back: `refundwithdrawal <txid> <vout>`.
+- **Merged mining.** BitAssets blocks are mined by Chains miners, for a fee in CHN paid by the Chains
+  wallet. `setbmm true <BitAssets address>` has the node ask for a block whenever the fees waiting pay
+  for one; it offers the miners 99% and keeps 1% at the address. `requestbmmblock <address>
+  <amount>` asks for one block now, for a fee of your choice (for a deposit on a quiet chain).
+  `getbmminfo` shows how it goes.
+
+How deposits, withdrawals, bundles and merged mining work: [doc/sidechain.md](doc/sidechain.md).
+
+## Assets
+
+- **Creating an asset** takes two steps, a hidden reservation then the registration, so that nobody
+  can see the name coming and take it first. The asset comes with a **control coin**: its holder can
+  mint more, until the supply is fixed for good.
+- Assets are sent like coins, and can be burned.
+- **Pools** pair an asset with CHN or another asset (constant product, 0.3% fee). Anyone can add
+  liquidity and swap.
+- **Dutch auctions** sell an amount of an asset at a price that falls from a start to an end price.
+- An asset nobody holds any more can be **retired**: what is left in its pools goes to the miners.
+
+How assets work: [doc/bitassets.md](doc/bitassets.md).
+
+## Commands
+
+BitAssets, on the node: `getbitassetsinfo`, `listassets`, `getasset`, `getassethistory`, `listpools`,
+`getpool`, `quoteswap`, `listauctions`, `getauction`, `quotebid`.
+
+BitAssets, in the wallet: `reserveasset`, `registerasset`, `releaseassetreservation`, `mintasset`,
+`fixassetsupply`, `updateasset`, `transferassetcontrol`, `sendasset`, `burnasset`, `releaseasset`,
+`listmyassets`, `listassetactivity`, `addliquidity`, `removeliquidity`, `swapasset`, `createauction`,
+`bidauction`, `collectauction`.
+
+Sidechain, on the node: `getmainchaininfo`, `syncmainchain`, `setbmm`, `getbmminfo`, `requestbmmblock`, `createbmmblock`, `listwithdrawals`, `getwithdrawalbundle`.
+
+Sidechain, in the wallet: `getdepositaddress`, `createwithdrawal`, `refundwithdrawal`.
+
+## Wallet
+
+The pages: Overview, Send, Receive, Transactions, **Mainchain** (deposits, withdrawals, merged
+mining), and **Assets** (your assets, send and receive, create, trade in pools, auctions, explore).
+
+## Credits
+
+BitAssets is inspired by **BitAssets by LayerTwo Labs** (plain-bitassets). It is built on the sidechain template of Chains, which is based on
+[Bitcoin Core](https://github.com/bitcoin/bitcoin) v32; its README is in
+[doc/README-bitcoin-core.md](doc/README-bitcoin-core.md).
+
+## License
+
+MIT: see [COPYING](COPYING).

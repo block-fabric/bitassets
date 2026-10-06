@@ -5,6 +5,7 @@
 #ifndef BITCOIN_SIDECHAIN_STATE_H
 #define BITCOIN_SIDECHAIN_STATE_H
 
+#include <bitassets/state.h>
 #include <consensus/amount.h>
 #include <consensus/params.h>
 #include <primitives/block.h>
@@ -60,6 +61,9 @@ inline constexpr size_t MAX_PAYOUTS_PER_BLOCK{1000};
  * (block assembly policy, not a rule): after that, a bundle goes before refund requests.
  */
 inline constexpr int REFUND_GRACE_BLOCKS{6};
+
+/** The output index naming the withdrawal that pays the CHN freed by retiring an asset (BitAssets) to mainchain miners. */
+inline constexpr uint32_t RELEASE_WITHDRAWAL_INDEX{0xFFFFFF00};
 
 /** Coins burned on this chain, to be paid out on the mainchain. */
 struct Withdrawal {
@@ -119,13 +123,15 @@ struct StateUndo {
     uint64_t queued{0};
     std::vector<CTxOut> paid_tx;
     uint64_t queued_tx{0};
+    //! What the block changed in the assets.
+    bitassets::StateUndo bitassets;
 
     template <typename Stream>
     void Serialize(Stream& s) const
     {
         s << main_height << bundle.has_value();
         if (bundle) s << *bundle;
-        s << last_failure_height << added << removed << paid << queued << paid_tx << queued_tx;
+        s << last_failure_height << added << removed << paid << queued << paid_tx << queued_tx << bitassets;
     }
     template <typename Stream>
     void Unserialize(Stream& s)
@@ -134,7 +140,7 @@ struct StateUndo {
         s >> main_height >> has_bundle;
         bundle.reset();
         if (has_bundle) s >> bundle.emplace();
-        s >> last_failure_height >> added >> removed >> paid >> queued >> paid_tx >> queued_tx;
+        s >> last_failure_height >> added >> removed >> paid >> queued >> paid_tx >> queued_tx >> bitassets;
     }
 };
 
@@ -201,13 +207,15 @@ public:
     std::optional<CMutableTransaction> BundleTx() const;
     bool InBundle(const COutPoint& withdrawal) const;
     int32_t LastFailureHeight() const { return m_last_failure_height; }
+    /** The assets, pools and auctions. */
+    const bitassets::State& BitAssets() const { return m_bitassets; }
 
     template <typename Stream>
     void Serialize(Stream& s) const
     {
         s << m_main_height << m_withdrawals << m_bundle.has_value();
         if (m_bundle) s << *m_bundle;
-        s << m_last_failure_height << m_queue << m_queue_tx;
+        s << m_last_failure_height << m_queue << m_queue_tx << m_bitassets;
     }
     template <typename Stream>
     void Unserialize(Stream& s)
@@ -216,7 +224,7 @@ public:
         s >> m_main_height >> m_withdrawals >> has_bundle;
         m_bundle.reset();
         if (has_bundle) s >> m_bundle.emplace();
-        s >> m_last_failure_height >> m_queue >> m_queue_tx;
+        s >> m_last_failure_height >> m_queue >> m_queue_tx >> m_bitassets;
     }
     friend bool operator==(const State&, const State&) = default;
 
@@ -232,6 +240,7 @@ private:
     //! Payouts owed beyond what earlier blocks could pay, oldest first: from the mainchain, and from transactions.
     std::vector<CTxOut> m_queue;
     std::vector<CTxOut> m_queue_tx;
+    bitassets::State m_bitassets;
 };
 
 //

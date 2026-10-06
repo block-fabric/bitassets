@@ -139,6 +139,8 @@ add_library(bitcoinqt STATIC EXCLUDE_FROM_ALL
   sidebarmining.h
   themedframe.cpp
   themedframe.h
+  bitassetspage.cpp
+  bitassetspage.h
   timestampdialog.cpp
   timestampdialog.h
   splashscreen.cpp

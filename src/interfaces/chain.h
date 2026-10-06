@@ -5,6 +5,7 @@
 #ifndef BITCOIN_INTERFACES_CHAIN_H
 #define BITCOIN_INTERFACES_CHAIN_H
 
+#include <bitassets/state.h>
 #include <blockfilter.h>
 #include <common/settings.h>
 #include <consensus/amount.h>
@@ -190,6 +191,20 @@ public:
     //! Check if transaction is in mempool.
     virtual bool isInMempool(const Txid& txid) = 0;
 
+    //! BitAssets: what an output carries, if it carries a token in the chain as it is.
+    virtual std::optional<bitassets::Token> getBitAssetsToken(const COutPoint& outpoint) = 0;
+    //! BitAssets: a registered asset.
+    virtual std::optional<bitassets::AssetRecord> getBitAsset(const bitassets::AssetId& asset) = 0;
+    //! BitAssets: the commitment of a reservation not revealed yet, by the transaction that made it.
+    virtual std::optional<uint256> getBitAssetsReservation(const Txid& txid) = 0;
+    //! BitAssets: a pool, by its id.
+    virtual std::optional<bitassets::Pool> getBitAssetsPool(const uint256& id) = 0;
+    //! BitAssets: an auction, by the transaction that made it.
+    virtual std::optional<bitassets::Auction> getBitAssetsAuction(const Txid& txid) = 0;
+    //! BitAssets: the height of the next block.
+    virtual int getBitAssetsHeight() = 0;
+    //! BitAssets: whether an asset is dead and can be retired.
+    virtual bool getBitAssetReleasable(const bitassets::AssetId& asset) = 0;
     //! The merged-mining request (BIP301 M8) in the mempool for a sidechain slot, if any: the sidechain
     //! block it asks for, the mainchain block it is for, and the fee it pays.
     struct BmmRequestInfo {

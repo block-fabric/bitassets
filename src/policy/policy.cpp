@@ -7,6 +7,8 @@
 
 #include <policy/policy.h>
 
+#include <bitassets/state.h>
+
 #include <coins.h>
 #include <consensus/amount.h>
 #include <consensus/consensus.h>
@@ -76,8 +78,10 @@ bool IsDust(const CTxOut& txout, const CFeeRate& dustRelayFeeIn)
 std::vector<uint32_t> GetDust(const CTransaction& tx, CFeeRate dust_relay_rate)
 {
     std::vector<uint32_t> dust_outputs;
+    // Outputs that carry tokens (BitAssets) carry no value by design.
+    const std::set<uint32_t> tokens{bitassets::TokenOutputs(tx)};
     for (uint32_t i{0}; i < tx.vout.size(); ++i) {
-        if (IsDust(tx.vout[i], dust_relay_rate)) dust_outputs.push_back(i);
+        if (IsDust(tx.vout[i], dust_relay_rate) && !tokens.contains(i)) dust_outputs.push_back(i);
     }
     return dust_outputs;
 }

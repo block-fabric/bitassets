@@ -99,6 +99,13 @@ struct SidechainParams {
     uint32_t max_bundle_withdrawals{1000};
     /** Number of blocks to wait after a withdrawal bundle failed before the next one can be made. */
     int bundle_retry_delay{144};
+    /**
+     * BitAssets: the height from which a pool nobody provides liquidity to is closed to trades, and
+     * a pool opens (or reopens) only with a deposit of some size (bitassets/state.h).
+     */
+    int bitassets_pool_rules_height{0};
+    /** BitAssets: the height from which a dead asset can be retired (ReleaseAsset). */
+    int bitassets_release_height{0};
 };
 
 /**

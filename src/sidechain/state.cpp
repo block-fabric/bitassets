@@ -190,6 +190,22 @@ bool State::CheckRefund(const RefundRequest& request, std::string& reject_reason
 bool State::ApplyTx(const CTransaction& tx, int height, const Consensus::SidechainParams& params, StateUndo& undo,
                     std::vector<CTxOut>& payouts, std::string& reject_reason)
 {
+    // The assets: a transaction that breaks their rules is invalid, so they come first, and change
+    // nothing if it fails. What pools and auctions pay out in CHN, the coinbase pays.
+    CAmount released{0};
+    if (!m_bitassets.ApplyTx(tx, height, undo.bitassets, payouts, reject_reason, params.bitassets_pool_rules_height, &released, params.bitassets_release_height)) return false;
+    // CHN freed by retiring an asset go to mainchain miners: a withdrawal of 1 satoshi, burned on the
+    // mainchain (a bundle has to pay something), whose fee is the rest. Nobody can take it back.
+    if (released >= 2) {
+        Withdrawal withdrawal;
+        withdrawal.outpoint = COutPoint{tx.GetHash(), RELEASE_WITHDRAWAL_INDEX};
+        withdrawal.amount = 1;
+        withdrawal.main_fee = released - 1;
+        withdrawal.main_script = CScript() << OP_RETURN << std::vector<unsigned char>{'r', 'e', 'l', 'e', 'a', 's', 'e'};
+        withdrawal.height = height;
+        undo.added.push_back(withdrawal.outpoint);
+        m_withdrawals.emplace(withdrawal.outpoint, std::move(withdrawal));
+    }
     for (uint32_t n{0}; n < tx.vout.size(); ++n) {
         const CTxOut& out{tx.vout[n]};
         if (IsWithdrawalScript(out.scriptPubKey)) {
@@ -314,6 +330,7 @@ void State::DisconnectBlock(const StateUndo& undo)
     m_main_height = undo.main_height;
     m_bundle = undo.bundle;
     m_last_failure_height = undo.last_failure_height;
+    m_bitassets.Revert(undo.bitassets);
 }
 
 } // namespace sidechain
