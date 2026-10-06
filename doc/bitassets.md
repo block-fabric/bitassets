@@ -2,9 +2,8 @@
 
 BitAssets is a sidechain of Chains (slot 4) on which anyone can create assets — shares, points,
 tickets, stablecoins — and trade them: in pools (an automated market maker) and by Dutch auction.
-It follows **BitAssets by LayerTwo Labs** (plain-bitassets), ported with their permission to this
-Bitcoin Core based sidechain, with Bitcoin's keys and transactions, and the defects of the original
-fixed.
+It is inspired by **BitAssets by LayerTwo Labs** (plain-bitassets), built anew on this Bitcoin Core
+based sidechain, with Bitcoin's keys and transactions, and without the defects of the original.
 
 ## Assets
 

@@ -153,7 +153,7 @@ mining), and **Assets** (your assets, send and receive, create, trade in pools, 
 
 ## Credits
 
-BitAssets follows **BitAssets by LayerTwo Labs** (plain-bitassets), ported with their permission. It is built on the sidechain template of Chains, which is based on
+BitAssets is inspired by **BitAssets by LayerTwo Labs** (plain-bitassets). It is built on the sidechain template of Chains, which is based on
 [Bitcoin Core](https://github.com/bitcoin/bitcoin) v32; its README is in
 [doc/README-bitcoin-core.md](doc/README-bitcoin-core.md).
 

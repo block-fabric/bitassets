@@ -2,7 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 //
-// After BitAssets by LayerTwo Labs (plain-bitassets), ported with their permission.
+// Inspired by BitAssets by LayerTwo Labs (plain-bitassets).
 
 #ifndef BITCOIN_BITASSETS_STATE_H
 #define BITCOIN_BITASSETS_STATE_H
