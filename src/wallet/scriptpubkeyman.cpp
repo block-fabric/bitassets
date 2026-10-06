@@ -1360,6 +1360,8 @@ bool DescriptorScriptPubKeyMan::SignTransaction(CMutableTransaction& tx, const s
 SigningResult DescriptorScriptPubKeyMan::SignMessage(const std::string& message, const PKHash& pkhash, std::string& str_sig) const
 {
     std::unique_ptr<FlatSigningProvider> keys = GetSigningProvider(GetScriptForDestination(pkhash), true);
+    // The key may also be the one of a P2WPKH address.
+    if (!keys) keys = GetSigningProvider(GetScriptForDestination(WitnessV0KeyHash{uint160{pkhash}}), true);
     if (!keys) {
         return SigningResult::PRIVATE_KEY_NOT_AVAILABLE;
     }
@@ -1372,6 +1374,29 @@ SigningResult DescriptorScriptPubKeyMan::SignMessage(const std::string& message,
     if (!MessageSign(key, message, str_sig)) {
         return SigningResult::SIGNING_FAILED;
     }
+    return SigningResult::OK;
+}
+
+SigningResult DescriptorScriptPubKeyMan::SignMessage(const std::string& message, const WitnessV1Taproot& output, std::string& str_sig) const
+{
+    std::unique_ptr<FlatSigningProvider> keys = GetSigningProvider(GetScriptForDestination(output), true);
+    if (!keys) {
+        return SigningResult::PRIVATE_KEY_NOT_AVAILABLE;
+    }
+
+    // The key of the address is the internal key, tweaked by the scripts of the address.
+    TaprootSpendData spenddata;
+    CKey key;
+    if (!keys->GetTaprootSpendData(XOnlyPubKey{output}, spenddata) || !keys->GetKeyByXOnly(spenddata.internal_key, key)) {
+        return SigningResult::PRIVATE_KEY_NOT_AVAILABLE;
+    }
+
+    std::vector<unsigned char> signature(64);
+    const uint256 hash{MessageHash(message)};
+    if (!key.SignSchnorr(hash, signature, &spenddata.merkle_root, /*aux=*/hash)) {
+        return SigningResult::SIGNING_FAILED;
+    }
+    str_sig = EncodeBase64(signature);
     return SigningResult::OK;
 }
 

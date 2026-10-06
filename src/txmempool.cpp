@@ -239,6 +239,13 @@ void CTxMemPool::addNewTransaction(CTxMemPool::txiter newit)
     for (unsigned int i = 0; i < tx.vin.size(); i++) {
         mapNextTx.insert(std::make_pair(&tx.vin[i].prevout, newit));
     }
+    for (const CTxOut& out : tx.vout) {
+        if (const auto slot{drivechain::ParseEscrowScript(out.scriptPubKey)}) m_escrow_txs[*slot].insert(tx.GetHash());
+    }
+    for (const drivechain::BmmRequest& request : drivechain::GetBmmRequests(tx)) {
+        // The mempool admits one request per sidechain; should a second slip in, the first stays indexed.
+        m_bmm_requests.emplace(request.slot, tx.GetHash());
+    }
     // Don't bother worrying about child transactions of this one.
     // Normal case of a new transaction arriving is that there can't be any
     // children, because such children would be orphans.
@@ -283,6 +290,19 @@ void CTxMemPool::removeUnchecked(txiter it, MemPoolRemovalReason reason)
 
     for (const CTxIn& txin : it->GetTx().vin)
         mapNextTx.erase(txin.prevout);
+    for (const CTxOut& out : it->GetTx().vout) {
+        if (const auto slot{drivechain::ParseEscrowScript(out.scriptPubKey)}) {
+            if (const auto txs{m_escrow_txs.find(*slot)}; txs != m_escrow_txs.end()) {
+                txs->second.erase(it->GetTx().GetHash());
+                if (txs->second.empty()) m_escrow_txs.erase(txs);
+            }
+        }
+    }
+    for (const drivechain::BmmRequest& request : drivechain::GetBmmRequests(it->GetTx())) {
+        if (const auto bmm{m_bmm_requests.find(request.slot)}; bmm != m_bmm_requests.end() && bmm->second == it->GetTx().GetHash()) {
+            m_bmm_requests.erase(bmm);
+        }
+    }
 
     RemoveUnbroadcastTx(it->GetTx().GetHash(), true /* add logging because unchecked */);
 
@@ -531,7 +551,8 @@ void CTxMemPool::check(const CCoinsViewCache& active_coins_tip, int64_t spendhei
         TxValidationState dummy_state; // Not used. CheckTxInputs() should always pass
         CAmount txfee = 0;
         assert(!tx.IsCoinBase());
-        assert(Consensus::CheckTxInputs(tx, dummy_state, mempoolDuplicate, spendheight, txfee));
+        // The maturity of coinbase outputs was checked, with the maturity of this chain, when the transaction was accepted.
+        assert(Consensus::CheckTxInputs(tx, dummy_state, mempoolDuplicate, spendheight, txfee, /*coinbase_maturity=*/0));
         for (const auto& input: tx.vin) mempoolDuplicate.SpendCoin(input.prevout);
         AddCoins(mempoolDuplicate, tx, std::numeric_limits<int>::max());
     }

@@ -1,26 +1,24 @@
 {
   "chain": "signet",
   "test_chain": true,
-  "genesis": "f61eee3b63a380a477a063af32b2bbc97c9ff9f01f2c4225e973988108000000",
+  "genesis": "734036081fcda67929e8ce105ec996101de999ee3d88e7e9bb40f29fca010000",
   "subsidy_halving_interval": 210000,
   "signet": {
-    "challenge": "512103ad5e0edad18cb1f0fc0d28a3d4f1f3e445640337489abb10404f2d1e086be430210359ef5021964fe22d6f8e05b2463c9540ce96883fe3b278760f048f5189f2e6c452ae"
+    "challenge": "5121022eb69a435e256daf541a170b29fdedbd5ef5f6efbd66f67cfec24402a2b1f35551ae"
   },
   "pow": {
     "limit": "00000377ae000000000000000000000000000000000000000000000000000000",
-    "target_spacing": 600,
+    "target_spacing": 60,
     "difficulty_retarget_interval": 2016,
     "mindiff_blocks": "no"
   },
   "net": {
-    "default_port": 38333,
-    "magic": "0a03cf40",
+    "default_port": 39555,
+    "magic": "6d64194b",
     "dns_seeds": [
-      "seed.signet.bitcoin.sprovoost.nl.",
-      "seed.signet.achownodes.xyz."
     ]
   },
   "addresses": {
-    "bech32_hrp": "tb"
+    "bech32_hrp": "tchn"
   }
 }

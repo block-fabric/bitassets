@@ -16,7 +16,7 @@ try:
 except ImportError:
     pass
 
-from test_framework.address import ADDRESS_BCRT1_UNSPENDABLE
+from test_framework.address import ADDRESS_RCHN1_UNSPENDABLE
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     assert_equal,
@@ -114,7 +114,7 @@ class ValidationTracepointTest(BitcoinTestFramework):
         generatetoaddress_duration = dict()
         for _ in range(BLOCKS_EXPECTED):
             start = time.time()
-            hash = self.generatetoaddress(self.nodes[0], 1, ADDRESS_BCRT1_UNSPENDABLE)[0]
+            hash = self.generatetoaddress(self.nodes[0], 1, ADDRESS_RCHN1_UNSPENDABLE)[0]
             generatetoaddress_duration[hash] = (time.time() - start) * 1e9  # in nanoseconds
             expected_blocks[hash] = self.nodes[0].getblock(hash, 2)
 

@@ -17,6 +17,7 @@
 
 #include <string>
 #include <variant>
+#include <optional>
 #include <vector>
 
 #include <QClipboard>
@@ -122,11 +123,17 @@ void SignVerifyMessageDialog::on_signMessageButton_SM_clicked()
         ui->statusLabel_SM->setText(tr("The entered address is invalid.") + QString(" ") + tr("Please check the address and try again."));
         return;
     }
-    const PKHash* pkhash = std::get_if<PKHash>(&destination);
+    // The key of a P2WPKH address is looked up by the same hash as that of a P2PKH address.
+    std::optional<PKHash> pkhash;
+    if (const PKHash* legacy{std::get_if<PKHash>(&destination)}) {
+        pkhash = *legacy;
+    } else if (const WitnessV0KeyHash* witness{std::get_if<WitnessV0KeyHash>(&destination)}) {
+        pkhash = PKHash{uint160{*witness}};
+    }
     if (!pkhash) {
         ui->addressIn_SM->setValid(false);
         ui->statusLabel_SM->setStyleSheet("QLabel { color: red; }");
-        ui->statusLabel_SM->setText(tr("The entered address does not refer to a legacy (P2PKH) key. Message signing for SegWit and other non-P2PKH address types is not supported in this version of %1. Please check the address and try again.").arg(CLIENT_NAME));
+        ui->statusLabel_SM->setText(tr("The entered address does not refer to a single key. Messages can be signed with P2PKH and P2WPKH addresses. Please check the address and try again."));
         return;
     }
 
@@ -223,7 +230,7 @@ void SignVerifyMessageDialog::on_verifyMessageButton_VM_clicked()
         return;
     case MessageVerificationResult::ERR_ADDRESS_NO_KEY:
         ui->addressIn_VM->setValid(false);
-        ui->statusLabel_VM->setText(tr("The entered address does not refer to a legacy (P2PKH) key. Message signing for SegWit and other non-P2PKH address types is not supported in this version of %1. Please check the address and try again.").arg(CLIENT_NAME));
+        ui->statusLabel_VM->setText(tr("The entered address does not refer to a single key. Messages can be signed with P2PKH and P2WPKH addresses. Please check the address and try again."));
         return;
     case MessageVerificationResult::ERR_MALFORMED_SIGNATURE:
         ui->signatureIn_VM->setValid(false);

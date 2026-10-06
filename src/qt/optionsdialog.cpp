@@ -12,6 +12,7 @@
 #include <qt/guiconstants.h>
 #include <qt/guiutil.h>
 #include <qt/optionsmodel.h>
+#include <qt/theme.h>
 
 #include <common/system.h>
 #include <interfaces/node.h>
@@ -22,6 +23,12 @@
 
 #include <chrono>
 
+#include <QComboBox>
+#include <QCheckBox>
+#include <QFontDatabase>
+#include <QSpinBox>
+#include <QHBoxLayout>
+#include <QLabel>
 #include <QApplication>
 #include <QDataWidgetMapper>
 #include <QDir>
@@ -176,6 +183,47 @@ OptionsDialog::OptionsDialog(QWidget* parent, bool enableWallet)
     }
     ui->unit->setModel(new BitcoinUnits(this));
 
+    /* Theme, which is applied as soon as the dialog is accepted. */
+    auto* theme_row{new QHBoxLayout};
+    auto* theme_label{new QLabel(tr("&Colours:"), this)};
+    m_theme = new QComboBox(this);
+    m_theme->setObjectName("theme");
+    m_theme->setToolTip(tr("Colours of the windows. Any colours go with any font here; the sidebar has ready-made combinations."));
+    for (const auto& theme : Theme::Available()) m_theme->addItem(theme.name, theme.id);
+    m_theme->setCurrentIndex(std::max(0, m_theme->findData(Theme::Saved())));
+    theme_label->setBuddy(m_theme);
+    theme_row->addWidget(theme_label);
+    theme_row->addWidget(m_theme, 1);
+    ui->verticalLayout_Display->insertLayout(1, theme_row);
+
+    /* Font of the whole interface. */
+    auto* font_row{new QHBoxLayout};
+    auto* font_label{new QLabel(tr("&Font:"), this)};
+    m_font_family = new QComboBox(this);
+    m_font_family->setObjectName("fontFamily");
+    m_font_family->addItem(tr("(as on the desktop)"), QString{});
+    for (const QString& family : QFontDatabase::families()) m_font_family->addItem(family, family);
+    m_font_family->setCurrentIndex(std::max(0, m_font_family->findData(Theme::SavedFontFamily())));
+    font_label->setBuddy(m_font_family);
+    m_font_size = new QSpinBox(this);
+    m_font_size->setObjectName("fontSize");
+    m_font_size->setRange(Theme::MIN_FONT_SIZE_ADJUSTMENT, Theme::MAX_FONT_SIZE_ADJUSTMENT);
+    m_font_size->setPrefix(tr("size "));
+    m_font_size->setSuffix(tr(" pt"));
+    m_font_size->setToolTip(tr("How many points larger, or smaller if negative, than on the desktop."));
+    m_font_size->setValue(Theme::SavedFontSizeAdjustment());
+    font_row->addWidget(font_label);
+    font_row->addWidget(m_font_family, 1);
+    font_row->addWidget(m_font_size);
+    ui->verticalLayout_Display->insertLayout(2, font_row);
+
+    /* Frame of the main window. */
+    m_themed_frame = new QCheckBox(tr("Frame the main &window in the colours of the theme"), this);
+    m_themed_frame->setObjectName("themedFrame");
+    m_themed_frame->setToolTip(tr("Draw the title bar and the border of the main window in the colours of the theme, with the menus in the title bar, in place of the frame of the desktop. Has no effect with the colours of the desktop."));
+    m_themed_frame->setChecked(Theme::SavedFrame());
+    ui->verticalLayout_Display->insertWidget(3, m_themed_frame);
+
     /* Widget-to-option mapper */
     mapper = new QDataWidgetMapper(this);
     mapper->setSubmitPolicy(QDataWidgetMapper::ManualSubmit);
@@ -270,6 +318,7 @@ void OptionsDialog::setCurrentTab(OptionsDialog::Tab tab)
     QWidget *tab_widget = nullptr;
     if (tab == OptionsDialog::Tab::TAB_NETWORK) tab_widget = ui->tabNetwork;
     if (tab == OptionsDialog::Tab::TAB_MAIN) tab_widget = ui->tabMain;
+    if (tab == OptionsDialog::Tab::TAB_DISPLAY) tab_widget = ui->tabDisplay;
     if (tab_widget && ui->tabWidget->currentWidget() != tab_widget) {
         ui->tabWidget->setCurrentWidget(tab_widget);
     }
@@ -381,6 +430,11 @@ void OptionsDialog::on_okButton_clicked()
     model->setData(model->index(OptionsModel::FontForMoney, 0), ui->moneyFont->itemData(ui->moneyFont->currentIndex()));
 
     mapper->submit();
+    if (m_theme->currentData().toString() != Theme::Saved()) Theme::Save(m_theme->currentData().toString());
+    if (m_font_family->currentData().toString() != Theme::SavedFontFamily() || m_font_size->value() != Theme::SavedFontSizeAdjustment()) {
+        Theme::SaveFont(m_font_family->currentData().toString(), m_font_size->value());
+    }
+    if (m_themed_frame->isChecked() != Theme::SavedFrame()) Theme::SaveFrame(m_themed_frame->isChecked());
     accept();
     updateDefaultProxyNets();
 }

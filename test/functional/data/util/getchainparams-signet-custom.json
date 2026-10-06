@@ -1,24 +1,24 @@
 {
   "chain": "signet",
   "test_chain": true,
-  "genesis": "f61eee3b63a380a477a063af32b2bbc97c9ff9f01f2c4225e973988108000000",
+  "genesis": "734036081fcda67929e8ce105ec996101de999ee3d88e7e9bb40f29fca010000",
   "subsidy_halving_interval": 210000,
   "signet": {
     "challenge": "512102f7561d208dd9ae99bf497273e16f389bdbd6c4742ddb8e6b216e64fa2928ad8f51ae"
   },
   "pow": {
     "limit": "00000377ae000000000000000000000000000000000000000000000000000000",
-    "target_spacing": 600,
+    "target_spacing": 60,
     "difficulty_retarget_interval": 2016,
     "mindiff_blocks": "no"
   },
   "net": {
-    "default_port": 38333,
+    "default_port": 39555,
     "magic": "a5df2dcb",
     "dns_seeds": [
     ]
   },
   "addresses": {
-    "bech32_hrp": "tb"
+    "bech32_hrp": "tchn"
   }
 }

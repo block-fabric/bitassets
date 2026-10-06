@@ -11,6 +11,7 @@
 #include <consensus/amount.h>
 #include <consensus/consensus.h>
 #include <consensus/merkle.h>
+#include <drivechain/miner.h>
 #include <consensus/params.h>
 #include <consensus/tx_verify.h>
 #include <consensus/validation.h>
@@ -114,7 +115,15 @@ BlockAssembler::BlockAssembler(Chainstate& chainstate,
           if (auto result{CheckMiningOptions(options, /*use_argnames=*/false)}; !result) {
               throw std::runtime_error(util::ErrorString(result).original);
           }
-          return FlattenMiningOptions(std::move(options));
+          // Unless told otherwise, blocks are as large as the chain allows.
+          const bool default_weight{!options.block_max_weight};
+          BlockCreateOptions flattened{FlattenMiningOptions(std::move(options))};
+          // Transactions other than the coinbase have their own weight limit on
+          // top of the limit for the whole block.
+          const Consensus::Params& consensus{chainstate.m_chainman.GetConsensus()};
+          const uint64_t limit{std::min<uint64_t>(consensus.max_block_weight, uint64_t{consensus.max_block_tx_weight} + *flattened.block_reserved_weight)};
+          if (default_weight || *flattened.block_max_weight > limit) flattened.block_max_weight = limit;
+          return flattened;
       }()}
 {
 }
@@ -165,6 +174,29 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
         m_mempool->StopBlockBuilding();
     }
 
+    // Drivechain: the messages this node puts in the coinbase, and the
+    // withdrawal bundles that can be paid out. Withdrawals go last, so that
+    // they spend the escrow output as the deposits in the block leave it.
+    ChainstateManager& chainman{m_chainstate.m_chainman};
+    chainman.m_drivechain_miner.Prune(m_chainstate.m_scdb, pindexPrev->nHeight + 1);
+    const drivechain::BlockAdditions drivechain_additions{chainman.m_drivechain_miner.CreateBlockAdditions(
+        m_chainstate.m_scdb, chainparams.GetConsensus().drivechain, pindexPrev->GetBlockHash(),
+        std::vector<CTransactionRef>{pblock->vtx.begin() + 1, pblock->vtx.end()})};
+    // A template that is asked not to take transactions from the mempool gets none from here either.
+    for (size_t i{0}; m_mempool && i < drivechain_additions.withdrawals.size(); ++i) {
+        const CTransactionRef& withdrawal{drivechain_additions.withdrawals[i]};
+        // A withdrawal that does not fit waits for the next block.
+        if (nBlockWeight + GetTransactionWeight(*withdrawal) >= *Assert(m_options.block_max_weight)) continue;
+        if (nBlockSigOpsCost + WITNESS_SCALE_FACTOR * GetLegacySigOpCount(*withdrawal) >= MAX_BLOCK_SIGOPS_COST) continue;
+        pblock->vtx.push_back(withdrawal);
+        pblocktemplate->vTxFees.push_back(drivechain_additions.withdrawal_fees[i]);
+        pblocktemplate->vTxSigOpsCost.push_back(WITNESS_SCALE_FACTOR * GetLegacySigOpCount(*withdrawal));
+        nBlockWeight += GetTransactionWeight(*withdrawal);
+        nBlockSigOpsCost += pblocktemplate->vTxSigOpsCost.back();
+        nFees += drivechain_additions.withdrawal_fees[i];
+        ++nBlockTx;
+    }
+
     const auto time_1{SteadyClock::now()};
 
     m_last_block_num_txs = nBlockTx;
@@ -189,6 +221,10 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
     const CAmount block_reward{nFees + GetBlockSubsidy(nHeight, chainparams.GetConsensus())};
     coinbaseTx.vout[0].nValue = block_reward;
     coinbase_tx.block_reward_remaining = block_reward;
+    // Drivechain messages. Mining clients that build their own coinbase have to include them.
+    for (const CTxOut& message : drivechain_additions.coinbase_outputs) {
+        coinbaseTx.vout.push_back(message);
+    }
 
     // Start the coinbase scriptSig with the block height as required by BIP34.
     // Mining clients are expected to append extra data to this prefix, so
@@ -226,6 +262,7 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
         Assert(witness_index >= 0 && static_cast<size_t>(witness_index) < final_coinbase->vout.size());
         coinbase_tx.required_outputs.push_back(final_coinbase->vout[witness_index]);
     }
+    coinbase_tx.required_outputs.insert(coinbase_tx.required_outputs.end(), drivechain_additions.coinbase_outputs.begin(), drivechain_additions.coinbase_outputs.end());
 
     LogDebug(BCLog::MINING, "CreateNewBlock(): block weight: %u txs: %u fees: %ld sigops %d\n", GetBlockWeight(*pblock), nBlockTx, nFees, nBlockSigOpsCost);
 

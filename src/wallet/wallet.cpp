@@ -4,6 +4,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <wallet/wallet.h>
+#include <chainparams.h>
 
 #include <bitcoin-build-config.h> // IWYU pragma: keep
 
@@ -2284,10 +2285,25 @@ SigningResult CWallet::SignMessage(const std::string& message, const PKHash& pkh
 {
     SignatureData sigdata;
     CScript script_pub_key = GetScriptForDestination(pkhash);
+    // The key may also be the one of a P2WPKH address.
+    CScript witness_script_pub_key = GetScriptForDestination(WitnessV0KeyHash{uint160{pkhash}});
+    for (const auto& spk_man_pair : m_spk_managers) {
+        if (spk_man_pair.second->CanProvide(script_pub_key, sigdata) || spk_man_pair.second->CanProvide(witness_script_pub_key, sigdata)) {
+            LOCK(cs_wallet);  // DescriptorScriptPubKeyMan calls IsLocked which can lock cs_wallet in a deadlocking order
+            return spk_man_pair.second->SignMessage(message, pkhash, str_sig);
+        }
+    }
+    return SigningResult::PRIVATE_KEY_NOT_AVAILABLE;
+}
+
+SigningResult CWallet::SignMessage(const std::string& message, const WitnessV1Taproot& output, std::string& str_sig) const
+{
+    SignatureData sigdata;
+    CScript script_pub_key = GetScriptForDestination(output);
     for (const auto& spk_man_pair : m_spk_managers) {
         if (spk_man_pair.second->CanProvide(script_pub_key, sigdata)) {
             LOCK(cs_wallet);  // DescriptorScriptPubKeyMan calls IsLocked which can lock cs_wallet in a deadlocking order
-            return spk_man_pair.second->SignMessage(message, pkhash, str_sig);
+            return spk_man_pair.second->SignMessage(message, output, str_sig);
         }
     }
     return SigningResult::PRIVATE_KEY_NOT_AVAILABLE;
@@ -2384,7 +2400,10 @@ void CWallet::CommitTransaction(
 
     // Notify that old coins are spent
     for (const CTxIn& txin : tx->vin) {
-        CWalletTx &coin = mapWallet.at(txin.prevout.hash);
+        // Inputs can come from outside the wallet, for example the escrow output a sidechain deposit spends.
+        const auto it{mapWallet.find(txin.prevout.hash)};
+        if (it == mapWallet.end()) continue;
+        CWalletTx& coin{it->second};
         coin.MarkDirty();
         NotifyTransactionChanged(coin.GetHash(), CT_UPDATED);
     }
@@ -3398,7 +3417,7 @@ int CWallet::GetTxBlocksToMaturity(const CWalletTx& wtx) const
     }
     int chain_depth = GetTxDepthInMainChain(wtx);
     assert(chain_depth >= 0); // coinbase tx should not be conflicted
-    return std::max(0, (COINBASE_MATURITY+1) - chain_depth);
+    return std::max(0, (Params().GetConsensus().coinbase_maturity + 1) - chain_depth);
 }
 
 bool CWallet::IsTxImmatureCoinBase(const CWalletTx& wtx) const

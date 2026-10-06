@@ -32,6 +32,17 @@ class SignMessagesWithAddressTest(BitcoinTestFramework):
         assert not self.nodes[0].verifymessage(other_address, signature, message)
         assert not self.nodes[0].verifymessage(address, other_signature, message)
 
+        self.log.info('test signing with P2WPKH and P2TR addresses')
+        for address_type in ['bech32', 'bech32m']:
+            typed_address = self.nodes[0].getnewaddress(address_type=address_type)
+            typed_signature = self.nodes[0].signmessage(typed_address, message)
+            assert self.nodes[0].verifymessage(typed_address, typed_signature, message)
+            assert not self.nodes[0].verifymessage(typed_address, typed_signature, message + '!')
+            assert not self.nodes[0].verifymessage(self.nodes[0].getnewaddress(address_type=address_type), typed_signature, message)
+            assert not self.nodes[0].verifymessage(typed_address, signature, message)
+        # An address of scripts stands for no single key
+        assert_raises_rpc_error(-3, "Address does not refer to key", self.nodes[0].signmessage, self.nodes[0].getnewaddress(address_type='p2sh-segwit'), message)
+
         self.log.info('test parameter validity and error codes')
         # signmessage has two required parameters
         for num_params in [0, 1, 3, 4, 5]:

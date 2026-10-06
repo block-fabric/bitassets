@@ -117,8 +117,30 @@ add_library(bitcoinqt STATIC EXCLUDE_FROM_ALL
   qvalidatedlineedit.h
   qvaluecombobox.cpp
   qvaluecombobox.h
+  blockexplorer.cpp
+  blockexplorer.h
+  chainactivity.cpp
+  chainactivity.h
+  cryptotoolsdialog.cpp
+  cryptotoolsdialog.h
+  miningdialog.cpp
+  miningdialog.h
+  multisigdialog.cpp
+  multisigdialog.h
+  noderpc.cpp
+  noderpc.h
+  proofoffundsdialog.cpp
+  proofoffundsdialog.h
   rpcconsole.cpp
   rpcconsole.h
+  sidechainnodes.cpp
+  sidechainnodes.h
+  theme.cpp
+  theme.h
+  themedframe.cpp
+  themedframe.h
+  timestampdialog.cpp
+  timestampdialog.h
   splashscreen.cpp
   splashscreen.h
   trafficgraphwidget.cpp
@@ -193,6 +215,8 @@ if(ENABLE_WALLET)
       sendcoinsdialog.h
       sendcoinsentry.cpp
       sendcoinsentry.h
+      sidechainpage.cpp
+      sidechainpage.h
       signverifymessagedialog.cpp
       signverifymessagedialog.h
       transactiondesc.cpp

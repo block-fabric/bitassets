@@ -14,6 +14,7 @@ class ClientModel;
 class OverviewPage;
 class PlatformStyle;
 class ReceiveCoinsDialog;
+class SidechainPage;
 class SendCoinsDialog;
 class SendCoinsRecipient;
 class TransactionView;
@@ -61,6 +62,7 @@ private:
     OverviewPage *overviewPage;
     QWidget *transactionsPage;
     ReceiveCoinsDialog *receiveCoinsPage;
+    SidechainPage* sidechainPage;
     SendCoinsDialog *sendCoinsPage;
     AddressBookPage *usedSendingAddressesPage;
     AddressBookPage *usedReceivingAddressesPage;
@@ -77,6 +79,8 @@ public Q_SLOTS:
     void gotoHistoryPage();
     /** Switch to receive coins page */
     void gotoReceiveCoinsPage();
+    /** Switch to sidechain page */
+    void gotoSidechainPage();
     /** Switch to send coins page */
     void gotoSendCoinsPage(QString addr = "");
 
@@ -122,6 +126,8 @@ Q_SIGNALS:
     void incomingTransaction(const QString& date, BitcoinUnit unit, const CAmount& amount, const QString& type, const QString& address, const QString& label, const QString& walletName);
     /** Notify that the out of sync warning icon has been pressed */
     void outOfSyncWarningClicked();
+    /** The user asked for the details of a block or of a transaction of the chain. */
+    void explorerRequested(const QString& hash);
 };
 
 #endif // BITCOIN_QT_WALLETVIEW_H

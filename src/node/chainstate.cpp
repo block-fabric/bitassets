@@ -123,6 +123,9 @@ static ChainstateLoadResult CompleteChainstateInitialization(
                 return {ChainstateLoadStatus::FAILURE, _("Error initializing block database")};
             }
             assert(chainstate->m_chain.Tip() != nullptr);
+            if (!chainstate->LoadDrivechainState()) {
+                return {ChainstateLoadStatus::FAILURE, _("Error loading the sidechain database. You will need to rebuild the databases using -reindex.")};
+            }
         }
     }
 

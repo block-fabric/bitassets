@@ -31,6 +31,8 @@ add_library(bitcoinkernel
   ../flatfile.cpp
   ../hash.cpp
   ../logging.cpp
+  ../drivechain/db.cpp
+  ../drivechain/miner.cpp
   ../node/blockstorage.cpp
   ../node/chainstate.cpp
   ../node/utxo_snapshot.cpp
@@ -41,6 +43,8 @@ add_library(bitcoinkernel
   ../policy/rbf.cpp
   ../policy/settings.cpp
   ../policy/truc_policy.cpp
+  ../drivechain/scdb.cpp
+  ../drivechain/sidechain.cpp
   ../pow.cpp
   ../primitives/block.cpp
   ../primitives/transaction.cpp

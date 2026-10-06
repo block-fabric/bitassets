@@ -43,6 +43,7 @@ class SignalInterrupt;
 }
 
 namespace node {
+class CpuMiner;
 class KernelNotifications;
 class Warnings;
 
@@ -83,6 +84,8 @@ struct NodeContext {
     //! Reference to chain client that should used to load or create wallets
     //! opened by the gui.
     std::unique_ptr<interfaces::Mining> mining;
+    //! Built-in miner. Declared after `mining` and `chainman`, which it uses.
+    std::unique_ptr<CpuMiner> cpu_miner;
     //! Mining options used to create block templates. This value member is an
     //! exception to the dependency guidance above because BlockCreateOptions is
     //! a minimal dependency. It could be moved to the BlockTemplateCache

@@ -4,6 +4,7 @@
 
 #include <addresstype.h>
 #include <chain.h>
+#include <chainparams.h>
 #include <coins.h>
 #include <consensus/amount.h>
 #include <consensus/consensus.h>
@@ -58,6 +59,16 @@ using node::BlockCreateOptions;
 
 namespace miner_tests {
 struct MinerTestingSetup : public TestingSetup {
+    // Chains: upstream runs these tests on mainnet using the hardcoded BLOCKINFO nonces, which
+    // were mined on top of Bitcoin's genesis block, and spends the first coinbases after 110
+    // blocks. Chains mainnet has a different genesis block and a coinbase maturity of 360, so
+    // that would need ~370 freshly mined difficulty-1 blocks (and again whenever the genesis
+    // block changes). Run on regtest instead, which keeps the 100 block maturity and lets the
+    // nonces be found at runtime.
+    // TestBasicMining also expects relative lock times (BIP68) not to be enforced by consensus
+    // yet at the heights it uses, as on Bitcoin mainnet. CSV is active from height 1 on every
+    // Chains network, so push its activation back on regtest to keep that part meaningful.
+    MinerTestingSetup() : TestingSetup{ChainType::REGTEST, {.extra_args = {"-testactivationheight=csv@432"}}} {}
     void TestPackageSelection(const CScript& scriptPubKey, const std::vector<CTransactionRef>& txFirst) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     void TestBasicMining(const CScript& scriptPubKey, const std::vector<CTransactionRef>& txFirst, int baseheight) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     void TestPrioritisedMining(const CScript& scriptPubKey, const std::vector<CTransactionRef>& txFirst) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
@@ -147,8 +158,18 @@ void MinerTestingSetup::TestPackageSelection(const CScript& scriptPubKey, const 
     CBlock block{block_template->getBlock()};
     BOOST_REQUIRE_EQUAL(block.vtx.size(), 1U);
 
+    // Regtest allows minimum difficulty blocks, in which case waitNext() treats a tip that is
+    // more than 20 minutes old as a reason to hand out a new template. For the checks that
+    // expect no new template, hold the clock at the tip so that only the fee threshold decides,
+    // as on a network without that rule. (Only for zero timeouts: waitNext() cannot time out
+    // while the clock is frozen.)
+    const auto wait_next_at_tip_time{[&](const std::unique_ptr<BlockTemplate>& tmpl) {
+        FakeNodeClock clock{std::chrono::seconds{m_node.chainman->ActiveChain().Tip()->GetBlockTime()}};
+        return tmpl->waitNext({.timeout = MillisecondsDouble{0}, .fee_threshold = 1});
+    }};
+
     // waitNext() on an empty mempool should return nullptr because there is no better template
-    auto should_be_nullptr = block_template->waitNext({.timeout = MillisecondsDouble{0}, .fee_threshold = 1});
+    auto should_be_nullptr = wait_next_at_tip_time(block_template);
     BOOST_REQUIRE(should_be_nullptr == nullptr);
 
     // Unless fee_threshold is 0
@@ -252,7 +273,7 @@ void MinerTestingSetup::TestPackageSelection(const CScript& scriptPubKey, const 
     TryAddToMempool(tx_mempool, entry.Fee(feeToUse).FromTx(tx));
 
     // waitNext() should return nullptr because there is no better template
-    should_be_nullptr = block_template->waitNext({.timeout = MillisecondsDouble{0}, .fee_threshold = 1});
+    should_be_nullptr = wait_next_at_tip_time(block_template);
     BOOST_REQUIRE(should_be_nullptr == nullptr);
 
     block = block_template->getBlock();
@@ -565,24 +586,30 @@ void MinerTestingSetup::TestBasicMining(const CScript& scriptPubKey, const std::
 
         // subsidy changing
         int nHeight = m_node.chainman->ActiveChain().Height();
-        // Create an actual 209999-long block chain (without valid blocks).
-        while (m_node.chainman->ActiveChain().Tip()->nHeight < 209999) {
+        // Create a block chain reaching one block before the first halving (without valid blocks).
+        const int halving_height{m_node.chainman->GetConsensus().nSubsidyHalvingInterval};
+        BOOST_REQUIRE(nHeight < halving_height - 1);
+        while (m_node.chainman->ActiveChain().Tip()->nHeight < halving_height - 1) {
             CBlockIndex* prev = m_node.chainman->ActiveChain().Tip();
             CBlockIndex* next = new CBlockIndex();
             next->phashBlock = new uint256(m_rng.rand256());
             m_node.chainman->ActiveChainstate().CoinsTip().SetBestBlock(next->GetBlockHash());
+            // Chains: the sidechain database tracks the tip too and must follow the dummy blocks.
+            m_node.chainman->ActiveChainstate().m_scdb.SetBlockHash(next->GetBlockHash());
             next->pprev = prev;
             next->nHeight = prev->nHeight + 1;
             next->BuildSkip();
             m_node.chainman->ActiveChain().SetTip(*next);
         }
         BOOST_REQUIRE(mining->createNewBlock(options, /*cooldown=*/false));
-        // Extend to a 210000-long block chain.
-        while (m_node.chainman->ActiveChain().Tip()->nHeight < 210000) {
+        // Extend the block chain to the halving height.
+        while (m_node.chainman->ActiveChain().Tip()->nHeight < halving_height) {
             CBlockIndex* prev = m_node.chainman->ActiveChain().Tip();
             CBlockIndex* next = new CBlockIndex();
             next->phashBlock = new uint256(m_rng.rand256());
             m_node.chainman->ActiveChainstate().CoinsTip().SetBestBlock(next->GetBlockHash());
+            // Chains: the sidechain database tracks the tip too and must follow the dummy blocks.
+            m_node.chainman->ActiveChainstate().m_scdb.SetBlockHash(next->GetBlockHash());
             next->pprev = prev;
             next->nHeight = prev->nHeight + 1;
             next->BuildSkip();
@@ -611,6 +638,7 @@ void MinerTestingSetup::TestBasicMining(const CScript& scriptPubKey, const std::
             CBlockIndex* del = m_node.chainman->ActiveChain().Tip();
             m_node.chainman->ActiveChain().SetTip(*Assert(del->pprev));
             m_node.chainman->ActiveChainstate().CoinsTip().SetBestBlock(del->pprev->GetBlockHash());
+            m_node.chainman->ActiveChainstate().m_scdb.SetBlockHash(del->pprev->GetBlockHash());
             delete del->phashBlock;
             delete del;
         }
@@ -905,13 +933,20 @@ BOOST_AUTO_TEST_CASE(CreateNewBlock_validity)
             txCoinbase.vin[0].scriptSig = CScript{} << (current_height + 1) << bi.extranonce;
             txCoinbase.vout.resize(1); // Ignore the (optional) segwit commitment added by CreateNewBlock (as the hardcoded nonces don't account for this)
             txCoinbase.vout[0].scriptPubKey = CScript();
+            // Segwit is active from genesis on regtest (as on Chains mainnet), so the template
+            // coinbase carries the witness reserved value. With the commitment output dropped
+            // above it has to go as well, or the block is rejected as "unexpected-witness".
+            txCoinbase.vin[0].scriptWitness.SetNull();
             block.vtx[0] = MakeTransactionRef(txCoinbase);
             if (txFirst.size() == 0)
                 baseheight = current_height;
             if (txFirst.size() < 4)
                 txFirst.push_back(block.vtx[0]);
             block.hashMerkleRoot = BlockMerkleRoot(block);
+            // The hardcoded nonces only solve the blocks on top of Bitcoin's mainnet genesis
+            // block; search from there for one that satisfies the (trivial) regtest target.
             block.nNonce = bi.nonce;
+            while (!CheckProofOfWork(block.GetHash(), block.nBits, Params().GetConsensus())) ++block.nNonce;
         }
         // Alternate calls between submitBlock and submitSolution via the
         // Mining interface.

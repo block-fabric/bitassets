@@ -179,10 +179,18 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_rebalance_caches, TestChain100Setup)
     BOOST_CHECK_EQUAL(c2.m_coinsdb_cache_size_bytes, size_t(max_cache * 0.95));
 }
 
-BOOST_FIXTURE_TEST_CASE(chainstatemanager_ibd_exit_after_loading_blocks, ChainTestingSetup)
+// Chains: no network has a minimum chain work built in yet, so a tip with "not enough work"
+// cannot be constructed with the defaults (MinimumChainWork() - 1 would underflow). The IBD
+// latch logic does not depend on the chain, so ask for a minimum chain work explicitly.
+struct NonZeroMinChainWorkSetup : ChainTestingSetup {
+    NonZeroMinChainWorkSetup() : ChainTestingSetup{ChainType::MAIN, {.extra_args = {"-minimumchainwork=0x1000"}}} {}
+};
+
+BOOST_FIXTURE_TEST_CASE(chainstatemanager_ibd_exit_after_loading_blocks, NonZeroMinChainWorkSetup)
 {
     CBlockIndex tip;
     ChainstateManager& chainman{*Assert(m_node.chainman)};
+    BOOST_REQUIRE(chainman.MinimumChainWork() > 0);
     auto apply{[&](bool cached_is_ibd, bool loading_blocks, bool tip_exists, bool enough_work, bool tip_recent) {
         LOCK(::cs_main);
         chainman.ResetChainstates();

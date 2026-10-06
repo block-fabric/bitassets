@@ -26,7 +26,10 @@
 #endif
 
 #include <memory>
+#include <utility>
+#include <vector>
 
+class ThemedFrame;
 class NetworkStyle;
 class Notificator;
 class OptionsModel;
@@ -36,6 +39,13 @@ class SendCoinsRecipient;
 class UnitDisplayStatusBarControl;
 class WalletController;
 class WalletFrame;
+class BlockExplorer;
+class CryptoToolsDialog;
+class MiningDialog;
+class SidechainNodesDialog;
+class MultisigDialog;
+class ProofOfFundsDialog;
+class TimestampDialog;
 class WalletModel;
 class HelpMessageDialog;
 class ModalOverlay;
@@ -133,9 +143,13 @@ private:
     QProgressDialog* progressDialog = nullptr;
 
     QMenuBar* appMenuBar = nullptr;
+    ThemedFrame* m_themed_frame{nullptr};
     QToolBar* appToolBar = nullptr;
+    //! Entries of the navigation bar that are not pages, with the icon each has; the icons follow the theme.
+    std::vector<std::pair<QAction*, const char*>> m_sidebar_icons;
     QAction* overviewAction = nullptr;
     QAction* historyAction = nullptr;
+    QAction* sidechainAction = nullptr;
     QAction* quitAction = nullptr;
     QAction* sendCoinsAction = nullptr;
     QAction* usedSendingAddressesAction = nullptr;
@@ -176,6 +190,13 @@ private:
     const std::unique_ptr<QMenu> trayIconMenu;
     Notificator* notificator = nullptr;
     RPCConsole* rpcConsole = nullptr;
+    MiningDialog* m_mining_dialog{nullptr};
+    BlockExplorer* m_block_explorer{nullptr};
+    CryptoToolsDialog* m_crypto_tools{nullptr};
+    TimestampDialog* m_timestamp_dialog{nullptr};
+    ProofOfFundsDialog* m_proof_dialog{nullptr};
+    MultisigDialog* m_multisig_dialog{nullptr};
+    SidechainNodesDialog* m_sidechain_nodes{nullptr};
     HelpMessageDialog* helpMessageDialog = nullptr;
     ModalOverlay* modalOverlay = nullptr;
 
@@ -286,6 +307,8 @@ public Q_SLOTS:
     void gotoHistoryPage();
     /** Switch to receive coins page */
     void gotoReceiveCoinsPage();
+    /** Switch to sidechain page */
+    void gotoSidechainPage();
     /** Switch to send coins page */
     void gotoSendCoinsPage(QString addr = "");
 

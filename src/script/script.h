@@ -201,6 +201,8 @@ enum opcodetype
     OP_NOP3 = OP_CHECKSEQUENCEVERIFY,
     OP_NOP4 = 0xb3,
     OP_NOP5 = 0xb4,
+    //! Marks the escrow output of a sidechain; a no-op for the script interpreter.
+    OP_DRIVECHAIN = OP_NOP5,
     OP_NOP6 = 0xb5,
     OP_NOP7 = 0xb6,
     OP_NOP8 = 0xb7,

@@ -91,7 +91,9 @@ CTxDestination DecodeDestination(const std::string& str, const CChainParams& par
     // Note this will be false if it is a valid Bech32 address for a different network
     bool is_bech32 = (ToLower(str.substr(0, params.Bech32HRP().size())) == params.Bech32HRP());
 
-    if (!is_bech32 && DecodeBase58Check(str, data, 21)) {
+    // Try Base58 first: the Base58 addresses of this network can begin with the
+    // letters of the Bech32 prefix.
+    if (DecodeBase58Check(str, data, 21)) {
         // base58-encoded Bitcoin addresses.
         // Public-key-hash-addresses have version 0 (or 111 testnet).
         // The data vector contains RIPEMD160(SHA256(pubkey)), where pubkey is the serialized public key.
@@ -108,16 +110,19 @@ CTxDestination DecodeDestination(const std::string& str, const CChainParams& par
             return ScriptHash(hash);
         }
 
-        // If the prefix of data matches either the script or pubkey prefix, the length must have been wrong
-        if ((data.size() >= script_prefix.size() &&
-                std::equal(script_prefix.begin(), script_prefix.end(), data.begin())) ||
-            (data.size() >= pubkey_prefix.size() &&
-                std::equal(pubkey_prefix.begin(), pubkey_prefix.end(), data.begin()))) {
-            error_str = "Invalid length for Base58 address (P2PKH or P2SH)";
-        } else {
-            error_str = "Invalid or unsupported Base58-encoded address.";
+        if (!is_bech32) {
+            // If the prefix of data matches either the script or pubkey prefix, the length must have been wrong
+            if ((data.size() >= script_prefix.size() &&
+                    std::equal(script_prefix.begin(), script_prefix.end(), data.begin())) ||
+                (data.size() >= pubkey_prefix.size() &&
+                    std::equal(pubkey_prefix.begin(), pubkey_prefix.end(), data.begin()))) {
+                error_str = "Invalid length for Base58 address (P2PKH or P2SH)";
+            } else {
+                error_str = "Invalid or unsupported Base58-encoded address.";
+            }
+            return CNoDestination();
         }
-        return CNoDestination();
+        // Not a Base58 address of this network; it may still be a Bech32 address.
     } else if (!is_bech32) {
         // Try Base58 decoding without the checksum, using a much larger max length
         if (!DecodeBase58(str, data, 100)) {

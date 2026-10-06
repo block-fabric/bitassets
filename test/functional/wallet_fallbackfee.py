@@ -47,9 +47,9 @@ class WalletFallbackFeeTest(BitcoinTestFramework):
         node.replace_in_config([("fallbackfee=", "#fallbackfee=")])
         self.restart_node(0)
 
-        # Sending a transaction with no -fallbackfee setting fails, since the
-        # default value is 0.
-        self.sending_fails(node)
+        # Sending a transaction with no -fallbackfee setting succeeds: unlike
+        # Bitcoin, Chains has a fallback fee by default.
+        self.sending_succeeds(node)
 
         # Sending a tx with explicitly disabled fallback fee fails.
         self.restart_node(0, extra_args=["-fallbackfee=0"])

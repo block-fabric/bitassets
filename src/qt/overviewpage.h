@@ -10,6 +10,7 @@
 #include <QWidget>
 #include <memory>
 
+class ChainActivity;
 class ClientModel;
 class TransactionFilterProxy;
 class TxViewDelegate;
@@ -44,6 +45,8 @@ public Q_SLOTS:
 Q_SIGNALS:
     void transactionClicked(const QModelIndex &index);
     void outOfSyncWarningClicked();
+    /** The user asked for the details of a block or of a transaction of the chain. */
+    void explorerRequested(const QString& hash);
 
 protected:
     void changeEvent(QEvent* e) override;
@@ -51,6 +54,7 @@ protected:
 private:
     Ui::OverviewPage *ui;
     ClientModel* clientModel{nullptr};
+    ChainActivity* m_chain_activity{nullptr};
     WalletModel* walletModel{nullptr};
     bool m_privacy{false};
 

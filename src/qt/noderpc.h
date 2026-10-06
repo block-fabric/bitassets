@@ -1,0 +1,41 @@
+// Copyright (c) 2026 The Chains developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
+#ifndef BITCOIN_QT_NODERPC_H
+#define BITCOIN_QT_NODERPC_H
+
+#include <univalue.h>
+
+#include <QString>
+
+#include <functional>
+#include <initializer_list>
+#include <optional>
+#include <string>
+
+class ClientModel;
+class QTableWidgetItem;
+
+namespace NodeRpc {
+/** Returns the name of the wallet the user is looking at, if there is one. */
+using WalletNameFn = std::function<std::optional<QString>()>;
+
+/**
+ * Run an RPC method of the node this GUI belongs to.
+ * @param[in]  wallet  name of the wallet to run a wallet method on
+ * @param[out] error   set when the call fails
+ */
+std::optional<UniValue> Call(ClientModel* client_model, const std::string& method, const UniValue& params, QString& error, const std::optional<QString>& wallet = std::nullopt);
+
+/** The parameters of a call. */
+UniValue Args(std::initializer_list<UniValue> values);
+/** Text of a string or number. */
+QString Text(const UniValue& value);
+/** A table cell that cannot be edited. */
+QTableWidgetItem* Item(const QString& text);
+/** Hash rate with a unit, like "12.3 MH/s". */
+QString HashRate(double hashes_per_second);
+} // namespace NodeRpc
+
+#endif // BITCOIN_QT_NODERPC_H

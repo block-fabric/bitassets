@@ -30,6 +30,7 @@ from test_framework.messages import (
 from test_framework.p2p import (
     P2PInterface,
 )
+from test_framework.test_framework import SkipTest
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     assert_approx,
@@ -59,6 +60,9 @@ COMPLETE_IDX = {'synced': True, 'best_block_height': FINAL_HEIGHT}
 
 
 class AssumeutxoTest(BitcoinTestFramework):
+
+    def skip_test_if_missing_module(self):
+        raise SkipTest("Chains refuses UTXO snapshots: they do not hold the drivechain state")
 
     def set_test_params(self):
         """Use the pregenerated, deterministic chain up to height 199."""
@@ -104,7 +108,7 @@ class AssumeutxoTest(BitcoinTestFramework):
         invalid_magics = [
             # magic, name, real
             [MAGIC_BYTES["mainnet"], "main", True],
-            [MAGIC_BYTES["testnet4"], "testnet4", True],
+            [MAGIC_BYTES["testnet"], "test", True],
             [MAGIC_BYTES["signet"], "signet", True],
             [0x00000000.to_bytes(4, 'big'), "", False],
             [0xffffffff.to_bytes(4, 'big'), "", False],

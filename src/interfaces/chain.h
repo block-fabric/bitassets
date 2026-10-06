@@ -190,6 +190,27 @@ public:
     //! Check if transaction is in mempool.
     virtual bool isInMempool(const Txid& txid) = 0;
 
+    //! The merged-mining request (BIP301 M8) in the mempool for a sidechain slot, if any: the sidechain
+    //! block it asks for, the mainchain block it is for, and the fee it pays.
+    struct BmmRequestInfo {
+        uint256 side_block_hash;
+        uint256 prev_main_block_hash;
+        CAmount fee{0};
+        Txid txid;
+    };
+    virtual std::optional<BmmRequestInfo> getMempoolBmmRequest(uint32_t slot) = 0;
+
+    //! The escrow of a sidechain as the deposits in the mempool leave it.
+    struct SidechainEscrow {
+        //! Whether the slot holds a sidechain.
+        bool active{false};
+        //! Whether the sidechain has an escrow output yet; the next deposit has to spend it.
+        bool has_output{false};
+        COutPoint outpoint;
+        CAmount amount{0};
+    };
+    virtual SidechainEscrow getSidechainEscrow(uint32_t slot) = 0;
+
     //! Check if transaction has descendants in mempool.
     virtual bool hasDescendantsInMempool(const Txid& txid) = 0;
 

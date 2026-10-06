@@ -8,6 +8,7 @@
 #include <attributes.h>
 #include <chain.h>
 #include <dbwrapper.h>
+#include <drivechain/db.h>
 #include <flatfile.h>
 #include <kernel/blockmanager_opts.h>
 #include <kernel/chainparams.h>
@@ -355,6 +356,9 @@ public:
     void AddUnlinkedBlock(CBlockIndex* block) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     std::unique_ptr<BlockTreeDB> m_block_tree_db GUARDED_BY(::cs_main);
+
+    //! Drivechain undo data, sidechain database snapshots and the escrow change index.
+    std::unique_ptr<drivechain::Database> m_drivechain_db GUARDED_BY(::cs_main);
 
     void WriteBlockIndexDB() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool LoadBlockIndexDB(const std::optional<uint256>& snapshot_blockhash)

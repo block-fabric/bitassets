@@ -6,6 +6,7 @@
 #include <qt/forms/ui_overviewpage.h>
 
 #include <qt/bitcoinunits.h>
+#include <qt/chainactivity.h>
 #include <qt/clientmodel.h>
 #include <qt/guiconstants.h>
 #include <qt/guiutil.h>
@@ -137,6 +138,13 @@ OverviewPage::OverviewPage(const PlatformStyle *platformStyle, QWidget *parent) 
 {
     ui->setupUi(this);
 
+    // What happens on the chain, below what happens in the wallet.
+    m_chain_activity = new ChainActivity(this);
+    // Room for the rows of its tables; the wallet part above keeps the rest.
+    m_chain_activity->setMinimumHeight(250);
+    ui->topLayout->addWidget(m_chain_activity);
+    connect(m_chain_activity, &ChainActivity::detailsRequested, this, &OverviewPage::explorerRequested);
+
     // use a SingleColorIcon for the "out of sync warning" icon
     QIcon icon = m_platform_style->SingleColorIcon(QStringLiteral(":/icons/warning"));
     ui->labelTransactionsStatus->setIcon(icon);
@@ -202,6 +210,7 @@ void OverviewPage::setBalance(const interfaces::WalletBalances& balances)
 void OverviewPage::setClientModel(ClientModel *model)
 {
     this->clientModel = model;
+    m_chain_activity->setClientModel(model);
     if (model) {
         // Show warning, for example if this is a prerelease version
         connect(model, &ClientModel::alertsChanged, this, &OverviewPage::updateAlerts);

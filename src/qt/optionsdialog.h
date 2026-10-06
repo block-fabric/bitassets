@@ -13,6 +13,9 @@ class OptionsModel;
 class QValidatedLineEdit;
 
 QT_BEGIN_NAMESPACE
+class QCheckBox;
+class QComboBox;
+class QSpinBox;
 class QDataWidgetMapper;
 QT_END_NAMESPACE
 
@@ -44,6 +47,7 @@ public:
     enum Tab {
         TAB_MAIN,
         TAB_NETWORK,
+        TAB_DISPLAY,
     };
 
     void setClientModel(ClientModel* client_model);
@@ -77,6 +81,10 @@ private:
     ClientModel* m_client_model{nullptr};
     OptionsModel* model{nullptr};
     QDataWidgetMapper* mapper{nullptr};
+    QComboBox* m_theme{nullptr};
+    QComboBox* m_font_family{nullptr};
+    QSpinBox* m_font_size{nullptr};
+    QCheckBox* m_themed_frame{nullptr};
 };
 
 #endif // BITCOIN_QT_OPTIONSDIALOG_H

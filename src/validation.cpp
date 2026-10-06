@@ -381,7 +381,7 @@ void Chainstate::MaybeUpdateMempoolForReorg(
                 const Coin& coin{CoinsTip().AccessCoin(txin.prevout)};
                 assert(!coin.IsSpent());
                 const auto mempool_spend_height{m_chain.Tip()->nHeight + 1};
-                if (coin.IsCoinBase() && mempool_spend_height - coin.nHeight < COINBASE_MATURITY) {
+                if (coin.IsCoinBase() && mempool_spend_height - coin.nHeight < m_chainman.GetConsensus().coinbase_maturity) {
                     return true;
                 }
             }
@@ -392,6 +392,8 @@ void Chainstate::MaybeUpdateMempoolForReorg(
 
     // We also need to remove any now-immature transactions
     m_mempool->removeForReorg(m_chain, filter_final_and_mature);
+    // And the ones the drivechain rules no longer allow on top of the new tip.
+    RemoveStaleDrivechainTxs();
     // Re-limit mempool size, in case we added any transactions
     LimitMempoolSize(*m_mempool, this->CoinsTip());
 }
@@ -663,6 +665,9 @@ private:
         PrecomputedTransactionData m_precomputed_txdata;
     };
 
+    // Check a transaction against the drivechain rules for sidechain escrow outputs.
+    bool DrivechainChecks(Workspace& ws) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_pool.cs);
+
     // Run the policy checks on a given transaction, excluding any script checks.
     // Looks up inputs, calculates feerate, considers replacement, evaluates
     // package limits, etc. As this function can be invoked for "free" by a peer,
@@ -776,6 +781,42 @@ private:
     }
 };
 
+bool MemPoolAccept::DrivechainChecks(Workspace& ws)
+{
+    AssertLockHeld(cs_main);
+    AssertLockHeld(m_pool.cs);
+    const CTransaction& tx{*ws.m_ptx};
+    const Consensus::DrivechainParams& params{m_active_chainstate.m_chainman.GetConsensus().drivechain};
+
+    // The sidechains whose escrow this transaction touches.
+    std::set<drivechain::SidechainId> slots;
+    for (const CTxOut& out : tx.vout) {
+        if (const auto slot{drivechain::ParseEscrowScript(out.scriptPubKey)}; slot && *slot < params.max_sidechains) slots.insert(*slot);
+    }
+    for (const CTxIn& in : tx.vin) {
+        const auto slot{drivechain::ParseEscrowScript(m_view.AccessCoin(in.prevout).out.scriptPubKey)};
+        if (!slot || *slot >= params.max_sidechains) continue;
+        slots.insert(*slot);
+        // A treasury output is spent with nothing: anything more would only let a third party pad a
+        // deposit or a withdrawal, whose fee is fixed, so that the original cannot replace it.
+        if (!in.scriptSig.empty() || !in.scriptWitness.IsNull()) {
+            return ws.m_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "dc-escrow-input-not-empty");
+        }
+    }
+    if (slots.empty()) return true;
+
+    // The escrow of those sidechains as the mempool leaves it, up to the transactions this one would replace.
+    drivechain::SidechainDB scdb{m_active_chainstate.GetMempoolSidechainDB(slots, &ws.m_conflicts)};
+    drivechain::SidechainDB::EscrowOutputs escrow_outputs{scdb.GetEscrowOutputs()};
+    drivechain::BlockUndo undo;
+    std::string reject_reason;
+    // A withdrawal is welcome once its bundle has the work score (BIP300 M6): any miner can then mine it.
+    if (!scdb.ConnectTx(tx, params, escrow_outputs, /*allow_withdrawal=*/true, undo, nullptr, reject_reason)) {
+        return ws.m_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, reject_reason);
+    }
+    return true;
+}
+
 bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
 {
     AssertLockHeld(cs_main);
@@ -839,6 +880,34 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
         }
     }
 
+    // Requests for blind merged mining: a block can serve one per sidechain,
+    // and only if it is built on the block the request names. A request for a
+    // sidechain that already has one in the mempool competes with it under the
+    // replacement rules.
+    {
+        const Consensus::DrivechainParams& dc_params{m_active_chainstate.m_chainman.GetConsensus().drivechain};
+        const uint256 tip_hash{m_active_chainstate.m_chain.Tip()->GetBlockHash()};
+        std::set<drivechain::SidechainId> requested;
+        for (const drivechain::BmmRequest& request : drivechain::GetBmmRequests(tx)) {
+            if (request.slot >= dc_params.max_sidechains) continue;
+            if (!m_active_chainstate.m_scdb.IsActive(request.slot)) {
+                return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "dc-bmm-inactive-sidechain");
+            }
+            if (request.prev_main_block_hash != tip_hash) {
+                return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "dc-bmm-prev-block");
+            }
+            if (!requested.insert(request.slot).second) {
+                return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "dc-bmm-multiple-requests");
+            }
+            if (const auto other{m_pool.m_bmm_requests.find(request.slot)}; other != m_pool.m_bmm_requests.end() && other->second != hash) {
+                if (!args.m_allow_replacement) {
+                    return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "bip125-replacement-disallowed");
+                }
+                ws.m_conflicts.insert(other->second);
+            }
+        }
+    }
+
     m_view.SetBackend(m_viewmempool);
 
     const CCoinsViewCache& coins_cache = m_active_chainstate.CoinsTip();
@@ -886,9 +955,13 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
     }
 
     // The mempool holds txs for the next block, so pass height+1 to CheckTxInputs
-    if (!Consensus::CheckTxInputs(tx, state, m_view, m_active_chainstate.m_chain.Height() + 1, ws.m_base_fees)) {
+    if (!Consensus::CheckTxInputs(tx, state, m_view, m_active_chainstate.m_chain.Height() + 1, ws.m_base_fees, m_active_chainstate.m_chainman.GetConsensus().coinbase_maturity)) {
         return false; // state filled in by CheckTxInputs
     }
+
+    // A transaction that creates or spends a sidechain escrow output has to be
+    // a deposit or withdrawal a block could contain, given those already in the mempool.
+    if (!DrivechainChecks(ws)) return false;
 
     if (m_pool.m_opts.require_standard) {
         state = ValidateInputsStandardness(tx, m_view);
@@ -1433,6 +1506,20 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptMultipleTransactionsInternal(con
     // These context-free package limits can be done before taking the mempool lock.
     PackageValidationState package_state;
     if (!IsWellFormedPackage(txns, package_state)) return PackageMempoolAcceptResult(package_state, {});
+
+    // The drivechain checks of the mempool (one BMM request per sidechain, deposits that chain on the
+    // treasury output) look at the mempool as it is: a package member would not see the others. Such
+    // transactions come one at a time, each paying its own way.
+    if (txns.size() > 1) {
+        for (const CTransactionRef& tx : txns) {
+            const bool drivechain_tx{drivechain::GetBmmRequest(*tx).has_value() ||
+                                     std::any_of(tx->vout.begin(), tx->vout.end(), [](const CTxOut& out) { return drivechain::ParseEscrowScript(out.scriptPubKey).has_value(); })};
+            if (drivechain_tx) {
+                package_state.Invalid(PackageValidationResult::PCKG_POLICY, "package-drivechain-tx");
+                return PackageMempoolAcceptResult(package_state, {});
+            }
+        }
+    }
 
     std::vector<Workspace> workspaces{};
     workspaces.reserve(txns.size());
@@ -2175,7 +2262,8 @@ int ApplyTxInUndo(Coin&& undo, CCoinsViewCache& view, const COutPoint& out)
 
 /** Undo the effects of this block (with given index) on the UTXO set represented by coins.
  *  When FAILED is returned, view is left in an indeterminate state. */
-DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIndex* pindex, CCoinsViewCache& view)
+DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIndex* pindex, CCoinsViewCache& view,
+                                             drivechain::SidechainDB* scdb)
 {
     AssertLockHeld(::cs_main);
     bool fClean = true;
@@ -2240,6 +2328,16 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
         }
     }
 
+    if (scdb && !scdb->GetBlockHash().IsNull()) {
+        drivechain::BlockUndo scdb_undo;
+        if (scdb->GetBlockHash() != pindex->GetBlockHash() ||
+            !m_blockman.m_drivechain_db->ReadBlockUndo(pindex->GetBlockHash(), scdb_undo)) {
+            LogError("DisconnectBlock(): failure reading drivechain undo data\n");
+            return DISCONNECT_FAILED;
+        }
+        scdb->DisconnectBlock(scdb_undo);
+    }
+
     // move best block pointer to prevout block
     view.SetBestBlock(pindex->pprev->GetBlockHash());
 
@@ -2292,7 +2390,7 @@ script_verify_flags GetBlockScriptFlags(const CBlockIndex& block_index, const Ch
  *  Validity checks that depend on the UTXO set are also done; ConnectBlock()
  *  can fail if those validity checks fail (among other reasons). */
 bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, CBlockIndex* pindex,
-                               CCoinsViewCache& view, bool fJustCheck)
+                               CCoinsViewCache& view, bool fJustCheck, drivechain::SidechainDB* scdb)
 {
     AssertLockHeld(cs_main);
     assert(pindex);
@@ -2530,7 +2628,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         {
             CAmount txfee = 0;
             TxValidationState tx_state;
-            if (!Consensus::CheckTxInputs(tx, tx_state, view, pindex->nHeight, txfee)) {
+            if (!Consensus::CheckTxInputs(tx, tx_state, view, pindex->nHeight, txfee, params.GetConsensus().coinbase_maturity)) {
                 // Any transaction validation failure in ConnectBlock is a block consensus failure
                 state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
                               tx_state.GetRejectReason(),
@@ -2616,6 +2714,32 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, strprintf("block-script-verify-flag-failed (%s)", ScriptErrorString(parallel_result->first)), parallel_result->second);
         }
     }
+
+    // Drivechain rules: sidechain proposals, deposits, withdrawals and blind merged mining.
+    drivechain::SidechainDB scdb_copy;
+    if (!scdb) {
+        scdb_copy = m_scdb;
+        scdb = &scdb_copy;
+    }
+    drivechain::BlockUndo scdb_undo;
+    std::vector<drivechain::Deposit> scdb_deposits;
+    if (state.IsValid()) {
+        // A sidechain database that has not seen a block yet is empty and fits any block.
+        if (scdb->GetBlockHash().IsNull()) scdb->SetBlockHash(hashPrevBlock);
+        if (scdb->GetBlockHash() != hashPrevBlock) {
+            // When only checking a block this is the caller's problem, not a sign of corrupt data.
+            if (fJustCheck) {
+                state.Error("the sidechain database does not match the block being checked");
+                return false;
+            }
+            return FatalError(m_chainman.GetNotifications(), state, _("The sidechain database does not match the block being connected."));
+        }
+        std::string reject_reason;
+        if (!scdb->ConnectBlock(block, pindex->nHeight, params.GetConsensus().drivechain, scdb_undo, &scdb_deposits, reject_reason)) {
+            state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, reject_reason);
+        }
+    }
+
     if (!state.IsValid()) {
         LogInfo("Block validation error: %s", state.ToString());
         return false;
@@ -2634,6 +2758,9 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
 
     if (!m_blockman.WriteBlockUndo(blockundo, state, *pindex)) {
         return false;
+    }
+    if (!m_blockman.m_drivechain_db->WriteBlock(block_hash, pindex->nHeight, scdb_undo, scdb_deposits)) {
+        return FatalError(m_chainman.GetNotifications(), state, _("Failed to write drivechain undo data."));
     }
 
     const auto time_5{SteadyClock::now()};
@@ -2810,6 +2937,10 @@ bool Chainstate::FlushStateToDisk(
                 }
                 // Flush the chainstate (which may refer to block index entries).
                 empty_cache ? CoinsTip().Flush() : CoinsTip().Sync();
+                // Keep a snapshot of the sidechain database that matches the coins on disk.
+                if (m_scdb.GetBlockHash() == CoinsTip().GetBestBlock()) {
+                    m_blockman.m_drivechain_db->WriteState(DrivechainStateName(), m_scdb);
+                }
                 m_last_flushed_block = m_blockman.LookupBlockIndex(CoinsTip().GetBestBlock());
                 full_flush_completed = true;
                 TRACEPOINT(utxocache, flush,
@@ -2953,11 +3084,14 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
     {
         CCoinsViewCache view(&CoinsTip());
         assert(view.GetBestBlock() == pindexDelete->GetBlockHash());
-        if (DisconnectBlock(block, pindexDelete, view) != DISCONNECT_OK) {
+        drivechain::SidechainDB scdb{m_scdb};
+        if (DisconnectBlock(block, pindexDelete, view, &scdb) != DISCONNECT_OK) {
             LogError("DisconnectTip(): DisconnectBlock %s failed\n", pindexDelete->GetBlockHash().ToString());
             return false;
         }
         view.Flush(/*reallocate_cache=*/false); // local CCoinsViewCache goes out of scope
+        m_scdb = std::move(scdb);
+        m_blockman.m_drivechain_db->EraseBlockDeposits(pindexDelete->GetBlockHash());
     }
     LogDebug(BCLog::BENCH, "- Disconnect block: %.2fms\n",
              Ticks<MillisecondsDouble>(SteadyClock::now() - time_start));
@@ -3041,7 +3175,8 @@ bool Chainstate::ConnectTip(
     {
         CoinsViewOverlay& view{*m_coins_views->m_connect_block_view};
         const auto reset_guard{view.StartFetching(*block_to_connect)};
-        bool rv = ConnectBlock(*block_to_connect, state, pindexNew, view);
+        drivechain::SidechainDB scdb{m_scdb};
+        bool rv = ConnectBlock(*block_to_connect, state, pindexNew, view, /*fJustCheck=*/false, &scdb);
         if (m_chainman.m_options.signals) {
             m_chainman.m_options.signals->BlockChecked(block_to_connect, state);
         }
@@ -3059,6 +3194,7 @@ bool Chainstate::ConnectTip(
                  Ticks<SecondsDouble>(m_chainman.time_connect_total),
                  Ticks<MillisecondsDouble>(m_chainman.time_connect_total) / m_chainman.num_blocks_total);
         view.Flush(/*reallocate_cache=*/false); // No need to reallocate since it only has capacity for 1 block
+        m_scdb = std::move(scdb);
     }
     const auto time_4{SteadyClock::now()};
     m_chainman.time_flush += time_4 - time_3;
@@ -3090,6 +3226,7 @@ bool Chainstate::ConnectTip(
         m_chainman.m_options.signals->MempoolTransactionsRemovedForBlock(block_to_connect, std::move(txs_removed_for_block), pindexNew->nHeight);
     }
     UpdateTip(pindexNew);
+    RemoveStaleDrivechainTxs();
 
     const auto time_6{SteadyClock::now()};
     m_chainman.time_post_connect += time_6 - time_5;
@@ -3952,7 +4089,7 @@ bool CheckBlock(const CBlock& block, BlockValidationState& state, const Consensu
     // checks that use witness data may be performed here.
 
     // Size limits
-    if (block.vtx.empty() || block.vtx.size() * WITNESS_SCALE_FACTOR > MAX_BLOCK_WEIGHT || ::GetSerializeSize(TX_NO_WITNESS(block)) * WITNESS_SCALE_FACTOR > MAX_BLOCK_WEIGHT)
+    if (block.vtx.empty() || block.vtx.size() * WITNESS_SCALE_FACTOR > consensusParams.max_block_weight || ::GetSerializeSize(TX_NO_WITNESS(block)) * WITNESS_SCALE_FACTOR > consensusParams.max_block_weight)
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blk-length", "size limits failed");
 
     // First transaction must be coinbase, the rest must not be
@@ -4184,8 +4321,17 @@ static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& stat
     // large by filling up the coinbase witness, which doesn't change
     // the block hash, so we couldn't mark the block as permanently
     // failed).
-    if (GetBlockWeight(block) > MAX_BLOCK_WEIGHT) {
+    const Consensus::Params& consensus_params{chainman.GetConsensus()};
+    if (GetBlockWeight(block) > consensus_params.max_block_weight) {
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blk-weight", strprintf("%s : weight limit failed", __func__));
+    }
+    // The part of the block set aside for the coinbase cannot be used by other transactions.
+    if (consensus_params.max_block_tx_weight < consensus_params.max_block_weight) {
+        int64_t tx_weight{0};
+        for (size_t i{1}; i < block.vtx.size(); ++i) tx_weight += GetTransactionWeight(*block.vtx[i]);
+        if (tx_weight > consensus_params.max_block_tx_weight) {
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blk-tx-weight", strprintf("%s : transaction weight limit failed", __func__));
+        }
     }
 
     return true;
@@ -4624,6 +4770,170 @@ CVerifyDB::~CVerifyDB()
     m_notifications.progress(bilingual_str{}, 100, false);
 }
 
+drivechain::SidechainDB Chainstate::GetMempoolSidechainDB(const std::set<drivechain::SidechainId>& slots, const std::set<Txid>* stop_before, std::set<Txid>* applied) const
+{
+    AssertLockHeld(::cs_main);
+    // Only the sidechains asked about: a copy of the whole database for every transaction that
+    // touches an escrow would cost as much as the database is large.
+    drivechain::SidechainDB scdb{m_scdb.Subset(slots)};
+    if (!m_mempool) return scdb;
+    AssertLockHeld(m_mempool->cs);
+
+    const Consensus::DrivechainParams& params{m_chainman.GetConsensus().drivechain};
+    drivechain::SidechainDB::EscrowOutputs escrow_outputs{scdb.GetEscrowOutputs()};
+    drivechain::BlockUndo undo;
+    std::string reject_reason;
+
+    for (const drivechain::SidechainId id : slots) {
+        while (true) {
+            const drivechain::Slot* slot{scdb.GetSlot(id)};
+            if (!slot) break;
+            CTransactionRef next;
+            if (slot->has_ctip) {
+                // The deposit or withdrawal that spends the escrow output.
+                if (const CTransaction* spender{m_mempool->GetConflictTx(slot->ctip.outpoint)}) next = m_mempool->get(spender->GetHash());
+            } else if (const auto txs{m_mempool->m_escrow_txs.find(id)}; txs != m_mempool->m_escrow_txs.end()) {
+                // No escrow output yet: the deposit that creates the first one.
+                for (const Txid& txid : txs->second) {
+                    const CTransactionRef candidate{m_mempool->get(txid)};
+                    if (!candidate) continue;
+                    // The first deposit spends no escrow output in the mempool; one that does comes
+                    // later in the chain, whatever its txid.
+                    if (std::any_of(candidate->vin.begin(), candidate->vin.end(), [&](const CTxIn& in) { return txs->second.contains(in.prevout.hash); })) continue;
+                    drivechain::SidechainDB probe{scdb};
+                    drivechain::SidechainDB::EscrowOutputs probe_outputs{escrow_outputs};
+                    drivechain::BlockUndo probe_undo;
+                    if (probe.ConnectTx(*candidate, params, probe_outputs, /*allow_withdrawal=*/true, probe_undo, nullptr, reject_reason)) {
+                        next = candidate;
+                        break;
+                    }
+                }
+            }
+            if (!next) break;
+            if (stop_before && stop_before->contains(next->GetHash())) break;
+            if (!scdb.ConnectTx(*next, params, escrow_outputs, /*allow_withdrawal=*/true, undo, nullptr, reject_reason)) break;
+            if (applied) applied->insert(next->GetHash());
+        }
+    }
+    return scdb;
+}
+
+void Chainstate::RemoveStaleDrivechainTxs()
+{
+    AssertLockHeld(::cs_main);
+    if (!m_mempool) return;
+    AssertLockHeld(m_mempool->cs);
+    if (m_mempool->m_bmm_requests.empty() && m_mempool->m_escrow_txs.empty()) return;
+    const CBlockIndex* tip{m_chain.Tip()};
+    if (!tip) return;
+
+    std::vector<CTransactionRef> stale;
+
+    // Requests for blind merged mining are bound to the block they were made for.
+    for (const auto& [id, txid] : m_mempool->m_bmm_requests) {
+        const CTransactionRef tx{m_mempool->get(txid)};
+        if (!tx) continue;
+        for (const drivechain::BmmRequest& request : drivechain::GetBmmRequests(*tx)) {
+            if (request.prev_main_block_hash != tip->GetBlockHash()) {
+                stale.push_back(tx);
+                break;
+            }
+        }
+    }
+
+    // Deposits and withdrawals have to form a chain that starts at the escrow output of their sidechain.
+    const uint32_t max_sidechains{m_chainman.GetConsensus().drivechain.max_sidechains};
+    std::set<drivechain::SidechainId> slots;
+    for (const auto& [id, txids] : m_mempool->m_escrow_txs) {
+        if (id < max_sidechains) slots.insert(id);
+    }
+    std::set<Txid> valid;
+    (void)GetMempoolSidechainDB(slots, nullptr, &valid);
+    for (const drivechain::SidechainId id : slots) {
+        for (const Txid& txid : m_mempool->m_escrow_txs.at(id)) {
+            if (valid.contains(txid)) continue;
+            if (const CTransactionRef tx{m_mempool->get(txid)}) stale.push_back(tx);
+        }
+    }
+
+    for (const CTransactionRef& tx : stale) {
+        m_mempool->removeRecursive(*tx, MemPoolRemovalReason::CONFLICT);
+    }
+}
+
+std::string Chainstate::DrivechainStateName() const
+{
+    return m_from_snapshot_blockhash ? m_from_snapshot_blockhash->ToString() : std::string{};
+}
+
+bool Chainstate::LoadDrivechainState()
+{
+    AssertLockHeld(::cs_main);
+    const CBlockIndex* tip{m_chain.Tip()};
+    if (!tip) return true;
+
+    drivechain::Database& db{*m_blockman.m_drivechain_db};
+    drivechain::SidechainDB scdb;
+    if (db.ReadState(DrivechainStateName(), scdb) && scdb.GetBlockHash() == tip->GetBlockHash()) {
+        m_scdb = std::move(scdb);
+        return true;
+    }
+
+    if (m_from_snapshot_blockhash) {
+        // A chainstate created from a UTXO snapshot does not have the blocks
+        // the sidechain database would have to be derived from.
+        LogWarning("No sidechain database for the chainstate loaded from a UTXO snapshot; starting with an empty one.");
+        m_scdb = drivechain::SidechainDB{};
+        m_scdb.SetBlockHash(tip->GetBlockHash());
+        return true;
+    }
+
+    const CBlockIndex* pindex{scdb.GetBlockHash().IsNull() ? nullptr : m_blockman.LookupBlockIndex(scdb.GetBlockHash())};
+    if (!pindex) {
+        // No usable snapshot: derive everything from the blocks.
+        scdb = drivechain::SidechainDB{};
+        pindex = m_chain.Genesis();
+        scdb.SetBlockHash(pindex->GetBlockHash());
+    }
+    LogInfo("Bringing the sidechain database from height %d to the chain tip at height %d", pindex->nHeight, tip->nHeight);
+
+    // Rewind to the last block the snapshot has in common with the chain.
+    while (tip->GetAncestor(pindex->nHeight) != pindex) {
+        drivechain::BlockUndo undo;
+        if (!db.ReadBlockUndo(pindex->GetBlockHash(), undo)) {
+            LogError("%s: no drivechain undo data for block %s", __func__, pindex->GetBlockHash().ToString());
+            return false;
+        }
+        scdb.DisconnectBlock(undo);
+        db.EraseBlockDeposits(pindex->GetBlockHash());
+        pindex = pindex->pprev;
+    }
+
+    // Roll forward along the chain.
+    const Consensus::DrivechainParams& params{m_chainman.GetConsensus().drivechain};
+    for (int height{pindex->nHeight + 1}; height <= tip->nHeight; ++height) {
+        const CBlockIndex* next{tip->GetAncestor(height)};
+        CBlock block;
+        if (!m_blockman.ReadBlock(block, *next)) {
+            LogError("%s: failed to read block %s", __func__, next->GetBlockHash().ToString());
+            return false;
+        }
+        drivechain::BlockUndo undo;
+        std::vector<drivechain::Deposit> deposits;
+        std::string reject_reason;
+        if (!scdb.ConnectBlock(block, height, params, undo, &deposits, reject_reason)) {
+            LogError("%s: block %s breaks the drivechain rules (%s)", __func__, next->GetBlockHash().ToString(), reject_reason);
+            return false;
+        }
+        db.WriteBlock(next->GetBlockHash(), height, undo, deposits);
+        if (m_chainman.m_interrupt) return false;
+    }
+
+    m_scdb = std::move(scdb);
+    db.WriteState(DrivechainStateName(), m_scdb);
+    return true;
+}
+
 VerifyDBResult CVerifyDB::VerifyDB(
     Chainstate& chainstate,
     const Consensus::Params& consensus_params,
@@ -4643,6 +4953,7 @@ VerifyDBResult CVerifyDB::VerifyDB(
     nCheckLevel = std::max(0, std::min(4, nCheckLevel));
     LogInfo("Verifying last %i blocks at level %i", nCheckDepth, nCheckLevel);
     CCoinsViewCache coins(&coinsview);
+    drivechain::SidechainDB scdb{chainstate.m_scdb};
     CBlockIndex* pindex;
     CBlockIndex* pindexFailure = nullptr;
     int nGoodTransactions = 0;
@@ -4700,7 +5011,7 @@ VerifyDBResult CVerifyDB::VerifyDB(
         if (nCheckLevel >= 3) {
             if (curr_coins_usage <= chainstate.m_coinstip_cache_size_bytes) {
                 assert(coins.GetBestBlock() == pindex->GetBlockHash());
-                DisconnectResult res = chainstate.DisconnectBlock(block, pindex, coins);
+                DisconnectResult res = chainstate.DisconnectBlock(block, pindex, coins, &scdb);
                 if (res == DISCONNECT_FAILED) {
                     LogError("Verification error: irrecoverable inconsistency in block data at %d, hash=%s", pindex->nHeight, pindex->GetBlockHash().ToString());
                     return VerifyDBResult::CORRUPTED_BLOCK_DB;
@@ -4744,7 +5055,7 @@ VerifyDBResult CVerifyDB::VerifyDB(
                 LogError("Verification error: ReadBlock failed at %d, hash=%s", pindex->nHeight, pindex->GetBlockHash().ToString());
                 return VerifyDBResult::CORRUPTED_BLOCK_DB;
             }
-            if (!chainstate.ConnectBlock(block, state, pindex, coins)) {
+            if (!chainstate.ConnectBlock(block, state, pindex, coins, /*fJustCheck=*/false, &scdb)) {
                 LogError("Verification error: found unconnectable block at %d, hash=%s (%s)", pindex->nHeight, pindex->GetBlockHash().ToString(), state.ToString());
                 return VerifyDBResult::CORRUPTED_BLOCK_DB;
             }
@@ -4985,7 +5296,8 @@ void ChainstateManager::LoadExternalBlockFile(
 
     int nLoaded = 0;
     try {
-        BufferedFile blkdat{file_in, 2 * MAX_BLOCK_SERIALIZED_SIZE, MAX_BLOCK_SERIALIZED_SIZE + 8};
+        const uint32_t max_block_size{GetConsensus().MaxBlockSerializedSize()};
+        BufferedFile blkdat{file_in, 2 * max_block_size, max_block_size + 8};
         // nRewind indicates where to resume scanning in case something goes wrong,
         // such as a block fails to deserialize.
         uint64_t nRewind = blkdat.GetPos();
@@ -5007,7 +5319,7 @@ void ChainstateManager::LoadExternalBlockFile(
                 }
                 // read size
                 blkdat >> nSize;
-                if (nSize < 80 || nSize > MAX_BLOCK_SERIALIZED_SIZE)
+                if (nSize < 80 || nSize > max_block_size)
                     continue;
             } catch (const std::exception&) {
                 // no valid block header found; don't complain

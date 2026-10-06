@@ -6,9 +6,11 @@
 #ifndef BITCOIN_CONSENSUS_PARAMS_H
 #define BITCOIN_CONSENSUS_PARAMS_H
 
+#include <consensus/consensus.h>
 #include <script/verify_flags.h>
 #include <uint256.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -83,6 +85,27 @@ struct BIP9Deployment {
 };
 
 /**
+ * Parameters of the drivechain (sidechain escrow and blind merged mining) rules.
+ * All periods and thresholds are counted in blocks.
+ */
+struct DrivechainParams {
+    /** Number of sidechain slots. Slots at or above this number are not subject to any drivechain rule. */
+    uint32_t max_sidechains{256};
+    /** Age at which a proposal for an empty slot activates. */
+    int activation_period{7200};
+    /** A proposal is rejected once it has gone this many blocks without an ack. */
+    int activation_max_failures{3599};
+    /** Age at which a proposal for a slot that is already in use activates, replacing the sidechain in it. */
+    int replacement_period{64800};
+    /** Number of blocks a withdrawal bundle has to collect its work score. */
+    int withdrawal_period{129600};
+    /** Work score a withdrawal bundle needs before it can be paid out. */
+    int withdrawal_min_score{64800};
+    /** Maximum number of pending withdrawal bundles per sidechain. */
+    uint32_t max_pending_bundles{64};
+};
+
+/**
  * Parameters that influence chain consensus.
  */
 struct Params {
@@ -116,13 +139,39 @@ struct Params {
     uint256 powLimit;
     bool fPowAllowMinDifficultyBlocks;
     /**
-      * Enforce BIP94 timewarp attack mitigation. On testnet4 this also enforces
+      * Enforce BIP94 timewarp attack mitigation. Where minimum difficulty blocks are allowed this also enforces
       * the block storm mitigation.
       */
     bool enforce_BIP94;
     bool fPowNoRetargeting;
     int64_t nPowTargetSpacing;
     int64_t nPowTargetTimespan;
+    /**
+     * Half-life, in seconds, of the aserti3 difficulty algorithm, which retargets
+     * every block. Zero disables it in favour of the periodic nPowTargetTimespan
+     * retarget.
+     */
+    int64_t asert_half_life{0};
+    /**
+     * Height of the aserti3 anchor block. Blocks below it are mined at the
+     * proof of work limit; the anchor's own target is calibrated from the time
+     * those blocks took, and aserti3 retargets every block after it.
+     */
+    int asert_anchor_height{0};
+    DrivechainParams drivechain;
+    /** Maximum weight of a block. */
+    uint32_t max_block_weight{MAX_BLOCK_WEIGHT};
+    /**
+     * Maximum weight of the transactions of a block other than the coinbase.
+     * Where this is below max_block_weight, the difference is set aside for
+     * the coinbase, which carries the drivechain messages and the payouts of
+     * mining pools.
+     */
+    uint32_t max_block_tx_weight{MAX_BLOCK_WEIGHT};
+    /** Number of blocks before the outputs of a coinbase can be spent. */
+    int coinbase_maturity{COINBASE_MATURITY};
+    /** Upper bound for the serialized size of a block; a sanity limit, not a consensus rule. */
+    uint32_t MaxBlockSerializedSize() const { return std::max<uint32_t>(MAX_BLOCK_SERIALIZED_SIZE, max_block_weight); }
     std::chrono::seconds PowTargetSpacing() const
     {
         return std::chrono::seconds{nPowTargetSpacing};

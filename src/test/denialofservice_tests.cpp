@@ -21,6 +21,7 @@
 #include <util/time.h>
 #include <validation.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 
@@ -154,7 +155,10 @@ BOOST_FIXTURE_TEST_CASE(stale_tip_peer_management, OutboundTest)
 
     const auto time_init{Now<NodeSeconds>()};
     FakeNodeClock clock{time_init};
-    const auto delta{3 * std::chrono::seconds{m_node.chainman->GetConsensus().nPowTargetSpacing} + 1s};
+    // The tip is considered stale after 3 block intervals, but staleness is only re-evaluated
+    // every STALE_CHECK_INTERVAL (10 minutes, net_processing.cpp). With Chains' 1-minute blocks
+    // 3 intervals are shorter than that, so advance by whichever is larger.
+    const auto delta{std::max<std::chrono::seconds>(3 * std::chrono::seconds{m_node.chainman->GetConsensus().nPowTargetSpacing}, 10min) + 1s};
     connman->Init(options);
     std::vector<CNode *> vNodes;
 

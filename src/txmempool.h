@@ -8,6 +8,7 @@
 
 #include <coins.h>
 #include <consensus/amount.h>
+#include <drivechain/sidechain.h>
 #include <indirectmap.h>
 #include <kernel/cs_main.h>
 #include <kernel/mempool_entry.h>          // IWYU pragma: export
@@ -294,6 +295,11 @@ private:
 
 public:
     indirectmap<COutPoint, txiter> mapNextTx GUARDED_BY(cs);
+
+    //! Transactions that create a sidechain escrow output, by sidechain.
+    std::map<drivechain::SidechainId, std::set<Txid>> m_escrow_txs GUARDED_BY(cs);
+    //! The transaction that requests blind merged mining for a sidechain; there is at most one per sidechain.
+    std::map<drivechain::SidechainId, Txid> m_bmm_requests GUARDED_BY(cs);
     std::map<Txid, CAmount> mapDeltas GUARDED_BY(cs);
 
     using Options = kernel::MemPoolOptions;

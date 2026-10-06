@@ -14,7 +14,7 @@ order to maximally raise the difficulty. Verify this using the getmininginfo RPC
 
 """
 
-from test_framework.test_framework import BitcoinTestFramework
+from test_framework.test_framework import BitcoinTestFramework, SkipTest
 from test_framework.util import (
     assert_equal,
 )
@@ -45,6 +45,18 @@ class MiningMainnetTest(BitcoinTestFramework):
         self.num_nodes = 1
         self.setup_clean_chain = True
         self.chain = "" # main
+
+    def skip_test_if_missing_module(self):
+        # Chains: this test replays 2016 pre-mined difficulty-1 blocks (data/mainnet_alt.json)
+        # that build on Bitcoin's mainnet genesis block and then checks Bitcoin's 2016-block
+        # retarget (difficulty 1 -> 4). Chains mainnet has a different genesis block, so none
+        # of the stored nonces are valid ("high-hash"), and it uses the aserti3 difficulty
+        # algorithm instead of the 2016-block retarget, so the expectations do not apply
+        # either. No other network in this code base has Bitcoin's genesis block together
+        # with retargeting, and an equivalent Chains data set would need 2016 freshly mined
+        # difficulty-1 blocks (and again whenever the genesis block changes). The aserti3
+        # rules are covered by the pow_tests unit tests.
+        raise SkipTest("no Chains equivalent of the pre-mined Bitcoin mainnet chain")
 
     def add_options(self, parser):
         parser.add_argument(

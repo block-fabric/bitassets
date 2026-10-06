@@ -56,6 +56,7 @@
 #include <rpc/request.h>
 #include <rpc/server.h>
 #include <sync.h>
+#include <drivechain/sidechain.h>
 #include <txmempool.h>
 #include <uint256.h>
 #include <univalue.h>
@@ -644,6 +645,26 @@ public:
                int{FillBlock(block2, block2_out, lock, active, chainman().m_blockman)};
     }
     void findCoins(std::map<COutPoint, Coin>& coins) override { return FindCoins(m_node, coins); }
+    SidechainEscrow getSidechainEscrow(uint32_t slot) override
+    {
+        SidechainEscrow escrow;
+        LOCK(::cs_main);
+        const Chainstate& chainstate{chainman().ActiveChainstate()};
+        drivechain::SidechainDB scdb;
+        if (m_node.mempool) {
+            LOCK(m_node.mempool->cs);
+            scdb = chainstate.GetMempoolSidechainDB({slot});
+        } else {
+            scdb = chainstate.m_scdb;
+        }
+        if (const drivechain::Slot* state{scdb.GetSlot(slot)}) {
+            escrow.active = true;
+            escrow.has_output = state->has_ctip;
+            escrow.outpoint = state->ctip.outpoint;
+            escrow.amount = state->ctip.amount;
+        }
+        return escrow;
+    }
     double guessVerificationProgress(const uint256& block_hash) override
     {
         LOCK(chainman().GetMutex());
@@ -673,6 +694,20 @@ public:
         if (!m_node.mempool) return IsRBFOptInEmptyMempool(tx);
         LOCK(m_node.mempool->cs);
         return IsRBFOptIn(tx, *m_node.mempool);
+    }
+    std::optional<BmmRequestInfo> getMempoolBmmRequest(uint32_t slot) override
+    {
+        if (!m_node.mempool) return std::nullopt;
+        LOCK(m_node.mempool->cs);
+        const auto it{m_node.mempool->m_bmm_requests.find(slot)};
+        if (it == m_node.mempool->m_bmm_requests.end()) return std::nullopt;
+        const auto entry{m_node.mempool->GetEntry(it->second)};
+        if (!entry) return std::nullopt;
+        for (const drivechain::BmmRequest& request : drivechain::GetBmmRequests(entry->GetTx())) {
+            if (request.slot != slot) continue;
+            return BmmRequestInfo{request.side_block_hash, request.prev_main_block_hash, entry->GetFee(), entry->GetTx().GetHash()};
+        }
+        return std::nullopt;
     }
     bool isInMempool(const Txid& txid) override
     {

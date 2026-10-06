@@ -10,6 +10,8 @@
 
 #include <univalue.h>
 
+#include <optional>
+
 namespace wallet {
 RPCMethod signmessage()
 {
@@ -51,8 +53,26 @@ RPCMethod signmessage()
                 throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid address");
             }
 
-            const PKHash* pkhash = std::get_if<PKHash>(&dest);
-            if (!pkhash) {
+            const auto check{[](SigningResult err) {
+                if (err == SigningResult::SIGNING_FAILED) {
+                    throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, SigningResultString(err));
+                } else if (err != SigningResult::OK) {
+                    throw JSONRPCError(RPC_WALLET_ERROR, SigningResultString(err));
+                }
+            }};
+            if (const WitnessV1Taproot* taproot{std::get_if<WitnessV1Taproot>(&dest)}) {
+                std::string signature;
+                check(pwallet->SignMessage(strMessage, *taproot, signature));
+                return signature;
+            }
+
+            // The key of a P2WPKH address is looked up by the same hash as that of a P2PKH address.
+            std::optional<PKHash> pkhash;
+            if (const PKHash* legacy{std::get_if<PKHash>(&dest)}) {
+                pkhash = *legacy;
+            } else if (const WitnessV0KeyHash* witness{std::get_if<WitnessV0KeyHash>(&dest)}) {
+                pkhash = PKHash{uint160{*witness}};
+            } else {
                 throw JSONRPCError(RPC_TYPE_ERROR, "Address does not refer to key");
             }
 

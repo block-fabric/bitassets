@@ -6,6 +6,7 @@
 #ifndef BITCOIN_POW_H
 #define BITCOIN_POW_H
 
+#include <arith_uint256.h>
 #include <consensus/params.h>
 
 #include <cstdint>
@@ -27,6 +28,17 @@ class arith_uint256;
 std::optional<arith_uint256> DeriveTarget(unsigned int nBits, uint256 pow_limit);
 
 unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHeader *pblock, const Consensus::Params&);
+/**
+ * Compute the aserti3 target: ref_target scaled by 2^((time_diff - spacing * (height_diff + 1)) / half_life),
+ * using the cubic fixed-point approximation of 2^x from the aserti3-2d specification.
+ *
+ * @param[in] ref_target   target of the anchor block
+ * @param[in] spacing      ideal block interval in seconds
+ * @param[in] time_diff    seconds between the anchor's parent and the parent of the block being computed
+ * @param[in] height_diff  height of the parent of the block being computed, minus the anchor height
+ */
+arith_uint256 CalculateASERT(const arith_uint256& ref_target, int64_t spacing, int64_t time_diff, int64_t height_diff, const arith_uint256& pow_limit, int64_t half_life) noexcept;
+
 unsigned int CalculateNextWorkRequired(const CBlockIndex* pindexLast, int64_t nFirstBlockTime, const Consensus::Params&);
 
 /** Check whether a block hash satisfies the proof-of-work requirement specified by nBits */

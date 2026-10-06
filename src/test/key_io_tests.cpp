@@ -5,6 +5,9 @@
 #include <test/data/key_io_invalid.json.h>
 #include <test/data/key_io_valid.json.h>
 
+#include <addresstype.h>
+#include <chainparams.h>
+#include <crypto/common.h>
 #include <key.h>
 #include <key_io.h>
 #include <script/script.h>
@@ -17,6 +20,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <algorithm>
+#include <variant>
 
 BOOST_FIXTURE_TEST_SUITE(key_io_tests, BasicTestingSetup)
 
@@ -145,6 +149,41 @@ BOOST_AUTO_TEST_CASE(key_io_invalid)
             BOOST_CHECK_MESSAGE(!privkey.IsValid(), "IsValid privkey in mainnet:" + strTest);
         }
     }
+}
+
+// The Base58 addresses of the main network start with 'C' (pay to public key
+// hash) or 'c' (pay to script hash), so some of them start with the letters of
+// the Bech32 prefix "chn". They must not be mistaken for Bech32 addresses.
+BOOST_AUTO_TEST_CASE(key_io_base58_starting_with_bech32_prefix)
+{
+    SelectParams(ChainType::MAIN);
+    const std::string hrp{Params().Bech32HRP()};
+    const auto starts_with_hrp = [&](const std::string& address) { return ToLower(address.substr(0, hrp.size())) == hrp; };
+
+    int found_pkh{0}, found_sh{0};
+    for (uint32_t i{0}; i < 2'000'000 && (found_pkh < 3 || found_sh < 3); ++i) {
+        uint160 hash;
+        WriteLE32(hash.begin(), i);
+        for (const CTxDestination& dest : {CTxDestination{PKHash{hash}}, CTxDestination{ScriptHash{hash}}}) {
+            const std::string address{EncodeDestination(dest)};
+            if (!starts_with_hrp(address)) continue;
+            std::string error;
+            const CTxDestination decoded{DecodeDestination(address, error)};
+            BOOST_CHECK_MESSAGE(IsValidDestination(decoded), address + ": " + error);
+            BOOST_CHECK(decoded == dest);
+            ++(std::holds_alternative<PKHash>(dest) ? found_pkh : found_sh);
+        }
+    }
+    BOOST_CHECK(found_pkh >= 3);
+    BOOST_CHECK(found_sh >= 3);
+
+    // A real Bech32 address still decodes, and a broken one is still reported as such.
+    const std::string segwit{EncodeDestination(WitnessV0KeyHash{uint160{}})};
+    BOOST_CHECK(starts_with_hrp(segwit));
+    BOOST_CHECK(IsValidDestination(DecodeDestination(segwit)));
+    std::string error;
+    BOOST_CHECK(!IsValidDestination(DecodeDestination(segwit + "x", error)));
+    BOOST_CHECK(error.find("Bech32") != std::string::npos);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

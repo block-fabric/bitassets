@@ -136,6 +136,16 @@ void CConnman::AddAddrFetch(const std::string& strDest)
     m_addr_fetches.push_back(strDest);
 }
 
+/**
+ * Largest message accepted from a peer. Chains with blocks larger than
+ * MAX_PROTOCOL_MESSAGE_LENGTH need room for a whole block.
+ */
+static size_t MaxProtocolMessageLength()
+{
+    const uint32_t max_block_size{Params().GetConsensus().MaxBlockSerializedSize()};
+    return max_block_size > MAX_BLOCK_SERIALIZED_SIZE ? size_t{max_block_size} + 1'000'000 : MAX_PROTOCOL_MESSAGE_LENGTH;
+}
+
 uint16_t GetListenPort()
 {
     // If -bind= is provided with ":port" part, use that (first one if multiple are provided).
@@ -768,7 +778,7 @@ int V1Transport::readHeader(std::span<const uint8_t> msg_bytes)
     // reject messages larger than MAX_SIZE or MAX_PROTOCOL_MESSAGE_LENGTH
     // NOTE: failing to perform this check previously allowed a malicious peer to make us allocate 32MiB of memory per
     // connection. See https://bitcoincore.org/en/2024/07/03/disclose_receive_buffer_oom.
-    if (hdr.nMessageSize > MAX_SIZE || hdr.nMessageSize > MAX_PROTOCOL_MESSAGE_LENGTH) {
+    if (hdr.nMessageSize > MAX_SIZE || hdr.nMessageSize > MaxProtocolMessageLength()) {
         LogDebug(BCLog::NET, "Header error: Size too large (%s, %u bytes), peer=%d\n", SanitizeString(hdr.GetMessageType()), hdr.nMessageSize, m_node_id);
         return -1;
     }
@@ -1218,9 +1228,9 @@ bool V2Transport::ProcessReceivedPacketBytes() noexcept
     // - 0x00 byte: indicating long message type encoding
     // - 12 bytes of message type
     // - payload
-    static constexpr size_t MAX_CONTENTS_LEN =
+    const size_t MAX_CONTENTS_LEN =
         1 + CMessageHeader::MESSAGE_TYPE_SIZE +
-        std::min<size_t>(MAX_SIZE, MAX_PROTOCOL_MESSAGE_LENGTH);
+        std::min<size_t>(MAX_SIZE, MaxProtocolMessageLength());
 
     if (m_recv_buffer.size() == BIP324Cipher::LENGTH_LEN) {
         // Length descriptor received.
@@ -4024,7 +4034,7 @@ bool CConnman::OutboundTargetReached(bool historicalBlockServingLimit) const
     {
         // keep a large enough buffer to at least relay each block once
         const std::chrono::seconds timeLeftInCycle = GetMaxOutboundTimeLeftInCycle_();
-        const uint64_t buffer = timeLeftInCycle / std::chrono::minutes{10} * MAX_BLOCK_SERIALIZED_SIZE;
+        const uint64_t buffer = timeLeftInCycle / std::chrono::minutes{10} * Params().GetConsensus().MaxBlockSerializedSize();
         if (buffer >= nMaxOutboundLimit || nMaxOutboundTotalBytesSentInCycle >= nMaxOutboundLimit - buffer)
             return true;
     }

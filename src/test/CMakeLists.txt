@@ -44,6 +44,7 @@ add_executable(test_bitcoin
   dbwrapper_tests.cpp
   denialofservice_tests.cpp
   descriptor_tests.cpp
+  drivechain_tests.cpp
   disconnected_transactions.cpp
   fees_util_tests.cpp
   feefrac_tests.cpp
@@ -111,7 +112,6 @@ add_executable(test_bitcoin
   sync_tests.cpp
   system_ram_tests.cpp
   system_tests.cpp
-  testnet4_miner_tests.cpp
   threadpool_tests.cpp
   timeoffsets_tests.cpp
   torcontrol_tests.cpp

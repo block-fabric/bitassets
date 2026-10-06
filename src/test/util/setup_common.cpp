@@ -312,6 +312,10 @@ ChainTestingSetup::ChainTestingSetup(const ChainType chainType, TestOpts opts)
             .worker_threads_num = EnableFuzzDeterminism() ? 0 : 2,
             .prevoutfetch_threads_num = EnableFuzzDeterminism() ? 0 : 2,
         };
+        // No Chains network has a minimum chain work built in; tests that need one ask for it.
+        if (const auto min_work{Assert(m_node.args)->GetArg("-minimumchainwork")}) {
+            chainman_opts.minimum_chain_work = UintToArith256(*Assert(uint256::FromUserHex(*min_work)));
+        }
         if (opts.min_validation_cache) {
             chainman_opts.script_execution_cache_bytes = 0;
             chainman_opts.signature_cache_bytes = 0;

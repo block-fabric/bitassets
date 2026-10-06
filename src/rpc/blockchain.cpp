@@ -2601,11 +2601,11 @@ static RPCMethod scanblocks()
             scan_result_abort,
         },
         RPCExamples{
-            HelpExampleCli("scanblocks", "start '[\"addr(bcrt1q4u4nsgk6ug0sqz7r3rj9tykjxrsl0yy4d0wwte)\"]' 300000") +
-            HelpExampleCli("scanblocks", "start '[\"addr(bcrt1q4u4nsgk6ug0sqz7r3rj9tykjxrsl0yy4d0wwte)\"]' 100 150 basic") +
+            HelpExampleCli("scanblocks", "start '[\"addr(rchn1q4u4nsgk6ug0sqz7r3rj9tykjxrsl0yy4hzrzp5)\"]' 300000") +
+            HelpExampleCli("scanblocks", "start '[\"addr(rchn1q4u4nsgk6ug0sqz7r3rj9tykjxrsl0yy4hzrzp5)\"]' 100 150 basic") +
             HelpExampleCli("scanblocks", "status") +
-            HelpExampleRpc("scanblocks", "\"start\", [\"addr(bcrt1q4u4nsgk6ug0sqz7r3rj9tykjxrsl0yy4d0wwte)\"], 300000") +
-            HelpExampleRpc("scanblocks", "\"start\", [\"addr(bcrt1q4u4nsgk6ug0sqz7r3rj9tykjxrsl0yy4d0wwte)\"], 100, 150, \"basic\"") +
+            HelpExampleRpc("scanblocks", "\"start\", [\"addr(rchn1q4u4nsgk6ug0sqz7r3rj9tykjxrsl0yy4hzrzp5)\"], 300000") +
+            HelpExampleRpc("scanblocks", "\"start\", [\"addr(rchn1q4u4nsgk6ug0sqz7r3rj9tykjxrsl0yy4hzrzp5)\"], 100, 150, \"basic\"") +
             HelpExampleRpc("scanblocks", "\"status\"")
         },
         [](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
@@ -3549,6 +3549,9 @@ static RPCMethod loadtxoutset()
         [](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
 {
     NodeContext& node = EnsureAnyNodeContext(request.context);
+    // The drivechain state (sidechains, treasuries, bundles) is not in a UTXO snapshot: a node
+    // started from one would not know the sidechains, and would judge their blocks wrongly.
+    throw JSONRPCError(RPC_MISC_ERROR, "Loading a UTXO snapshot is not supported on Chains: the snapshot does not hold the drivechain state");
     ChainstateManager& chainman = EnsureChainman(node);
     const fs::path path{AbsPathForConfigVal(EnsureArgsman(node), fs::u8path(self.Arg<std::string_view>("path")))};
 

@@ -11,6 +11,7 @@
 #include <consensus/amount.h>
 #include <consensus/consensus.h>
 #include <consensus/validation.h>
+#include <drivechain/sidechain.h>
 #include <policy/feerate.h>
 #include <primitives/transaction.h>
 #include <script/interpreter.h>
@@ -26,6 +27,10 @@
 
 CAmount GetDustThreshold(const CTxOut& txout, const CFeeRate& dustRelayFeeIn)
 {
+    // A sidechain's treasury is spent by the withdrawals of the sidechain, whatever it holds: a
+    // withdrawal that leaves it small or empty must still be relayed.
+    if (drivechain::ParseEscrowScript(txout.scriptPubKey)) return 0;
+
     // "Dust" is defined in terms of dustRelayFee,
     // which has units satoshis-per-kilobyte.
     // If you'd pay more in fees than the value of the output
@@ -83,7 +88,8 @@ bool IsStandard(const CScript& scriptPubKey, TxoutType& whichType)
     whichType = Solver(scriptPubKey, vSolutions);
 
     if (whichType == TxoutType::NONSTANDARD) {
-        return false;
+        // Sidechain escrow outputs; the mempool checks them against the drivechain rules.
+        return drivechain::ParseEscrowScript(scriptPubKey).has_value();
     } else if (whichType == TxoutType::MULTISIG) {
         unsigned char m = vSolutions.front()[0];
         unsigned char n = vSolutions.back()[0];
@@ -229,6 +235,8 @@ TxValidationState ValidateInputsStandardness(const CTransaction& tx, const CCoin
         std::vector<std::vector<unsigned char> > vSolutions;
         TxoutType whichType = Solver(prev.scriptPubKey, vSolutions);
         if (whichType == TxoutType::NONSTANDARD) {
+            // Deposits and withdrawals spend the escrow output of their sidechain.
+            if (drivechain::ParseEscrowScript(prev.scriptPubKey)) continue;
             state.Invalid(TxValidationResult::TX_INPUTS_NOT_STANDARD, "bad-txns-nonstandard-inputs", strprintf("input %u script unknown", i));
             return state;
         } else if (whichType == TxoutType::WITNESS_UNKNOWN) {

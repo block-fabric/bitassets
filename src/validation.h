@@ -12,6 +12,8 @@
 #include <checkqueue.h>
 #include <coins.h>
 #include <consensus/amount.h>
+#include <drivechain/miner.h>
+#include <drivechain/scdb.h>
 #include <cuckoocache.h>
 #include <deploymentstatus.h>
 #include <kernel/chain.h>
@@ -784,10 +786,51 @@ public:
         LOCKS_EXCLUDED(::cs_main);
 
     // Block (dis)connection on a given view:
-    DisconnectResult DisconnectBlock(const CBlock& block, const CBlockIndex* pindex, CCoinsViewCache& view)
+    //
+    // Like the coins, the sidechain database is passed in as a working copy.
+    // DisconnectBlock leaves it alone if scdb is null. ConnectBlock always
+    // checks the drivechain rules; if scdb is null it does so against a
+    // temporary copy of m_scdb.
+    DisconnectResult DisconnectBlock(const CBlock& block, const CBlockIndex* pindex, CCoinsViewCache& view,
+                                     drivechain::SidechainDB* scdb = nullptr)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool ConnectBlock(const CBlock& block, BlockValidationState& state, CBlockIndex* pindex,
-                      CCoinsViewCache& view, bool fJustCheck = false) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+                      CCoinsViewCache& view, bool fJustCheck = false,
+                      drivechain::SidechainDB* scdb = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
+    //! The sidechain database as of the chain tip. Its block hash is null
+    //! until the first block is connected on top of it.
+    drivechain::SidechainDB m_scdb GUARDED_BY(::cs_main);
+
+    /**
+     * Bring m_scdb in line with the chain tip after startup, starting from the
+     * snapshot taken at the last flush and using the undo data and blocks on
+     * disk for the difference.
+     */
+    bool LoadDrivechainState() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** Name under which the sidechain database of this chainstate is stored. */
+    std::string DrivechainStateName() const;
+
+    /**
+     * Remove the mempool transactions that the drivechain rules no longer
+     * allow in a block on top of the tip: requests for blind merged mining made
+     * for another block, and deposits that do not follow from the current
+     * escrow output of their sidechain.
+     */
+    void RemoveStaleDrivechainTxs() EXCLUSIVE_LOCKS_REQUIRED(::cs_main, m_mempool->cs);
+
+    /**
+     * The sidechain database as the deposits in the mempool leave it, for the
+     * given sidechains. Deposits chain on each other, each spending the escrow
+     * output the previous one created.
+     *
+     * @param[in]  stop_before  if set, stop following a chain at the first of these transactions
+     * @param[out] applied      if set, receives the deposits that were followed
+     */
+    drivechain::SidechainDB GetMempoolSidechainDB(const std::set<drivechain::SidechainId>& slots,
+                                                  const std::set<Txid>* stop_before = nullptr,
+                                                  std::set<Txid>* applied = nullptr) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main, m_mempool->cs);
 
     // Apply the effects of a block disconnection on the UTXO set.
     bool DisconnectTip(BlockValidationState& state, DisconnectedBlockTransactions* disconnectpool) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->cs);
@@ -1006,6 +1049,9 @@ protected:
     CBlockIndex* m_best_invalid GUARDED_BY(::cs_main){nullptr};
 
 public:
+    //! The drivechain decisions this node takes when it builds a block.
+    drivechain::MinerState m_drivechain_miner;
+
     using Options = kernel::ChainstateManagerOpts;
 
     explicit ChainstateManager(const util::SignalInterrupt& interrupt, Options options, node::BlockManager::Options blockman_options);

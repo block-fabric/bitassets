@@ -11,9 +11,117 @@
 #include <uint256.h>
 #include <util/check.h>
 
+#include <algorithm>
+#include <cstdlib>
+
+arith_uint256 CalculateASERT(const arith_uint256& ref_target, int64_t spacing, int64_t time_diff, int64_t height_diff, const arith_uint256& pow_limit, int64_t half_life) noexcept
+{
+    assert(ref_target > 0 && ref_target <= pow_limit);
+    assert(height_diff >= 0);
+    // The multiplication by 65536 below must not overflow.
+    assert(std::llabs(time_diff - spacing * height_diff) < (int64_t{1} << (63 - 16)));
+
+    // exponent = (time_diff - spacing * (height_diff + 1)) / half_life, in 16.16 fixed point.
+    const int64_t exponent{((time_diff - spacing * (height_diff + 1)) * 65536) / half_life};
+
+    // Split into an integer number of doublings and a fractional part in [0, 1).
+    // The shift of a negative value is arithmetic, i.e. it rounds towards negative infinity.
+    int64_t shifts{exponent >> 16};
+    const uint16_t frac{static_cast<uint16_t>(exponent)};
+    assert(exponent == (shifts * 65536) + frac);
+
+    // factor = 65536 * 2^(frac / 65536), approximated by a cubic polynomial with an error below 0.013%.
+    const uint32_t factor{65536 + static_cast<uint32_t>((
+        195766423245049ULL * frac +
+        971821376ULL * frac * frac +
+        5127ULL * frac * frac * frac +
+        (1ULL << 47)) >> 48)};
+
+    // pow_limit leaves at least 32 leading zero bits, so this cannot overflow 256 bits.
+    arith_uint256 next_target{ref_target * factor};
+
+    // Apply the integer doublings together with the 2^16 scale of the factor.
+    shifts -= 16;
+    if (shifts <= 0) {
+        next_target >>= -shifts;
+    } else {
+        const arith_uint256 shifted{next_target << shifts};
+        if ((shifted >> shifts) != next_target) {
+            // Overflowed 256 bits.
+            next_target = pow_limit;
+        } else {
+            next_target = shifted;
+        }
+    }
+
+    if (next_target == 0) return arith_uint256{1};
+    if (next_target > pow_limit) return pow_limit;
+    return next_target;
+}
+
+/**
+ * aserti3 retarget with a bootstrap period.
+ *
+ * Blocks below the anchor height are mined at the proof of work limit. The
+ * anchor's target is the limit scaled by how long those blocks took compared
+ * to the target spacing, so that aserti3 starts from the hash rate that is
+ * actually present. The span is measured from block 1, which keeps the time
+ * between the creation of the genesis block and the launch of the network
+ * out of the calculation. Every later block is retargeted by aserti3 relative
+ * to the anchor.
+ */
+static unsigned int GetNextASERTWorkRequired(const CBlockIndex* pindexLast, const CBlockHeader* pblock, const Consensus::Params& params)
+{
+    const arith_uint256 pow_limit{UintToArith256(params.powLimit)};
+    const unsigned int pow_limit_bits{pow_limit.GetCompact()};
+    const int anchor_height{params.asert_anchor_height};
+    assert(anchor_height >= 3);
+    const int next_height{pindexLast->nHeight + 1};
+
+    // Bootstrap period.
+    if (next_height < anchor_height) return pow_limit_bits;
+
+    // The anchor: calibrate from the bootstrap blocks 1..anchor_height-1.
+    if (next_height == anchor_height) {
+        const CBlockIndex* first{pindexLast->GetAncestor(1)};
+        assert(first != nullptr);
+        const int64_t expected_timespan{(pindexLast->nHeight - first->nHeight) * params.nPowTargetSpacing};
+        const int64_t actual_timespan{std::max<int64_t>(pindexLast->GetBlockTime() - first->GetBlockTime(), 1)};
+        // Bootstrap blocks slower than the target spacing cannot lower the difficulty below the limit.
+        if (actual_timespan >= expected_timespan) return pow_limit_bits;
+        // pow_limit has at least 32 leading zero bits and actual_timespan fits in 32 bits here.
+        arith_uint256 target{pow_limit};
+        target *= static_cast<uint32_t>(actual_timespan);
+        target /= static_cast<uint32_t>(expected_timespan);
+        if (target == 0) target = arith_uint256{1};
+        return target.GetCompact();
+    }
+
+    // Special difficulty rule for test networks: a block more than two target
+    // spacings after its parent may be a min-difficulty block.
+    if (params.fPowAllowMinDifficultyBlocks &&
+        pblock->GetBlockTime() > pindexLast->GetBlockTime() + params.nPowTargetSpacing * 2) {
+        return pow_limit_bits;
+    }
+
+    const CBlockIndex* anchor{pindexLast->GetAncestor(anchor_height)};
+    assert(anchor != nullptr && anchor->pprev != nullptr);
+
+    arith_uint256 ref_target;
+    ref_target.SetCompact(anchor->nBits);
+
+    const int64_t time_diff{pindexLast->GetBlockTime() - anchor->pprev->GetBlockTime()};
+    const int64_t height_diff{pindexLast->nHeight - anchor->nHeight};
+
+    return CalculateASERT(ref_target, params.nPowTargetSpacing, time_diff, height_diff, pow_limit, params.asert_half_life).GetCompact();
+}
+
 unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHeader *pblock, const Consensus::Params& params)
 {
     assert(pindexLast != nullptr);
+    if (params.asert_half_life > 0 && !params.fPowNoRetargeting) {
+        return GetNextASERTWorkRequired(pindexLast, pblock, params);
+    }
     unsigned int nProofOfWorkLimit = UintToArith256(params.powLimit).GetCompact();
 
     // Only change once per difficulty adjustment interval
@@ -89,6 +197,10 @@ unsigned int CalculateNextWorkRequired(const CBlockIndex* pindexLast, int64_t nF
 bool PermittedDifficultyTransition(const Consensus::Params& params, int64_t height, uint32_t old_nbits, uint32_t new_nbits)
 {
     if (params.fPowAllowMinDifficultyBlocks) return true;
+
+    // aserti3 retargets every block by a factor that depends on block
+    // timestamps, which are not available here.
+    if (params.asert_half_life > 0 && !params.fPowNoRetargeting) return true;
 
     if (height % params.DifficultyAdjustmentInterval() == 0) {
         int64_t smallest_timespan = params.nPowTargetTimespan/4;

@@ -7,6 +7,7 @@ See feature_assumeutxo.py for background.
 """
 from test_framework.address import address_to_scriptpubkey
 from test_framework.descriptors import descsum_create
+from test_framework.test_framework import SkipTest
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.messages import COIN
 from test_framework.util import (
@@ -26,6 +27,7 @@ FINAL_HEIGHT = 399
 
 class AssumeutxoTest(BitcoinTestFramework):
     def skip_test_if_missing_module(self):
+        raise SkipTest("Chains refuses UTXO snapshots: they do not hold the drivechain state")
         self.skip_if_no_wallet()
 
     def set_test_params(self):

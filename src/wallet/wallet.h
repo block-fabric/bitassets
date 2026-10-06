@@ -103,7 +103,9 @@ void NotifyWalletLoaded(WalletContext& context, const std::shared_ptr<CWallet>& 
 std::unique_ptr<WalletDatabase> MakeWalletDatabase(const std::string& name, const DatabaseOptions& options, DatabaseStatus& status, bilingual_str& error);
 
 //! -fallbackfee default
-inline constexpr CAmount DEFAULT_FALLBACK_FEE = 0;
+// Not zero as in Bitcoin: a young chain has too few transactions to estimate
+// fees from, and a wallet that cannot pay without configuration is of no use.
+inline constexpr CAmount DEFAULT_FALLBACK_FEE = 20000;
 //! -discardfee default
 inline constexpr CAmount DEFAULT_DISCARD_FEE{10'000};
 //! -mintxfee default
@@ -671,6 +673,7 @@ public:
     /** Sign the tx given the input coins and sighash. */
     bool SignTransaction(CMutableTransaction& tx, const std::map<COutPoint, Coin>& coins, int sighash, std::map<int, bilingual_str>& input_errors) const;
     SigningResult SignMessage(const std::string& message, const PKHash& pkhash, std::string& str_sig) const;
+    SigningResult SignMessage(const std::string& message, const WitnessV1Taproot& output, std::string& str_sig) const;
 
     /**
      * Fills out a PSBT with information from the wallet. Fills in UTXOs if we have

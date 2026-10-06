@@ -13,6 +13,7 @@ snapshot and extend the snapshot chain with new blocks.
 
 import subprocess
 
+from test_framework.test_framework import SkipTest
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import assert_equal
 from test_framework.wallet import MiniWallet
@@ -25,6 +26,7 @@ SNAPSHOT_BASE_BLOCK_HASH = "0c552ced4721c249a389eb9b08cb8da261cd46f0e7b5f9d064d4
 
 class BitcoinChainstateTest(BitcoinTestFramework):
     def skip_test_if_missing_module(self):
+        raise SkipTest("Chains refuses UTXO snapshots: they do not hold the drivechain state")
         self.skip_if_no_bitcoin_chainstate()
 
     def set_test_params(self):

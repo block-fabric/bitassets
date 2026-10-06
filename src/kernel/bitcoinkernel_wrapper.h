@@ -46,7 +46,6 @@ enum class LogLevel : btck_LogLevel {
 enum class ChainType : btck_ChainType {
     MAINNET = btck_ChainType_MAINNET,
     TESTNET = btck_ChainType_TESTNET,
-    TESTNET_4 = btck_ChainType_TESTNET_4,
     SIGNET = btck_ChainType_SIGNET,
     REGTEST = btck_ChainType_REGTEST
 };
