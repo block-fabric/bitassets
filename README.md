@@ -16,11 +16,11 @@ The sidechains, each in a repository of its own:
 
 | Sidechain | Slot | What it is |
 |---|---|---|
-| [Thunder](https://github.com/<org>/thunder) | 2 | Large blocks, for volume |
-| [BitNames](https://github.com/<org>/bitnames) | 3 | Names, with `.x` domains |
-| [BitAssets](https://github.com/<org>/bitassets) | 4 | Assets, pools and auctions |
-| [zSide](https://github.com/<org>/zside) | 6 | Private payments (Zcash Orchard) |
-| [Hivemind](https://github.com/<org>/hivemind) | 9 | Prediction markets |
+| [Thunder](https://github.com/block-fabric/thunder) | 2 | Large blocks, for volume |
+| [BitNames](https://github.com/block-fabric/bitnames) | 3 | Names, with `.x` domains |
+| [BitAssets](https://github.com/block-fabric/bitassets) | 4 | Assets, pools and auctions |
+| [zSide](https://github.com/block-fabric/zside) | 6 | Private payments (Zcash Orchard) |
+| [Hivemind](https://github.com/block-fabric/hivemind) | 9 | Prediction markets |
 
 ## Installing
 
@@ -36,7 +36,7 @@ On Debian or Ubuntu (24.04):
 ```sh
 sudo apt install build-essential cmake pkgconf python3 libevent-dev libboost-dev \
     libsqlite3-dev libzmq3-dev qt6-base-dev qt6-tools-dev qt6-l10n-tools libqrencode-dev
-git clone https://github.com/<org>/chains.git
+git clone https://github.com/block-fabric/chains.git
 cd chains
 cmake -B build -DBUILD_GUI=ON
 cmake --build build -j$(nproc)
