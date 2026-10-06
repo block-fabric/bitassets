@@ -174,7 +174,7 @@
         }
     ],
     [
-        "rchn1qdavt4j2sd7dlhqsavtnfxvzppw6k7qy9yxklkg",
+        "rsc1qdavt4j2sd7dlhqsavtnfxvzppw6k7qy9lsfddv",
         "00146f58bac9506f9bfb821d62e69330410bb56f0085",
         {
             "chain": "regtest",
@@ -183,7 +183,7 @@
         }
     ],
     [
-        "rchn1qan8gntac7z7me2ejt4hpru42ad2f759fmy0m3ejvs98656znv7eqdaeljf",
+        "rsc1qan8gntac7z7me2ejt4hpru42ad2f759fmy0m3ejvs98656znv7eq8cuf4q",
         "0020ecce89afb8f0bdbcab325d6e11f2aaeb549f50a9d91fb8e64c814faa685367b2",
         {
             "chain": "regtest",
@@ -192,7 +192,7 @@
         }
     ],
     [
-        "rchn1pfwxjqvtt4tcxrtdluukfmy2dv7xd2qzdfy6kajv5nwn4yam3wxkq55cjej",
+        "rsc1pfwxjqvtt4tcxrtdluukfmy2dv7xd2qzdfy6kajv5nwn4yam3wxkq73ay7m",
         "51204b8d20316baaf061adbfe72c9d914d678cd5004d49356ec9949ba752777171ac",
         {
             "chain": "regtest",
@@ -201,7 +201,7 @@
         }
     ],
     [
-        "rchn1sx6p8njlx7h9mc2agz4yg82dzne23050ncq72cneeecez2pst8mahn8xecsf8g6hznt2cm0",
+        "rsc1sx6p8njlx7h9mc2agz4yg82dzne23050ncq72cneeecez2pst8mahn8xecsf8g6hzau4pmm",
         "6028368279cbe6f5cbbc2ba8154883a9a29e5517d1f3c03cac4f39ce3225060b3efb799cd9c412746ae2",
         {
             "chain": "regtest",
@@ -384,7 +384,7 @@
         }
     ],
     [
-        "rchn1q65nhlm4hf2ptg3t264al57p7wjxj2c3sqmf8du",
+        "rsc1q65nhlm4hf2ptg3t264al57p7wjxj2c3smdk4kc",
         "0014d5277feeb74a82b4456ad57bfa783e748d256230",
         {
             "chain": "regtest",
@@ -393,7 +393,7 @@
         }
     ],
     [
-        "rchn1qawvc90lpytw3z3k9etdx54l0exq5f5sqfzu5e45kjnl6slwayeeqr2p8ca",
+        "rsc1qawvc90lpytw3z3k9etdx54l0exq5f5sqfzu5e45kjnl6slwayeeqf0y3l5",
         "0020eb9982bfe122dd1146c5cada6a57efc98144d20048b94cd69694ffa87ddd2672",
         {
             "chain": "regtest",
@@ -402,7 +402,7 @@
         }
     ],
     [
-        "rchn1p39a4s4vdcw9kqa8w2t0rp7aj8kfxyw7mce5sk5d70x6wnnmpvt7snfx4rp",
+        "rsc1p39a4s4vdcw9kqa8w2t0rp7aj8kfxyw7mce5sk5d70x6wnnmpvt7sevrryg",
         "5120897b58558dc38b6074ee52de30fbb23d92623bdbc6690b51be79b4e9cf6162fd",
         {
             "chain": "regtest",
@@ -411,7 +411,7 @@
         }
     ],
     [
-        "rchn1s489d9fhmyel0vzfqsrmew4x7r80asuqesm5hgqacy35daflcyufh3j8cgdtflvt9s0gz9m",
+        "rsc1s489d9fhmyel0vzfqsrmew4x7r80asuqesm5hgqacy35daflcyufh3j8cgdtflvt97chm90",
         "6028a9cad2a6fb267ef6092080f79754de19dfd8701986e97403b82468dea7f8271378c8f843569fb165",
         {
             "chain": "regtest",

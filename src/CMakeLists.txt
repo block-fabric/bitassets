@@ -116,6 +116,8 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   common/url.cpp
   compressor.cpp
   core_io.cpp
+  bitassets/rpcutil.cpp
+  bitassets/state.cpp
   sidechain/script.cpp
   drivechain/sidechain.cpp
   deploymentinfo.cpp
@@ -266,6 +268,7 @@ add_library(bitcoin_node STATIC EXCLUDE_FROM_ALL
   policy/truc_policy.cpp
   private_broadcast.cpp
   rest.cpp
+  rpc/bitassets.cpp
   rpc/blockchain.cpp
   rpc/drivechain.cpp
   rpc/sidechain.cpp

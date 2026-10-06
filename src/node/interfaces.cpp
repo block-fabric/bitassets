@@ -665,6 +665,12 @@ public:
         }
         return escrow;
     }
+    std::optional<uint32_t> getSidechainSlot() override
+    {
+        const Consensus::SidechainParams& params{chainman().GetConsensus().sidechain};
+        if (!params.enabled) return std::nullopt;
+        return params.slot;
+    }
     util::Result<CScript> getMainchainScript(const std::string& address) override
     {
         if (!m_node.follower) return util::Error{Untranslated("This chain is not a sidechain")};
@@ -709,6 +715,56 @@ public:
         if (!m_node.mempool) return IsRBFOptInEmptyMempool(tx);
         LOCK(m_node.mempool->cs);
         return IsRBFOptIn(tx, *m_node.mempool);
+    }
+    std::optional<bitassets::Token> getBitAssetsToken(const COutPoint& outpoint) override
+    {
+        LOCK(::cs_main);
+        const auto& tokens{chainman().ActiveChainstate().m_scdb.m_side.BitAssets().Tokens()};
+        const auto it{tokens.find(outpoint)};
+        if (it == tokens.end()) return std::nullopt;
+        return it->second;
+    }
+    std::optional<bitassets::AssetRecord> getBitAsset(const bitassets::AssetId& asset) override
+    {
+        LOCK(::cs_main);
+        const auto& assets{chainman().ActiveChainstate().m_scdb.m_side.BitAssets().Assets()};
+        const auto it{assets.find(asset)};
+        if (it == assets.end()) return std::nullopt;
+        return it->second;
+    }
+    std::optional<uint256> getBitAssetsReservation(const Txid& txid) override
+    {
+        LOCK(::cs_main);
+        const auto& reservations{chainman().ActiveChainstate().m_scdb.m_side.BitAssets().Reservations()};
+        const auto it{reservations.find(txid)};
+        if (it == reservations.end()) return std::nullopt;
+        return it->second;
+    }
+    std::optional<bitassets::Pool> getBitAssetsPool(const uint256& id) override
+    {
+        LOCK(::cs_main);
+        const auto& pools{chainman().ActiveChainstate().m_scdb.m_side.BitAssets().Pools()};
+        const auto it{pools.find(id)};
+        if (it == pools.end()) return std::nullopt;
+        return it->second;
+    }
+    std::optional<bitassets::Auction> getBitAssetsAuction(const Txid& txid) override
+    {
+        LOCK(::cs_main);
+        const auto& auctions{chainman().ActiveChainstate().m_scdb.m_side.BitAssets().Auctions()};
+        const auto it{auctions.find(txid)};
+        if (it == auctions.end()) return std::nullopt;
+        return it->second;
+    }
+    bool getBitAssetReleasable(const bitassets::AssetId& asset) override
+    {
+        LOCK(::cs_main);
+        return chainman().ActiveChainstate().m_scdb.m_side.BitAssets().Releasable(asset);
+    }
+    int getBitAssetsHeight() override
+    {
+        LOCK(::cs_main);
+        return chainman().ActiveChain().Height() + 1;
     }
     bool isInMempool(const Txid& txid) override
     {

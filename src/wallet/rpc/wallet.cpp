@@ -1073,6 +1073,24 @@ RPCMethod derivehdkey()
 }
 
 // addresses
+RPCMethod reserveasset();
+RPCMethod registerasset();
+RPCMethod releaseassetreservation();
+RPCMethod listmyassets();
+RPCMethod sendasset();
+RPCMethod mintasset();
+RPCMethod burnasset();
+RPCMethod updateasset();
+RPCMethod transferassetcontrol();
+RPCMethod fixassetsupply();
+RPCMethod swapasset();
+RPCMethod addliquidity();
+RPCMethod removeliquidity();
+RPCMethod createauction();
+RPCMethod bidauction();
+RPCMethod collectauction();
+RPCMethod listassetactivity();
+RPCMethod releaseasset();
 RPCMethod getaddressinfo();
 RPCMethod getnewaddress();
 RPCMethod getrawchangeaddress();
@@ -1110,6 +1128,7 @@ RPCMethod encryptwallet();
 
 // spend
 RPCMethod sendtoaddress();
+RPCMethod getdepositaddress();
 RPCMethod createwithdrawal();
 RPCMethod refundwithdrawal();
 RPCMethod sendmany();
@@ -1139,6 +1158,24 @@ std::span<const CRPCCommand> GetWalletRPCCommands()
 {
     static const CRPCCommand commands[]{
         {"rawtransactions", &fundrawtransaction},
+        {"wallet", &reserveasset},
+        {"wallet", &registerasset},
+        {"wallet", &releaseassetreservation},
+        {"wallet", &listmyassets},
+        {"wallet", &sendasset},
+        {"wallet", &mintasset},
+        {"wallet", &burnasset},
+        {"wallet", &updateasset},
+        {"wallet", &transferassetcontrol},
+        {"wallet", &fixassetsupply},
+        {"wallet", &swapasset},
+        {"wallet", &addliquidity},
+        {"wallet", &removeliquidity},
+        {"wallet", &createauction},
+        {"wallet", &bidauction},
+        {"wallet", &collectauction},
+        {"wallet", &listassetactivity},
+        {"wallet", &releaseasset},
         {"wallet", &abandontransaction},
         {"wallet", &abortrescan},
         {"wallet", &addhdkey},
@@ -1184,6 +1221,7 @@ std::span<const CRPCCommand> GetWalletRPCCommands()
         {"wallet", &send},
         {"wallet", &sendmany},
         {"wallet", &sendtoaddress},
+        {"wallet", &getdepositaddress},
         {"wallet", &createwithdrawal},
         {"wallet", &refundwithdrawal},
         {"wallet", &setlabel},

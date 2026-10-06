@@ -27,6 +27,8 @@
 #include <wallet/fees.h>
 #include <wallet/receive.h>
 #include <wallet/spend.h>
+
+#include <bitassets/state.h>
 #include <wallet/transaction.h>
 #include <wallet/wallet.h>
 
@@ -1089,8 +1091,10 @@ static util::Result<CreatedTransactionResult> CreateTransactionInternal(
     const OutputType change_type = wallet.TransactionChangeType(coin_control.m_change_type ? *coin_control.m_change_type : wallet.m_default_change_type, vecSend);
     ReserveDestination reservedest(&wallet, change_type);
     unsigned int outputs_to_subtract_fee_from = 0; // The number of outputs which we are subtracting the fee from
+    // A BitAssets transaction carries tokens in outputs of no value, which its marker lists.
+    const bool bitassets_tx{std::any_of(vecSend.begin(), vecSend.end(), [](const CRecipient& r) { return bitassets::IsMarkerScript(GetScriptForDestination(r.dest)); })};
     for (const auto& recipient : vecSend) {
-        if (IsDust(recipient, wallet.chain().relayDustFee())) {
+        if (IsDust(recipient, wallet.chain().relayDustFee()) && !(bitassets_tx && recipient.nAmount == 0)) {
             return util::Error{_("Transaction amount too small")};
         }
 

@@ -5,6 +5,7 @@
 #ifndef BITCOIN_INTERFACES_CHAIN_H
 #define BITCOIN_INTERFACES_CHAIN_H
 
+#include <bitassets/state.h>
 #include <blockfilter.h>
 #include <common/settings.h>
 #include <consensus/amount.h>
@@ -190,6 +191,21 @@ public:
     //! Check if transaction is in mempool.
     virtual bool isInMempool(const Txid& txid) = 0;
 
+    //! BitAssets: what an output carries, if it carries a token in the chain as it is.
+    virtual std::optional<bitassets::Token> getBitAssetsToken(const COutPoint& outpoint) = 0;
+    //! BitAssets: a registered asset.
+    virtual std::optional<bitassets::AssetRecord> getBitAsset(const bitassets::AssetId& asset) = 0;
+    //! BitAssets: the commitment of a reservation not revealed yet, by the transaction that made it.
+    virtual std::optional<uint256> getBitAssetsReservation(const Txid& txid) = 0;
+    //! BitAssets: a pool, by its id.
+    virtual std::optional<bitassets::Pool> getBitAssetsPool(const uint256& id) = 0;
+    //! BitAssets: an auction, by the transaction that made it.
+    virtual std::optional<bitassets::Auction> getBitAssetsAuction(const Txid& txid) = 0;
+    //! BitAssets: the height of the next block.
+    virtual int getBitAssetsHeight() = 0;
+    //! BitAssets: whether an asset is dead and can be retired.
+    virtual bool getBitAssetReleasable(const bitassets::AssetId& asset) = 0;
+
     //! The escrow of a sidechain as the deposits in the mempool leave it.
     struct SidechainEscrow {
         //! Whether the slot holds a sidechain.
@@ -205,6 +221,9 @@ public:
     //! node tells it. Fails if this chain is not a sidechain, if the mainchain
     //! node cannot be asked, or if it does not know the address.
     virtual util::Result<CScript> getMainchainScript(const std::string& address) = 0;
+
+    //! The slot this chain has on its mainchain, if it is a sidechain.
+    virtual std::optional<uint32_t> getSidechainSlot() = 0;
 
     //! Check if transaction has descendants in mempool.
     virtual bool hasDescendantsInMempool(const Txid& txid) = 0;

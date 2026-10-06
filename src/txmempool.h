@@ -303,6 +303,11 @@ public:
     std::map<drivechain::SidechainId, Txid> m_bmm_requests GUARDED_BY(cs);
     //! The transaction that asks to take a withdrawal back; there is at most one per withdrawal.
     std::map<COutPoint, Txid> m_refunds GUARDED_BY(cs);
+    //! On BitAssets: the transactions with a marker, and the assets being registered, by the transaction that registers them.
+    std::set<Txid> m_bitassets_txs GUARDED_BY(cs);
+    std::map<uint256, Txid> m_bitassets_registrations GUARDED_BY(cs);
+    //! The assets being retired, by the transaction that retires them.
+    std::map<uint256, Txid> m_bitassets_releases GUARDED_BY(cs);
     std::map<Txid, CAmount> mapDeltas GUARDED_BY(cs);
 
     using Options = kernel::MemPoolOptions;

@@ -331,7 +331,7 @@ void Shutdown(NodeContext& node)
     if (node.cpu_miner) node.cpu_miner->Stop();
     if (node.follower) {
         node.follower->Stop();
-        if (node.chainman) node.chainman->m_mainchain_poll = nullptr;
+        if (node.chainman) WITH_LOCK(::cs_main, node.chainman->m_mainchain_poll = nullptr);
     }
     for (auto& client : node.chain_clients) {
         try {
