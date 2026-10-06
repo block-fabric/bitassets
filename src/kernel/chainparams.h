@@ -157,6 +157,8 @@ public:
         DeploymentOptions dep_opts{};
         bool fastprune{false};
         bool enforce_bip94{false};
+        //! If set, the chain is a sidechain in this slot of the mainchain.
+        std::optional<uint32_t> sidechain_slot{};
     };
 
     struct MainNetOptions {
@@ -198,6 +200,24 @@ protected:
     HeadersSyncParams m_headers_sync_params;
 
     void ApplyDeploymentOptions(const DeploymentOptions& opts);
+
+    /** What sets a sidechain apart on one of its networks. */
+    struct SidechainIdentity {
+        //! The slot the mainchain gave to the sidechain on this network.
+        uint32_t slot;
+        //! Text in the first block. Change it and the chain is another chain.
+        const char* genesis_message;
+        uint32_t genesis_time;
+        MessageStartChars message_start;
+        uint16_t default_port;
+        const char* bech32_hrp;
+    };
+    /**
+     * Turn the chain being set up into a sidechain: its blocks are blind
+     * merged mined instead of mined with proof of work, its coins come from
+     * the mainchain, and it has an identity of its own.
+     */
+    void MakeSidechain(const SidechainIdentity& identity);
 };
 
 std::optional<ChainType> GetNetworkForMagic(const MessageStartChars& pchMessageStart);

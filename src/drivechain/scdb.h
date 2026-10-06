@@ -8,6 +8,7 @@
 #include <consensus/params.h>
 #include <drivechain/sidechain.h>
 #include <primitives/block.h>
+#include <sidechain/state.h>
 #include <serialize.h>
 #include <uint256.h>
 
@@ -45,7 +46,18 @@ struct BlockUndo {
     //! The votes of the previous block, which this block replaced.
     std::map<SidechainId, Vote> last_votes;
 
-    SERIALIZE_METHODS(BlockUndo, obj) { READWRITE(obj.prev_block_hash, obj.slots, obj.proposals_added, obj.acked, obj.removed, obj.closed, obj.last_votes); }
+    //! What the block changed in the state of this chain as a sidechain.
+    sidechain::StateUndo side;
+
+    SERIALIZE_METHODS(BlockUndo, obj) { READWRITE(obj.prev_block_hash, obj.slots, obj.proposals_added, obj.acked, obj.removed, obj.closed, obj.last_votes, obj.side); }
+};
+
+/** What the rules of a chain that is itself a sidechain need to check a block. */
+struct SideContext {
+    const Consensus::SidechainParams& params;
+    const sidechain::Mainchain& mainchain;
+    //! Set to the coins the coinbase has to create on top of the fees.
+    CAmount& minted;
 };
 
 /**
@@ -74,7 +86,8 @@ public:
      *         partially updated and must be discarded.
      */
     [[nodiscard]] bool ConnectBlock(const CBlock& block, int height, const Consensus::DrivechainParams& params,
-                                    BlockUndo& undo, std::vector<Deposit>* deposits, std::string& reject_reason);
+                                    BlockUndo& undo, std::vector<Deposit>* deposits, std::string& reject_reason,
+                                    const SideContext* side = nullptr);
 
     /**
      * A copy holding only the sidechains in `slots`: enough to check transactions that touch only
@@ -144,7 +157,13 @@ public:
     /** Hash committing to the entire state. */
     uint256 GetHash() const;
 
-    SERIALIZE_METHODS(SidechainDB, obj) { READWRITE(obj.m_block_hash, obj.m_slots, obj.m_proposals, obj.m_closed, obj.m_last_votes); }
+    /**
+     * The state of this chain as a sidechain of another. It lives here so that
+     * it is stored, copied and reverted together with the rest.
+     */
+    sidechain::State m_side;
+
+    SERIALIZE_METHODS(SidechainDB, obj) { READWRITE(obj.m_block_hash, obj.m_slots, obj.m_proposals, obj.m_closed, obj.m_last_votes, obj.m_side); }
 
     friend bool operator==(const SidechainDB&, const SidechainDB&) = default;
 

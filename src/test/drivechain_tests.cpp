@@ -2,13 +2,19 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <addresstype.h>
+#include <chainparams.h>
 #include <consensus/amount.h>
+#include <core_io.h>
+#include <hash.h>
+#include <util/strencodings.h>
 #include <consensus/merkle.h>
 #include <consensus/params.h>
 #include <core_io.h>
 #include <drivechain/miner.h>
 #include <drivechain/scdb.h>
 #include <drivechain/sidechain.h>
+#include <key_io.h>
 #include <hash.h>
 #include <policy/policy.h>
 #include <primitives/block.h>
@@ -16,6 +22,8 @@
 #include <script/interpreter.h>
 #include <script/script.h>
 #include <script/script_error.h>
+#include <sidechain/mainchain.h>
+#include <sidechain/state.h>
 #include <streams.h>
 #include <test/util/setup_common.h>
 #include <uint256.h>
@@ -1031,6 +1039,220 @@ BOOST_AUTO_TEST_CASE(deposit_address_format)
                                     "s3_alice_7ec2c", "s3_alice_7ec2ccc", "rchn1qne4dtvnal6mql3kusvxq74vk9mcj4u2gks3txn"}) {
         BOOST_CHECK_MESSAGE(ParseDepositAddress(plain, parsed) == DepositAddressKind::PLAIN, plain);
     }
+}
+
+BOOST_AUTO_TEST_CASE(deposit_script)
+{
+    SelectParams(ChainType::REGTEST);
+    const CScript burn{CScript() << OP_RETURN};
+    const CTxDestination dest{WitnessV0KeyHash{uint160{}}};
+    const std::string address{EncodeDestination(dest)};
+    const CScript pay{GetScriptForDestination(dest)};
+
+    // An address of this chain, as it is or in a deposit address of this sidechain, is paid.
+    BOOST_CHECK(sidechain::DepositScript(address, 5) == pay);
+    BOOST_CHECK(sidechain::DepositScript(drivechain::FormatDepositAddress({5, address}), 5) == pay);
+    // A deposit address of another sidechain is not, whatever address it holds: the coins are burned.
+    BOOST_CHECK(sidechain::DepositScript(drivechain::FormatDepositAddress({6, address}), 5) == burn);
+    // Nor one with a wrong checksum, or anything that is no address of this chain.
+    std::string mistyped{drivechain::FormatDepositAddress({5, address})};
+    mistyped.back() = mistyped.back() == '0' ? '1' : '0';
+    BOOST_CHECK(sidechain::DepositScript(mistyped, 5) == burn);
+    BOOST_CHECK(sidechain::DepositScript(drivechain::FormatDepositAddress({5, "alice"}), 5) == burn);
+    BOOST_CHECK(sidechain::DepositScript("alice", 5) == burn);
+    // The prefix of regtest is this chain's own: an address of the mainchain is none of this chain.
+    BOOST_CHECK(sidechain::DepositScript("rchn1qne4dtvnal6mql3kusvxq74vk9mcj4u2gks3txn", 5) == burn);
+}
+
+BOOST_AUTO_TEST_CASE(withdrawal_to_treasury_refused)
+{
+    // The mainchain refuses bundles that pay into a treasury, so such a withdrawal is no withdrawal.
+    const CScript pay{GetScriptForDestination(WitnessV0KeyHash{uint160::FromHex("0101010101010101010101010101010101010101").value()})};
+    const CTxOut good{COIN, sidechain::WithdrawalScript(1000, uint160::FromHex("0101010101010101010101010101010101010101").value(), pay)};
+    BOOST_CHECK(sidechain::ParseWithdrawalOutput(good));
+    const CTxOut treasury{COIN, sidechain::WithdrawalScript(1000, uint160::FromHex("0101010101010101010101010101010101010101").value(), EscrowScript(2))};
+    BOOST_CHECK(!sidechain::ParseWithdrawalOutput(treasury));
+    // Nor any output a mainchain node would not relay: the bundle could not be broadcast.
+    for (const CScript& odd : {CScript() << OP_TRUE, CScript() << OP_1 << ToByteVector(CPubKey{}) << OP_1 << OP_CHECKMULTISIG}) {
+        BOOST_CHECK(!sidechain::ParseWithdrawalOutput(CTxOut{COIN, sidechain::WithdrawalScript(1000, uint160::FromHex("0101010101010101010101010101010101010101").value(), odd)}));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(payout_queue)
+{
+    // A block pays at most MAX_PAYOUTS_PER_BLOCK outputs; the rest wait, in order, and undo restores them.
+    sidechain::State state;
+    std::vector<CTxOut> owed;
+    for (size_t i{0}; i < sidechain::MAX_PAYOUTS_PER_BLOCK + 500; ++i) owed.emplace_back(static_cast<CAmount>(i + 1), CScript() << OP_TRUE);
+    sidechain::StateUndo first;
+    const auto paid1{state.TakePayouts(owed, {}, first)};
+    BOOST_REQUIRE_EQUAL(paid1.size(), sidechain::MAX_PAYOUTS_PER_BLOCK);
+    BOOST_CHECK(paid1.front() == owed.front() && paid1.back() == owed[sidechain::MAX_PAYOUTS_PER_BLOCK - 1]);
+    BOOST_CHECK_EQUAL(state.Queue().size(), 500U);
+    const sidechain::State after_first{state};
+
+    sidechain::StateUndo second;
+    const CTxOut extra{7 * COIN, CScript() << OP_TRUE << OP_TRUE};
+    const auto paid2{state.TakePayouts({}, {extra}, second)};
+    BOOST_REQUIRE_EQUAL(paid2.size(), 501U);
+    BOOST_CHECK(paid2.front() == owed[sidechain::MAX_PAYOUTS_PER_BLOCK] && paid2.back() == extra);
+    BOOST_CHECK(state.Queue().empty());
+
+    state.DisconnectBlock(second);
+    BOOST_CHECK(state == after_first);
+    state.DisconnectBlock(first);
+    BOOST_CHECK(state.Queue().empty());
+
+    // Payouts of transactions, however many, do not hold back deposits: those go first.
+    std::vector<CTxOut> spam(sidechain::MAX_PAYOUTS_PER_BLOCK + 10, CTxOut{1, CScript() << OP_TRUE});
+    sidechain::StateUndo third, fourth;
+    BOOST_CHECK_EQUAL(state.TakePayouts({}, spam, third).size(), sidechain::MAX_PAYOUTS_PER_BLOCK);
+    const CTxOut deposit{5 * COIN, CScript() << OP_TRUE << OP_TRUE};
+    const auto paid4{state.TakePayouts({deposit}, {}, fourth)};
+    BOOST_REQUIRE_EQUAL(paid4.size(), 11U);
+    BOOST_CHECK(paid4.front() == deposit);
+    BOOST_CHECK(state.TxQueue().empty());
+    state.DisconnectBlock(fourth);
+    BOOST_CHECK_EQUAL(state.TxQueue().size(), 10U);
+}
+
+BOOST_AUTO_TEST_CASE(bundle_nonce)
+{
+    // A bundle carries the hash of the block before the one that commits to it: its hash cannot be known in advance.
+    Consensus::SidechainParams params;
+    sidechain::State state;
+    CMutableTransaction tx;
+    tx.vin.resize(1);
+    tx.vout.emplace_back(COIN, sidechain::WithdrawalScript(1000, uint160::FromHex("0101010101010101010101010101010101010101").value(), GetScriptForDestination(WitnessV0KeyHash{uint160::FromHex("0101010101010101010101010101010101010101").value()})));
+    sidechain::StateUndo undo;
+    std::vector<CTxOut> payouts;
+    std::string reason;
+    BOOST_REQUIRE_MESSAGE(state.ApplyTx(CTransaction{tx}, 1, params, undo, payouts, reason), reason);
+    const auto a{state.NextBundle(10, uint256{0xa}, params)};
+    const auto b{state.NextBundle(10, uint256{0xb}, params)};
+    BOOST_REQUIRE(a && b);
+    BOOST_CHECK(a->GetHash() != b->GetHash());
+    const uint256 prev{0xa};
+    BOOST_CHECK(a->vout.back().scriptPubKey == (CScript() << OP_RETURN << std::vector<unsigned char>(prev.begin(), prev.end())));
+    BOOST_CHECK(IsBlindWithdrawal(CTransaction{*a}));
+    // The pending bundle remembers it, so that the bundle can be built again.
+    BOOST_REQUIRE_MESSAGE(state.StartBundle(a->GetHash().ToUint256(), 10, uint256{0xa}, params, undo, reason), reason);
+    BOOST_CHECK(state.BundleTx()->GetHash() == a->GetHash());
+}
+
+BOOST_AUTO_TEST_CASE(paid_on_another_branch)
+{
+    // A bundle committed on another branch of this chain, which this branch never had, is paid out on
+    // the mainchain: the withdrawals it paid are paid on this branch too, and cannot be paid again.
+    Consensus::SidechainParams params;
+    sidechain::State state;
+    const CScript pay{GetScriptForDestination(WitnessV0KeyHash{uint160::FromHex("0101010101010101010101010101010101010101").value()})};
+    CMutableTransaction tx;
+    tx.vin.resize(1);
+    tx.vout.emplace_back(COIN, sidechain::WithdrawalScript(1000, uint160::FromHex("0101010101010101010101010101010101010101").value(), pay));
+    tx.vout.emplace_back(2 * COIN, sidechain::WithdrawalScript(1000, uint160::FromHex("0101010101010101010101010101010101010101").value(), pay));
+    sidechain::StateUndo undo;
+    std::vector<CTxOut> payouts;
+    std::string reason;
+    BOOST_REQUIRE_MESSAGE(state.ApplyTx(CTransaction{tx}, 1, params, undo, payouts, reason), reason);
+    BOOST_REQUIRE_EQUAL(state.Withdrawals().size(), 2U);
+
+    sidechain::Mainchain mainchain;
+    sidechain::MainBlock genesis;
+    genesis.hash = uint256{1};
+    BOOST_REQUIRE(mainchain.Append(genesis));
+    sidechain::MainBlock paying;
+    paying.hash = uint256{2};
+    paying.prev_hash = genesis.hash;
+    sidechain::MainDeposit change;
+    change.destination = WITHDRAWAL_RETURN_DEST;
+    change.bundle = uint256{0xb};
+    change.payouts.emplace_back(COIN - 1000, pay);
+    paying.deposits.push_back(change);
+    BOOST_REQUIRE(mainchain.Append(paying));
+
+    const sidechain::State before{state};
+    sidechain::StateUndo main_undo;
+    BOOST_REQUIRE_MESSAGE(state.ApplyMainEvents(1, mainchain, 2, params, main_undo, payouts, reason), reason);
+    // The one withdrawal that pays that output with that amount is gone; the other stays.
+    BOOST_REQUIRE_EQUAL(state.Withdrawals().size(), 1U);
+    BOOST_CHECK_EQUAL(state.Withdrawals().begin()->second.amount, 2 * COIN - 1000);
+    state.DisconnectBlock(main_undo);
+    BOOST_CHECK(state == before);
+}
+
+BOOST_AUTO_TEST_CASE(paid_on_another_branch_oldest_first)
+{
+    // Of several withdrawals that pay the same output with the same amount, a payout of a bundle of
+    // another branch takes the oldest, whatever their outpoints.
+    Consensus::SidechainParams params;
+    sidechain::State state;
+    const uint160 key{uint160::FromHex("0101010101010101010101010101010101010101").value()};
+    const CScript pay{GetScriptForDestination(WitnessV0KeyHash{key})};
+    std::vector<CTxOut> payouts;
+    std::string reason;
+    const auto withdraw{[&](uint8_t salt, int height) {
+        CMutableTransaction tx;
+        tx.vin.resize(1);
+        tx.vin[0].prevout = COutPoint{Txid::FromUint256(uint256{salt}), 0};
+        tx.vout.emplace_back(COIN, sidechain::WithdrawalScript(1000, key, pay));
+        sidechain::StateUndo undo;
+        BOOST_REQUIRE_MESSAGE(state.ApplyTx(CTransaction{tx}, height, params, undo, payouts, reason), reason);
+        return COutPoint{tx.GetHash(), 0};
+    }};
+    const COutPoint older{withdraw(1, 1)}, newer{withdraw(2, 2)};
+    // Whichever sorts first by outpoint, the older one goes.
+    sidechain::Mainchain mainchain;
+    sidechain::MainBlock genesis;
+    genesis.hash = uint256{1};
+    BOOST_REQUIRE(mainchain.Append(genesis));
+    sidechain::MainBlock paying;
+    paying.hash = uint256{2};
+    paying.prev_hash = genesis.hash;
+    sidechain::MainDeposit change;
+    change.destination = WITHDRAWAL_RETURN_DEST;
+    change.bundle = uint256{0xb};
+    change.payouts.emplace_back(COIN - 1000, pay);
+    paying.deposits.push_back(change);
+    BOOST_REQUIRE(mainchain.Append(paying));
+    sidechain::StateUndo undo;
+    BOOST_REQUIRE_MESSAGE(state.ApplyMainEvents(1, mainchain, 3, params, undo, payouts, reason), reason);
+    BOOST_REQUIRE_EQUAL(state.Withdrawals().size(), 1U);
+    BOOST_CHECK(state.Withdrawals().contains(newer));
+    BOOST_CHECK(!state.Withdrawals().contains(older));
+}
+
+BOOST_AUTO_TEST_CASE(duplicate_commitment_survives_reorg)
+{
+    // A sidechain block committed to twice keeps its first commitment when the mainchain drops the
+    // block of the second: the follower only takes for lost what is no longer on record at all.
+    sidechain::Mainchain mainchain;
+    const uint256 side{0x5};
+    sidechain::MainBlock block;
+    block.hash = uint256{1};
+    BOOST_REQUIRE(mainchain.Append(block));
+    sidechain::MainBlock first{};
+    first.hash = uint256{2};
+    first.prev_hash = uint256{1};
+    first.bmm = side;
+    BOOST_REQUIRE(mainchain.Append(first));
+    sidechain::MainBlock again{};
+    again.hash = uint256{3};
+    again.prev_hash = uint256{2};
+    again.bmm = side;
+    BOOST_REQUIRE(mainchain.Append(again));
+    BOOST_CHECK(mainchain.CommittedHeight(side) == 1);
+    const auto removed{mainchain.Truncate(1)};
+    BOOST_REQUIRE_EQUAL(removed.size(), 1U);
+    BOOST_CHECK(removed[0].bmm == side);
+    BOOST_CHECK(mainchain.CommittedHeight(side) == 1);
+    // Dropping the first as well loses it.
+    mainchain.Truncate(0);
+    BOOST_CHECK(!mainchain.CommittedHeight(side));
+    // An assumed commitment is not on record.
+    sidechain::Mainchain::AssumeCommitted assume{mainchain, 0};
+    BOOST_CHECK(mainchain.BmmHeight(side) == 0);
+    BOOST_CHECK(!mainchain.CommittedHeight(side));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

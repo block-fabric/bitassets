@@ -116,7 +116,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   common/url.cpp
   compressor.cpp
   core_io.cpp
-  drivechain/scdb.cpp
+  sidechain/script.cpp
   drivechain/sidechain.cpp
   deploymentinfo.cpp
   external_signer.cpp
@@ -218,6 +218,11 @@ add_library(bitcoin_node STATIC EXCLUDE_FROM_ALL
   node/abort.cpp
   node/blockmanager_args.cpp
   drivechain/db.cpp
+  drivechain/scdb.cpp
+  sidechain/follower.cpp
+  sidechain/mainchain.cpp
+  sidechain/mainclient.cpp
+  sidechain/state.cpp
   drivechain/miner.cpp
   node/blockstorage.cpp
   node/caches.cpp
@@ -263,6 +268,7 @@ add_library(bitcoin_node STATIC EXCLUDE_FROM_ALL
   rest.cpp
   rpc/blockchain.cpp
   rpc/drivechain.cpp
+  rpc/sidechain.cpp
   rpc/external_signer.cpp
   rpc/fees.cpp
   rpc/mempool.cpp
@@ -449,12 +455,13 @@ if(BUILD_FUZZ_BINARY)
   add_subdirectory(test/fuzz)
 endif()
 
-# Names of the Chains executables. The targets keep their upstream names so
-# that the build files stay easy to compare with upstream.
+# Names of the executables. The targets keep their upstream names so that the
+# build files stay easy to compare with upstream.
+set(_bin ${CLIENT_BIN_NAME})
 foreach(name_pair
-    "bitcoin:chains" "bitcoind:chainsd" "bitcoin-node:chains-node" "bitcoin-cli:chains-cli"
-    "bitcoin-tx:chains-tx" "bitcoin-util:chains-util" "bitcoin-wallet:chains-wallet"
-    "bitcoin-chainstate:chains-chainstate" "bitcoin-qt:chains-qt" "bitcoin-gui:chains-gui")
+    "bitcoin:${_bin}" "bitcoind:${_bin}d" "bitcoin-node:${_bin}-node" "bitcoin-cli:${_bin}-cli"
+    "bitcoin-tx:${_bin}-tx" "bitcoin-util:${_bin}-util" "bitcoin-wallet:${_bin}-wallet"
+    "bitcoin-chainstate:${_bin}-chainstate" "bitcoin-qt:${_bin}-qt" "bitcoin-gui:${_bin}-gui")
   string(REPLACE ":" ";" name_pair "${name_pair}")
   list(GET name_pair 0 target)
   list(GET name_pair 1 output_name)

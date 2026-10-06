@@ -10,6 +10,7 @@
 #include <interfaces/chain.h>
 #include <interfaces/node.h>
 #include <interfaces/wallet.h>
+#include <chainparams.h>
 #include <key_io.h>
 #include <node/context.h>
 #include <policy/feerate.h>
@@ -148,7 +149,7 @@ void TestTools(TestChain100Setup& test, ClientModel& client_model)
     Q_EMIT decode->returnPressed();
     const QString decoded{tools.findChild<QPlainTextEdit*>("decodeOutput")->toPlainText()};
     QVERIFY(decoded.contains("A valid address"));
-    QVERIFY(decoded.contains("prefix: rchn"));
+    QVERIFY(decoded.contains(QString::fromStdString("prefix: " + Params().Bech32HRP())));
     QVERIFY(decoded.contains(QString::fromStdString(HexStr(test.coinbaseKey.GetPubKey().GetID()))));
     SaveScreenshot(tools, "tools-address");
 
@@ -220,12 +221,12 @@ void TestTools(TestChain100Setup& test, ClientModel& client_model)
     // Timestamp a file, then find its stamp
     QTemporaryFile file;
     QVERIFY(file.open());
-    file.write("chains");
+    file.write("sidechain");
     file.close();
     TimestampDialog stamps(wallet_name);
     stamps.setClientModel(&client_model);
     stamps.setFile(file.fileName());
-    QCOMPARE(stamps.findChild<QLabel*>("timestampHash")->text(), QString::fromLatin1(QCryptographicHash::hash("chains", QCryptographicHash::Sha256).toHex()));
+    QCOMPARE(stamps.findChild<QLabel*>("timestampHash")->text(), QString::fromLatin1(QCryptographicHash::hash("sidechain", QCryptographicHash::Sha256).toHex()));
     auto* stamp_result{stamps.findChild<QPlainTextEdit*>("timestampResult")};
     QCOMPARE(WithMessageBoxes(QMessageBox::Yes, [&] { stamps.stamp(); }).size(), 1);
     QVERIFY2(stamp_result->toPlainText().startsWith("The fingerprint was published in transaction"), qPrintable(stamp_result->toPlainText()));
@@ -243,7 +244,7 @@ void TestTools(TestChain100Setup& test, ClientModel& client_model)
     proof.findChild<QLineEdit*>("proofStatement")->setText("These coins are mine");
     WithMessageBoxes(QMessageBox::Ok, [&] { proof.prove(); });
     const QString proof_text{proof.findChild<QPlainTextEdit*>("proofOutput")->toPlainText()};
-    QVERIFY2(proof_text.startsWith("-----BEGIN CHAINS PROOF OF FUNDS-----\nThese coins are mine\n-----SIGNATURES-----\nrchn1"), qPrintable(proof_text));
+    QVERIFY2(proof_text.startsWith("-----BEGIN CHAINS PROOF OF FUNDS-----\nThese coins are mine\n-----SIGNATURES-----\n" + QString::fromStdString(Params().Bech32HRP()) + "1"), qPrintable(proof_text));
     auto* proof_input{proof.findChild<QPlainTextEdit*>("proofInput")};
     auto* verdict{proof.findChild<QPlainTextEdit*>("proofVerdict")};
     proof_input->setPlainText(proof_text);
@@ -282,7 +283,7 @@ void TestTools(TestChain100Setup& test, ClientModel& client_model)
     QCOMPARE(shared->rowCount(), 1);
     QCOMPARE(shared->item(0, 1)->text(), QString("2 of 2"));
     const QString shared_address{shared->item(0, 3)->text()};
-    QVERIFY(shared_address.startsWith("rchn1q") && shared_address.size() == 64);
+    QVERIFY(shared_address.startsWith(QString::fromStdString(Params().Bech32HRP() + "1q")) && shared_address.size() == qsizetype(60 + Params().Bech32HRP().size()));
 
     QString rpc_error;
     QVERIFY2(NodeRpc::Call(&client_model, "sendtoaddress", NodeRpc::Args({shared_address.toStdString(), 3}), rpc_error, QString{}), qPrintable(rpc_error));
@@ -407,125 +408,16 @@ void TestSidechainPage(interfaces::Node& node)
     ClientModel client_model(node, &options_model);
     WalletModel wallet_model(interfaces::MakeWallet(context, wallet), client_model, platform_style.get());
 
+    // The test chain is not a sidechain, which the page has to cope with. What the page does on a
+    // sidechain is covered by feature_sidechain.py, through the commands the page uses.
     SidechainPage page(platform_style.get());
     page.resize(1000, 700);
     page.setClientModel(&client_model);
     page.setWalletModel(&wallet_model);
-    page.show();
-
-    auto* tabs{page.findChild<QTabWidget*>("sidechainTabs")};
-    auto* sidechains{page.findChild<QTableWidget*>("sidechains")};
-    auto* proposals{page.findChild<QTableWidget*>("proposals")};
-    auto* queued{page.findChild<QTableWidget*>("queuedProposals")};
-    auto* bundles{page.findChild<QTableWidget*>("bundles")};
-    QVERIFY(tabs && sidechains && proposals && queued && bundles);
-    QCOMPARE(sidechains->rowCount(), 0);
-
-    // Propose a sidechain.
-    tabs->setCurrentIndex(1);
-    page.findChild<QSpinBox*>("proposalSlot")->setValue(3);
-    page.findChild<QLineEdit*>("proposalTitle")->setText("Testchain");
-    page.findChild<QLineEdit*>("proposalDescription")->setText("A sidechain made by the GUI test");
-    // No message box: the proposal is accepted.
-    const QStringList propose_boxes{WithMessageBoxes(QMessageBox::Ok, [&] { page.findChild<QPushButton*>("proposeButton")->click(); })};
-    QVERIFY2(propose_boxes.isEmpty(), qPrintable(propose_boxes.join(" | ")));
-    QCOMPARE(queued->rowCount(), 1);
-    QCOMPARE(queued->item(0, 1)->text(), QString("Testchain"));
-    QCOMPARE(proposals->rowCount(), 0);
-
-    // An empty title is refused by the node; the page shows the error and stays as it is.
-    QCOMPARE(WithMessageBoxes(QMessageBox::Ok, [&] { page.findChild<QPushButton*>("proposeButton")->click(); }).size(), 1);
-    QCOMPARE(queued->rowCount(), 1);
-
-    // The next block carries the proposal; this node acks it.
-    MineBlock(test);
     page.refresh();
-    QCOMPARE(queued->rowCount(), 0);
-    QCOMPARE(proposals->rowCount(), 1);
-    QCOMPARE(proposals->item(0, 0)->text(), QString("3"));
-    QCOMPARE(proposals->item(0, 7)->text(), QString("yes"));
-    SaveScreenshot(page, "sidechains-proposals");
-
-    // Stop acking and ack again.
-    proposals->setCurrentCell(0, 0);
-    page.findChild<QPushButton*>("nackButton")->click();
-    QCOMPARE(proposals->item(0, 7)->text(), QString("no"));
-    UniValue ack_params{UniValue::VARR};
-    ack_params.push_back(proposals->item(0, 8)->text().toStdString());
-    node.executeRpc("acksidechain", ack_params, "/");
-
-    for (int i{1}; i < ACTIVATION_PERIOD; ++i) MineBlock(test);
-    page.refresh();
-    QCOMPARE(proposals->rowCount(), 0);
-    QCOMPARE(sidechains->rowCount(), 1);
-    QCOMPARE(sidechains->item(0, 1)->text(), QString("Testchain"));
-
-    // Deposit to it.
-    tabs->setCurrentIndex(0);
-    auto* deposit_button{page.findChild<QPushButton*>("depositButton")};
-    QVERIFY(!deposit_button->isEnabled());
-    sidechains->setCurrentCell(0, 0);
-    QVERIFY(deposit_button->isEnabled());
-    // A deposit address with a typing error is refused before anything is asked.
-    auto* destination{page.findChild<QLineEdit*>("depositDestination")};
-    destination->setText("s3_alice_000000");
-    page.findChild<BitcoinAmountField*>("depositAmount")->setValue(5 * COIN);
-    {
-        const QStringList refused{WithMessageBoxes(QMessageBox::Yes, [&] { page.findChild<QPushButton*>("depositButton")->click(); })};
-        QCOMPARE(refused.size(), 1);
-        QVERIFY2(refused.at(0).contains("typing error"), qPrintable(refused.at(0)));
-    }
-    // One for another sidechain too.
-    destination->setText(QString::fromStdString(drivechain::FormatDepositAddress({7, "alice"})));
-    {
-        const QStringList refused{WithMessageBoxes(QMessageBox::Yes, [&] { page.findChild<QPushButton*>("depositButton")->click(); })};
-        QCOMPARE(refused.size(), 1);
-        QVERIFY2(refused.at(0).contains("is for the sidechain in slot 7"), qPrintable(refused.at(0)));
-    }
-    destination->setText(QString::fromStdString(drivechain::FormatDepositAddress({3, "alice"})));
-    page.findChild<BitcoinAmountField*>("depositAmount")->setValue(5 * COIN);
-    // A question to confirm, then the transaction id.
-    const QStringList deposit_boxes{WithMessageBoxes(QMessageBox::Yes, [&] { deposit_button->click(); })};
-    QCOMPARE(deposit_boxes.size(), 2);
-    QVERIFY2(deposit_boxes[1].startsWith("Deposit sent"), qPrintable(deposit_boxes[1]));
-    QCOMPARE(test.m_node.mempool->size(), 1U);
-    MineBlock(test);
-    page.refresh();
-    QVERIFY(sidechains->item(0, 2)->text().startsWith("5.00"));
-    SaveScreenshot(page, "sidechains-deposit");
-
-    // A withdrawal bundle handed to the node shows up after the next block, and can be voted on.
-    CMutableTransaction bundle;
-    bundle.vout.emplace_back(0, drivechain::WithdrawalFeeScript(1000));
-    bundle.vout.emplace_back(2 * COIN, GetScriptForRawPubKey(test.coinbaseKey.GetPubKey()));
-    UniValue bundle_params{UniValue::VARR};
-    bundle_params.push_back(3);
-    bundle_params.push_back(EncodeHexTx(CTransaction{bundle}));
-    node.executeRpc("receivewithdrawalbundle", bundle_params, "/");
-    MineBlock(test);
-    tabs->setCurrentIndex(2);
-    page.refresh();
-    QCOMPARE(bundles->rowCount(), 1);
-    // The node was handed the bundle, so it upvotes it by default; the buttons say otherwise or the same.
-    QCOMPARE(bundles->item(0, 5)->text(), QString("upvote"));
-    bundles->setCurrentCell(0, 0);
-    page.findChild<QPushButton*>("downvoteButton")->click();
-    QCOMPARE(bundles->item(0, 5)->text(), QString("downvote"));
-    bundles->setCurrentCell(0, 0);
-    page.findChild<QPushButton*>("upvoteButton")->click();
-    QCOMPARE(bundles->item(0, 5)->text(), QString("upvote"));
-
-    for (int i{1}; i < WITHDRAWAL_MIN_SCORE; ++i) MineBlock(test);
-    page.refresh();
-    QCOMPARE(bundles->rowCount(), 1);
-    QCOMPARE(bundles->item(0, 3)->text(), QString("yes"));
-    SaveScreenshot(page, "sidechains-withdrawals");
-
-    // Paying the bundle out is the business of the block assembler; see feature_drivechain.py.
-    tabs->setCurrentIndex(0);
-    page.refresh();
-    QVERIFY(sidechains->item(0, 2)->text().startsWith("5.00"));
-    QCOMPARE(sidechains->item(0, 3)->text(), QString("1"));
+    QVERIFY(page.findChild<QLabel*>("mainchainSummary")->text().contains("not running as a sidechain"));
+    QVERIFY(!page.findChild<QTabWidget*>("mainchainTabs")->isEnabled());
+    SaveScreenshot(page, "mainchain-page");
 
     TestTools(test, client_model);
 

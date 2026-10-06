@@ -12,7 +12,6 @@
 #include <optional>
 #include <string>
 
-class BitcoinAmountField;
 class ClientModel;
 class PlatformStyle;
 class WalletModel;
@@ -21,17 +20,17 @@ QT_BEGIN_NAMESPACE
 class QLabel;
 class QLineEdit;
 class QPushButton;
-class QSpinBox;
 class QTableWidget;
 class QTabWidget;
+class QTimer;
 QT_END_NAMESPACE
 
 /**
- * Page for drivechains: the active sidechains and deposits to them, sidechain
- * proposals and whether this node acks them, and withdrawal bundles and how
- * this node votes on them.
+ * Page for what ties this chain to its mainchain: how the node follows the
+ * mainchain, deposits from it, withdrawals to it and the bundles that pay
+ * them, and blind merged mining.
  *
- * The page works through the drivechain RPC commands of the node.
+ * The page works through the sidechain RPC commands of the node.
  */
 class SidechainPage : public QWidget
 {
@@ -49,14 +48,16 @@ public Q_SLOTS:
 
 protected:
     void showEvent(QShowEvent* event) override;
+    void hideEvent(QHideEvent* event) override;
 
 private Q_SLOTS:
-    void deposit();
-    void propose();
-    void setAck(bool ack);
-    void removeQueuedProposal();
-    void setVote(const QString& vote);
-    void updateDepositTarget();
+    void newDepositAddress();
+    void withdraw();
+    void refund();
+    void setMining(bool mine);
+    void mineOnce();
+    /** The address the fees of blocks go to: the one entered, or a new one of the wallet. Empty if there is none to be had. */
+    QString miningAddress();
 
 private:
     /**
@@ -65,35 +66,35 @@ private:
      */
     std::optional<UniValue> call(const std::string& method, const UniValue& params, bool wallet = false, bool quiet = false);
 
-    QWidget* createSidechainsTab();
-    QWidget* createProposalsTab();
-    QWidget* createWithdrawalsTab();
-    static QTableWidget* createTable(const QStringList& headers, QWidget* parent);
-    /** Text of a column of the selected row, or an empty string. */
-    static QString selected(const QTableWidget* table, int column);
+    QWidget* createDepositTab();
+    QWidget* createWithdrawTab();
+    QWidget* createMiningTab();
 
     ClientModel* m_client_model{nullptr};
     WalletModel* m_wallet_model{nullptr};
+    QTimer* m_timer{nullptr};
 
     QLabel* m_summary{nullptr};
     QTabWidget* m_tabs{nullptr};
 
-    QTableWidget* m_sidechains{nullptr};
-    QLabel* m_deposit_target{nullptr};
-    QLineEdit* m_deposit_destination{nullptr};
-    BitcoinAmountField* m_deposit_amount{nullptr};
-    QPushButton* m_deposit_button{nullptr};
+    QLabel* m_deposit_instructions{nullptr};
+    QLineEdit* m_deposit_address{nullptr};
 
-    QTableWidget* m_proposals{nullptr};
-    QTableWidget* m_queued{nullptr};
-    QSpinBox* m_proposal_slot{nullptr};
-    QLineEdit* m_proposal_title{nullptr};
-    QLineEdit* m_proposal_description{nullptr};
-    QLineEdit* m_proposal_hash1{nullptr};
-    QLineEdit* m_proposal_hash2{nullptr};
+    QLineEdit* m_withdraw_address{nullptr};
+    QLineEdit* m_withdraw_amount{nullptr};
+    QLineEdit* m_withdraw_fee{nullptr};
+    QLabel* m_bundle{nullptr};
+    QTableWidget* m_withdrawals{nullptr};
 
-    QTableWidget* m_bundles{nullptr};
-    int m_min_score{0};
+    QLineEdit* m_mining_address{nullptr};
+    QLineEdit* m_mining_amount{nullptr};
+    QPushButton* m_mining_start{nullptr};
+    QPushButton* m_mining_stop{nullptr};
+    QLabel* m_mining_status{nullptr};
+    //! What became of the last block asked for by hand.
+    QString m_mining_once;
+
+    int m_slot{0};
 };
 
 #endif // BITCOIN_QT_SIDECHAINPAGE_H

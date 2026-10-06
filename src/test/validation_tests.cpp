@@ -15,6 +15,7 @@
 
 #include <string>
 
+#include <test/util/inherited_params.h>
 #include <test/util/setup_common.h>
 
 #include <boost/test/unit_test.hpp>
@@ -48,7 +49,7 @@ static void TestBlockSubsidyHalvings(int nSubsidyHalvingInterval)
 BOOST_AUTO_TEST_CASE(block_subsidy_test)
 {
     const auto chainParams = CreateChainParams(*m_node.args, ChainType::MAIN);
-    TestBlockSubsidyHalvings(chainParams->GetConsensus()); // As in main
+    TestBlockSubsidyHalvings(WithInheritedRules(chainParams->GetConsensus())); // As on the main network of the mainchain
     TestBlockSubsidyHalvings(150); // As in regtest
     TestBlockSubsidyHalvings(1000); // Just another interval
 }
@@ -56,9 +57,12 @@ BOOST_AUTO_TEST_CASE(block_subsidy_test)
 BOOST_AUTO_TEST_CASE(subsidy_limit_test)
 {
     const auto chainParams = CreateChainParams(*m_node.args, ChainType::MAIN);
+    const Consensus::Params inherited{WithInheritedRules(chainParams->GetConsensus())};
+    // A sidechain has no subsidy at all.
+    BOOST_CHECK_EQUAL(GetBlockSubsidy(1, chainParams->GetConsensus()), 0);
     CAmount nSum = 0;
     for (int nHeight = 0; nHeight < 14000000; nHeight += 1000) {
-        CAmount nSubsidy = GetBlockSubsidy(nHeight, chainParams->GetConsensus());
+        CAmount nSubsidy = GetBlockSubsidy(nHeight, inherited);
         BOOST_CHECK(nSubsidy <= 50 * COIN);
         nSum += nSubsidy * 1000;
         BOOST_CHECK(MoneyRange(nSum));
@@ -72,12 +76,17 @@ BOOST_AUTO_TEST_CASE(signet_parse_tests)
     signet_argsman.ForceSetArg("-signetchallenge", "51"); // set challenge to OP_TRUE
     const auto signet_params = CreateChainParams(signet_argsman, ChainType::SIGNET);
     CBlock block;
-    BOOST_CHECK(signet_params->GetConsensus().signet_challenge == std::vector<uint8_t>{OP_TRUE});
+    // The signet of a sidechain follows the signet of the mainchain, and its own blocks are not signed.
+    BOOST_CHECK(!signet_params->GetConsensus().signet_blocks);
+    // The code that checks signatures is still there; test it with the rule turned back on.
+    Consensus::Params signet_consensus{signet_params->GetConsensus()};
+    signet_consensus.signet_blocks = true;
+    signet_consensus.signet_challenge = {OP_TRUE};
     CScript challenge{OP_TRUE};
 
     // empty block is invalid
     BOOST_CHECK(!SignetTxs::Create(block, challenge));
-    BOOST_CHECK(!CheckSignetBlockSolution(block, signet_params->GetConsensus()));
+    BOOST_CHECK(!CheckSignetBlockSolution(block, signet_consensus));
 
     // no witness commitment
     CMutableTransaction cb;
@@ -85,7 +94,7 @@ BOOST_AUTO_TEST_CASE(signet_parse_tests)
     block.vtx.push_back(MakeTransactionRef(cb));
     block.vtx.push_back(MakeTransactionRef(cb)); // Add dummy tx to exercise merkle root code
     BOOST_CHECK(!SignetTxs::Create(block, challenge));
-    BOOST_CHECK(!CheckSignetBlockSolution(block, signet_params->GetConsensus()));
+    BOOST_CHECK(!CheckSignetBlockSolution(block, signet_consensus));
 
     // no header is treated valid
     std::vector<uint8_t> witness_commitment_section_141{0xaa, 0x21, 0xa9, 0xed};
@@ -95,14 +104,14 @@ BOOST_AUTO_TEST_CASE(signet_parse_tests)
     cb.vout.at(0).scriptPubKey = CScript{} << OP_RETURN << witness_commitment_section_141;
     block.vtx.at(0) = MakeTransactionRef(cb);
     BOOST_CHECK(SignetTxs::Create(block, challenge));
-    BOOST_CHECK(CheckSignetBlockSolution(block, signet_params->GetConsensus()));
+    BOOST_CHECK(CheckSignetBlockSolution(block, signet_consensus));
 
     // no data after header, valid
     std::vector<uint8_t> witness_commitment_section_325{0xec, 0xc7, 0xda, 0xa2};
     cb.vout.at(0).scriptPubKey = CScript{} << OP_RETURN << witness_commitment_section_141 << witness_commitment_section_325;
     block.vtx.at(0) = MakeTransactionRef(cb);
     BOOST_CHECK(SignetTxs::Create(block, challenge));
-    BOOST_CHECK(CheckSignetBlockSolution(block, signet_params->GetConsensus()));
+    BOOST_CHECK(CheckSignetBlockSolution(block, signet_consensus));
 
     // Premature end of data, invalid
     witness_commitment_section_325.push_back(0x01);
@@ -110,21 +119,21 @@ BOOST_AUTO_TEST_CASE(signet_parse_tests)
     cb.vout.at(0).scriptPubKey = CScript{} << OP_RETURN << witness_commitment_section_141 << witness_commitment_section_325;
     block.vtx.at(0) = MakeTransactionRef(cb);
     BOOST_CHECK(!SignetTxs::Create(block, challenge));
-    BOOST_CHECK(!CheckSignetBlockSolution(block, signet_params->GetConsensus()));
+    BOOST_CHECK(!CheckSignetBlockSolution(block, signet_consensus));
 
     // has data, valid
     witness_commitment_section_325.push_back(0x00);
     cb.vout.at(0).scriptPubKey = CScript{} << OP_RETURN << witness_commitment_section_141 << witness_commitment_section_325;
     block.vtx.at(0) = MakeTransactionRef(cb);
     BOOST_CHECK(SignetTxs::Create(block, challenge));
-    BOOST_CHECK(CheckSignetBlockSolution(block, signet_params->GetConsensus()));
+    BOOST_CHECK(CheckSignetBlockSolution(block, signet_consensus));
 
     // Extraneous data, invalid
     witness_commitment_section_325.push_back(0x00);
     cb.vout.at(0).scriptPubKey = CScript{} << OP_RETURN << witness_commitment_section_141 << witness_commitment_section_325;
     block.vtx.at(0) = MakeTransactionRef(cb);
     BOOST_CHECK(!SignetTxs::Create(block, challenge));
-    BOOST_CHECK(!CheckSignetBlockSolution(block, signet_params->GetConsensus()));
+    BOOST_CHECK(!CheckSignetBlockSolution(block, signet_consensus));
 }
 
 //! Test retrieval of valid assumeutxo values.

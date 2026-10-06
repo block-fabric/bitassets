@@ -84,11 +84,11 @@ int main(int argc, char* argv[])
                 return EXIT_FAILURE;
             }
         } else if (cmd.command == "gui") {
-            args.emplace_back(UseMultiprocess(cmd) ? "chains-gui" : "chains-qt");
+            args.emplace_back(UseMultiprocess(cmd) ? CLIENT_BIN_NAME "-gui" : CLIENT_BIN_NAME "-qt");
         } else if (cmd.command == "node") {
-            args.emplace_back(UseMultiprocess(cmd) ? "chains-node" : "chainsd");
+            args.emplace_back(UseMultiprocess(cmd) ? CLIENT_BIN_NAME "-node" : CLIENT_BIN_NAME "d");
         } else if (cmd.command == "rpc") {
-            args.emplace_back("chains-cli");
+            args.emplace_back(CLIENT_BIN_NAME "-cli");
             // Since "bitcoin rpc" is a new interface that doesn't need to be
             // backward compatible, enable -named by default so it is convenient
             // for callers to use a mix of named and unnamed parameters. Callers
@@ -96,19 +96,19 @@ int main(int argc, char* argv[])
             // that contain '=' characters, so -nonamed should rarely be needed.
             args.emplace_back("-named");
         } else if (cmd.command == "wallet") {
-            args.emplace_back("chains-wallet");
+            args.emplace_back(CLIENT_BIN_NAME "-wallet");
         } else if (cmd.command == "tx") {
-            args.emplace_back("chains-tx");
+            args.emplace_back(CLIENT_BIN_NAME "-tx");
         } else if (cmd.command == "bench") {
             args.emplace_back("bench_bitcoin");
         } else if (cmd.command == "chainstate") {
-            args.emplace_back("chains-chainstate");
+            args.emplace_back(CLIENT_BIN_NAME "-chainstate");
         } else if (cmd.command == "test") {
             args.emplace_back("test_bitcoin");
         } else if (cmd.command == "test-gui") {
             args.emplace_back("test_bitcoin-qt");
         } else if (cmd.command == "util") {
-            args.emplace_back("chains-util");
+            args.emplace_back(CLIENT_BIN_NAME "-util");
         } else {
             throw std::runtime_error(strprintf("Unrecognized command: '%s'", cmd.command));
         }

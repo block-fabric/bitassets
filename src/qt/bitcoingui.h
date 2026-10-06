@@ -29,6 +29,7 @@
 #include <utility>
 #include <vector>
 
+class SidebarMining;
 class ThemedFrame;
 class NetworkStyle;
 class Notificator;
@@ -42,7 +43,6 @@ class WalletFrame;
 class BlockExplorer;
 class CryptoToolsDialog;
 class MiningDialog;
-class SidechainNodesDialog;
 class MultisigDialog;
 class ProofOfFundsDialog;
 class TimestampDialog;
@@ -144,6 +144,7 @@ private:
 
     QMenuBar* appMenuBar = nullptr;
     ThemedFrame* m_themed_frame{nullptr};
+    SidebarMining* m_sidebar_mining{nullptr};
     QToolBar* appToolBar = nullptr;
     //! Entries of the navigation bar that are not pages, with the icon each has; the icons follow the theme.
     std::vector<std::pair<QAction*, const char*>> m_sidebar_icons;
@@ -196,7 +197,6 @@ private:
     TimestampDialog* m_timestamp_dialog{nullptr};
     ProofOfFundsDialog* m_proof_dialog{nullptr};
     MultisigDialog* m_multisig_dialog{nullptr};
-    SidechainNodesDialog* m_sidechain_nodes{nullptr};
     HelpMessageDialog* helpMessageDialog = nullptr;
     ModalOverlay* modalOverlay = nullptr;
 

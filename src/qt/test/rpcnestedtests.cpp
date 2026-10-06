@@ -5,6 +5,7 @@
 #include <qt/test/rpcnestedtests.h>
 
 #include <common/system.h>
+#include <chainparams.h>
 #include <interfaces/node.h>
 #include <qt/rpcconsole.h>
 #include <rpc/server.h>
@@ -82,7 +83,8 @@ void RPCNestedTests::rpcNestedTests()
     QVERIFY(result == result2);
 
     RPCConsole::RPCExecuteCommandLine(m_node, result, "getblock(getbestblockhash())[tx][0]", &filtered);
-    QVERIFY(result == "597434e3ce8c541d1b6b739a1f2477b8785cb4b803084ca628c06cd1c2c9b5af");
+    // The only transaction of the first block, whatever chain this is.
+    QVERIFY(result == Params().GenesisBlock().vtx[0]->GetHash().GetHex());
     QVERIFY(filtered == "getblock(getbestblockhash())[tx][0]");
 
     RPCConsole::RPCParseCommandLine(nullptr, result, "createwallet test true", false, &filtered);

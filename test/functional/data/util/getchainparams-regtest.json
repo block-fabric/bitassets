@@ -7,13 +7,13 @@
     "limit": "7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
   },
   "net": {
-    "default_port": 29555,
-    "magic": "c7e8c1da",
+    "default_port": 29655,
+    "magic": "5c1dec04",
     "dns_seeds": [
       "dummySeed.invalid."
     ]
   },
   "addresses": {
-    "bech32_hrp": "rchn"
+    "bech32_hrp": "rsc"
   }
 }

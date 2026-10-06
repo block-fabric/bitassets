@@ -9,7 +9,6 @@
 #include <qt/blockexplorer.h>
 #include <qt/cryptotoolsdialog.h>
 #include <qt/miningdialog.h>
-#include <qt/sidechainnodes.h>
 #include <qt/multisigdialog.h>
 #include <qt/proofoffundsdialog.h>
 #include <qt/timestampdialog.h>
@@ -30,6 +29,7 @@
 
 #ifdef ENABLE_WALLET
 #include <qt/walletcontroller.h>
+#include <qt/sidebarmining.h>
 #include <qt/theme.h>
 #include <qt/themedframe.h>
 #include <qt/walletframe.h>
@@ -136,7 +136,6 @@ BitcoinGUI::BitcoinGUI(interfaces::Node& node, const PlatformStyle *_platformSty
     m_timestamp_dialog = new TimestampDialog(wallet_name, nullptr);
     m_proof_dialog = new ProofOfFundsDialog(wallet_name, nullptr);
     m_multisig_dialog = new MultisigDialog(wallet_name, nullptr);
-    m_sidechain_nodes = new SidechainNodesDialog(wallet_name, nullptr);
     helpMessageDialog = new HelpMessageDialog(this, false);
 #ifdef ENABLE_WALLET
     if(enableWallet)
@@ -280,7 +279,6 @@ BitcoinGUI::~BitcoinGUI()
     delete m_timestamp_dialog;
     delete m_proof_dialog;
     delete m_multisig_dialog;
-    delete m_sidechain_nodes;
 }
 
 void BitcoinGUI::createActions()
@@ -316,8 +314,8 @@ void BitcoinGUI::createActions()
     historyAction->setShortcut(QKeySequence(QStringLiteral("Alt+4")));
     tabGroup->addAction(historyAction);
 
-    sidechainAction = new QAction(platformStyle->SingleColorIcon(":/icons/proxy"), tr("Si&dechains"), this);
-    sidechainAction->setStatusTip(tr("Deposit to sidechains, and manage sidechain proposals and withdrawal votes"));
+    sidechainAction = new QAction(platformStyle->SingleColorIcon(":/icons/proxy"), tr("&Mainchain"), this);
+    sidechainAction->setStatusTip(tr("Deposit from the mainchain, withdraw to it, and mine this chain"));
     sidechainAction->setToolTip(sidechainAction->statusTip());
     sidechainAction->setCheckable(true);
     sidechainAction->setShortcut(QKeySequence(QStringLiteral("Alt+5")));
@@ -645,7 +643,7 @@ void BitcoinGUI::createMenuBar()
         banking->addAction(m_load_psbt_clipboard_action);
     }
 
-    QMenu* use{appMenuBar->addMenu(tr("&Use Chains"))};
+    QMenu* use{appMenuBar->addMenu(tr("&Use %1").arg(CLIENT_NAME))};
     window_action(use, tr("Timestamp &File"), tr("Prove that a file existed, by publishing its fingerprint on the chain"), m_timestamp_dialog);
     if (walletFrame) {
         use->addSeparator();
@@ -653,15 +651,9 @@ void BitcoinGUI::createMenuBar()
         use->addAction(verifyMessageAction);
         use->addSeparator();
         use->addAction(sidechainAction);
-    }
-
-    QMenu* work{appMenuBar->addMenu(tr("&Chains"))};
-    window_action(work, tr("Sidechain &Nodes"), tr("Install, start and stop the nodes of sidechains, and watch them"), m_sidechain_nodes);
-    window_action(work, tr("Solo &Mine"), tr("Mine blocks with the processor of this computer"), m_mining_dialog);
-    if (walletFrame) {
-        QAction* sidechain_admin{work->addAction(tr("Sidechain &Proposals and Votes"))};
-        sidechain_admin->setStatusTip(tr("Propose sidechains, acknowledge proposals and vote on withdrawals in the blocks this node mines"));
-        connect(sidechain_admin, &QAction::triggered, this, [this] { showNormalIfMinimized(); gotoSidechainPage(); });
+        QAction* merged_mining{use->addAction(tr("Merged M&ining"))};
+        merged_mining->setStatusTip(tr("Have the miners of the mainchain mine the blocks of this chain"));
+        connect(merged_mining, &QAction::triggered, this, [this] { showNormalIfMinimized(); gotoSidechainPage(); });
     }
 
     QMenu* tools{appMenuBar->addMenu(tr("Crypto &Tools"))};
@@ -826,8 +818,6 @@ void BitcoinGUI::createToolBars()
 
         section(tr("Chain"));
         entry(sidechainAction);
-        window_entry(":/icons/connect_4", tr("Sidechain Nodes"), tr("Install, start and stop the nodes of sidechains, and watch them"), m_sidechain_nodes);
-        window_entry(":/icons/tx_mined", tr("Mine"), tr("Mine blocks with the processor of this computer"), m_mining_dialog);
         window_entry(":/icons/eye", tr("Block Explorer"), tr("Browse blocks and the transactions waiting to be mined"), m_block_explorer);
 
         section(tr("Node"));
@@ -841,6 +831,16 @@ void BitcoinGUI::createToolBars()
         connect(settings, &QAction::triggered, optionsAction, &QAction::trigger);
         m_sidebar_icons.emplace_back(settings, ":/icons/fontbigger");
         entry(settings);
+
+        // Mining of this chain, which the miners of the mainchain do for a fee.
+        section(tr("Mining"));
+        m_sidebar_mining = new SidebarMining([this]() -> std::optional<QString> {
+#ifdef ENABLE_WALLET
+            if (walletFrame && walletFrame->currentWalletModel()) return walletFrame->currentWalletModel()->getWalletName();
+#endif
+            return std::nullopt;
+        }, toolbar);
+        toolbar->addWidget(m_sidebar_mining);
 
         // The look: colours and a font that goes with them. A combination of one's own is made in the settings.
         section(tr("Theme"));
@@ -953,11 +953,11 @@ void BitcoinGUI::setClientModel(ClientModel *_clientModel, interfaces::BlockAndH
         rpcConsole->setClientModel(_clientModel, tip_info->block_height, tip_info->block_time, tip_info->verification_progress);
         m_mining_dialog->setClientModel(_clientModel);
         m_block_explorer->setClientModel(_clientModel);
+        if (m_sidebar_mining) m_sidebar_mining->setClientModel(_clientModel);
         m_crypto_tools->setClientModel(_clientModel);
         m_timestamp_dialog->setClientModel(_clientModel);
         m_proof_dialog->setClientModel(_clientModel);
         m_multisig_dialog->setClientModel(_clientModel);
-        m_sidechain_nodes->setClientModel(_clientModel);
 
         updateProxyIcon();
 
@@ -990,11 +990,11 @@ void BitcoinGUI::setClientModel(ClientModel *_clientModel, interfaces::BlockAndH
         rpcConsole->setClientModel(nullptr);
         m_mining_dialog->setClientModel(nullptr);
         m_block_explorer->setClientModel(nullptr);
+        if (m_sidebar_mining) m_sidebar_mining->setClientModel(nullptr);
         m_crypto_tools->setClientModel(nullptr);
         m_timestamp_dialog->setClientModel(nullptr);
         m_proof_dialog->setClientModel(nullptr);
         m_multisig_dialog->setClientModel(nullptr);
-        m_sidechain_nodes->setClientModel(nullptr);
 #ifdef ENABLE_WALLET
         if (walletFrame)
         {

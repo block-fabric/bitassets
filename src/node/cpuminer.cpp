@@ -44,6 +44,10 @@ bool CpuMiner::Start(int threads, const CScript& coinbase_output_script, std::st
         error = "The node is not ready to mine";
         return false;
     }
+    if (m_node.chainman->GetConsensus().sidechain.enabled) {
+        error = "The blocks of a sidechain are mined by the miners of the mainchain; use setbmm instead";
+        return false;
+    }
     if (m_node.chainman->GetConsensus().signet_blocks) {
         error = "Blocks of a signet need a signature; use contrib/signet/miner instead";
         return false;

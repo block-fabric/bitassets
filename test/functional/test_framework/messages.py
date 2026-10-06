@@ -89,10 +89,10 @@ TX_MIN_STANDARD_VERSION = 1
 TX_MAX_STANDARD_VERSION = 3
 
 MAGIC_BYTES = {
-    "mainnet": b"\xc7\xe8\xa9\xd5",  # Chains mainnet
-    "testnet": b"\xc7\xe8\xb4\xf3",  # Chains testnet
-    "regtest": b"\xc7\xe8\xc1\xda",
-    "signet": b"\x6d\x64\x19\x4b",  # the default signet; derived from its challenge
+    "mainnet": b"\x5c\x1d\xec\x01",
+    "testnet": b"\x5c\x1d\xec\x02",
+    "regtest": b"\x5c\x1d\xec\x04",
+    "signet": b"\x5c\x1d\xec\x03",
 }
 
 def sha256(s):

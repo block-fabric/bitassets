@@ -246,6 +246,9 @@ void CTxMemPool::addNewTransaction(CTxMemPool::txiter newit)
         // The mempool admits one request per sidechain; should a second slip in, the first stays indexed.
         m_bmm_requests.emplace(request.slot, tx.GetHash());
     }
+    for (const CTxOut& out : tx.vout) {
+        if (const auto refund{sidechain::ParseRefundScript(out.scriptPubKey)}) m_refunds[refund->withdrawal] = tx.GetHash();
+    }
     // Don't bother worrying about child transactions of this one.
     // Normal case of a new transaction arriving is that there can't be any
     // children, because such children would be orphans.
@@ -301,6 +304,13 @@ void CTxMemPool::removeUnchecked(txiter it, MemPoolRemovalReason reason)
     for (const drivechain::BmmRequest& request : drivechain::GetBmmRequests(it->GetTx())) {
         if (const auto bmm{m_bmm_requests.find(request.slot)}; bmm != m_bmm_requests.end() && bmm->second == it->GetTx().GetHash()) {
             m_bmm_requests.erase(bmm);
+        }
+    }
+    for (const CTxOut& out : it->GetTx().vout) {
+        if (const auto refund{sidechain::ParseRefundScript(out.scriptPubKey)}) {
+            if (const auto entry{m_refunds.find(refund->withdrawal)}; entry != m_refunds.end() && entry->second == it->GetTx().GetHash()) {
+                m_refunds.erase(entry);
+            }
         }
     }
 

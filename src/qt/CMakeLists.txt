@@ -133,10 +133,10 @@ add_library(bitcoinqt STATIC EXCLUDE_FROM_ALL
   proofoffundsdialog.h
   rpcconsole.cpp
   rpcconsole.h
-  sidechainnodes.cpp
-  sidechainnodes.h
   theme.cpp
   theme.h
+  sidebarmining.cpp
+  sidebarmining.h
   themedframe.cpp
   themedframe.h
   timestampdialog.cpp

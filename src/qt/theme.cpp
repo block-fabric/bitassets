@@ -170,7 +170,10 @@ QString SidebarStyleSheet(const Colors& c)
                "QPushButton#sidebarEntry:hover { background-color: rgba(128, 128, 128, 45); }"
                "QPushButton#sidebarEntry:checked { background-color: %2; color: %3; border-left: 3px solid %1; padding-left: 3px; font-weight: bold; }"
                "QPushButton#sidebarEntry:disabled { background: transparent; }"
-               "QToolBar#sidebar QToolButton#textSmaller, QToolBar#sidebar QToolButton#textLarger { padding: 2px 3px; }")
+               "QToolBar#sidebar QToolButton#textSmaller, QToolBar#sidebar QToolButton#textLarger { padding: 2px 3px; }"
+               "QWidget#sidebarMining QPushButton { padding: 4px 6px; min-width: 0px; }"
+               "QWidget#sidebarMining QPushButton:checked { background-color: %2; border: 1px solid %1; color: %3; }"
+               "QWidget#sidebarMining QLineEdit { padding: 3px 4px; min-width: 0px; }")
         .arg(c.highlight.name(), Tint(c.highlight), c.window_text.name());
 }
 

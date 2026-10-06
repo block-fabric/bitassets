@@ -7,6 +7,7 @@
 #include <pow.h>
 #include <test/util/random.h>
 #include <test/util/common.h>
+#include <test/util/inherited_params.h>
 #include <test/util/setup_common.h>
 #include <util/chaintype.h>
 
@@ -24,7 +25,7 @@ BOOST_FIXTURE_TEST_SUITE(pow_tests, BasicTestingSetup)
  */
 static Consensus::Params PeriodicRetargetParams(const ArgsManager& args)
 {
-    Consensus::Params params{CreateChainParams(args, ChainType::MAIN)->GetConsensus()};
+    Consensus::Params params{WithInheritedRules(CreateChainParams(args, ChainType::MAIN)->GetConsensus())};
     params.asert_half_life = 0;
     params.nPowTargetSpacing = 10 * 60;
     params.nPowTargetTimespan = 14 * 24 * 60 * 60;
@@ -100,7 +101,7 @@ BOOST_AUTO_TEST_CASE(get_next_work_upper_limit_actual)
 
 BOOST_AUTO_TEST_CASE(CheckProofOfWork_test_negative_target)
 {
-    const auto consensus = CreateChainParams(*m_node.args, ChainType::MAIN)->GetConsensus();
+    const auto consensus = WithInheritedRules(CreateChainParams(*m_node.args, ChainType::MAIN)->GetConsensus());
     uint256 hash;
     unsigned int nBits;
     nBits = UintToArith256(consensus.powLimit).GetCompact(true);
@@ -110,7 +111,7 @@ BOOST_AUTO_TEST_CASE(CheckProofOfWork_test_negative_target)
 
 BOOST_AUTO_TEST_CASE(CheckProofOfWork_test_overflow_target)
 {
-    const auto consensus = CreateChainParams(*m_node.args, ChainType::MAIN)->GetConsensus();
+    const auto consensus = WithInheritedRules(CreateChainParams(*m_node.args, ChainType::MAIN)->GetConsensus());
     uint256 hash;
     unsigned int nBits{~0x00800000U};
     hash = uint256{1};
@@ -119,7 +120,7 @@ BOOST_AUTO_TEST_CASE(CheckProofOfWork_test_overflow_target)
 
 BOOST_AUTO_TEST_CASE(CheckProofOfWork_test_too_easy_target)
 {
-    const auto consensus = CreateChainParams(*m_node.args, ChainType::MAIN)->GetConsensus();
+    const auto consensus = WithInheritedRules(CreateChainParams(*m_node.args, ChainType::MAIN)->GetConsensus());
     uint256 hash;
     unsigned int nBits;
     arith_uint256 nBits_arith = UintToArith256(consensus.powLimit);
@@ -131,7 +132,7 @@ BOOST_AUTO_TEST_CASE(CheckProofOfWork_test_too_easy_target)
 
 BOOST_AUTO_TEST_CASE(CheckProofOfWork_test_biger_hash_than_target)
 {
-    const auto consensus = CreateChainParams(*m_node.args, ChainType::MAIN)->GetConsensus();
+    const auto consensus = WithInheritedRules(CreateChainParams(*m_node.args, ChainType::MAIN)->GetConsensus());
     uint256 hash;
     unsigned int nBits;
     arith_uint256 hash_arith = UintToArith256(consensus.powLimit);
@@ -143,7 +144,7 @@ BOOST_AUTO_TEST_CASE(CheckProofOfWork_test_biger_hash_than_target)
 
 BOOST_AUTO_TEST_CASE(CheckProofOfWork_test_zero_target)
 {
-    const auto consensus = CreateChainParams(*m_node.args, ChainType::MAIN)->GetConsensus();
+    const auto consensus = WithInheritedRules(CreateChainParams(*m_node.args, ChainType::MAIN)->GetConsensus());
     uint256 hash;
     unsigned int nBits;
     arith_uint256 hash_arith{0};
@@ -285,7 +286,7 @@ BOOST_AUTO_TEST_CASE(asert_clamp)
 BOOST_AUTO_TEST_CASE(asert_chain)
 {
     const auto chain_params{CreateChainParams(*m_node.args, ChainType::MAIN)};
-    const Consensus::Params& params{chain_params->GetConsensus()};
+    const Consensus::Params params{WithInheritedRules(chain_params->GetConsensus())};
     BOOST_REQUIRE(params.asert_half_life > 0);
     const int anchor_height{params.asert_anchor_height};
     BOOST_REQUIRE(anchor_height >= 3);
@@ -347,7 +348,7 @@ BOOST_AUTO_TEST_CASE(asert_chain)
 BOOST_AUTO_TEST_CASE(asert_slow_bootstrap)
 {
     const auto chain_params{CreateChainParams(*m_node.args, ChainType::MAIN)};
-    const Consensus::Params& params{chain_params->GetConsensus()};
+    const Consensus::Params params{WithInheritedRules(chain_params->GetConsensus())};
     const int anchor_height{params.asert_anchor_height};
     const uint32_t limit_bits{UintToArith256(params.powLimit).GetCompact()};
 

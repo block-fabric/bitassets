@@ -42,6 +42,10 @@ namespace util {
 class SignalInterrupt;
 }
 
+namespace sidechain {
+class Follower;
+} // namespace sidechain
+
 namespace node {
 class CpuMiner;
 class KernelNotifications;
@@ -86,6 +90,8 @@ struct NodeContext {
     std::unique_ptr<interfaces::Mining> mining;
     //! Built-in miner. Declared after `mining` and `chainman`, which it uses.
     std::unique_ptr<CpuMiner> cpu_miner;
+    //! Follows the mainchain, if this chain is a sidechain.
+    std::unique_ptr<sidechain::Follower> follower;
     //! Mining options used to create block templates. This value member is an
     //! exception to the dependency guidance above because BlockCreateOptions is
     //! a minimal dependency. It could be moved to the BlockTemplateCache

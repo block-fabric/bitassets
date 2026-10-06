@@ -24,6 +24,7 @@ enum class Warning {
     CLOCK_OUT_OF_SYNC,
     PRE_RELEASE_TEST_BUILD,
     FATAL_INTERNAL_ERROR,
+    MAINCHAIN_UNREACHABLE,
 };
 
 /**

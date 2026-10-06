@@ -788,6 +788,24 @@ bool MemPoolAccept::DrivechainChecks(Workspace& ws)
     const CTransaction& tx{*ws.m_ptx};
     const Consensus::DrivechainParams& params{m_active_chainstate.m_chainman.GetConsensus().drivechain};
 
+    // On a sidechain: withdrawals have to be well formed, and a refund request has to be one that the next block can honour.
+    if (const Consensus::SidechainParams& side_params{m_active_chainstate.m_chainman.GetConsensus().sidechain}; side_params.enabled) {
+        const sidechain::State& side{m_active_chainstate.m_scdb.m_side};
+        for (const CTxOut& out : tx.vout) {
+            if (sidechain::IsWithdrawalScript(out.scriptPubKey)) {
+                const auto withdrawal{sidechain::ParseWithdrawalOutput(out)};
+                if (!withdrawal) return ws.m_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "bad-sc-withdrawal");
+                if (withdrawal->amount < side_params.min_withdrawal) return ws.m_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "bad-sc-withdrawal-amount");
+            } else if (const auto refund{sidechain::ParseRefundScript(out.scriptPubKey)}) {
+                std::string reject_reason;
+                if (!side.CheckRefund(*refund, reject_reason)) return ws.m_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, reject_reason);
+                if (const auto other{m_pool.m_refunds.find(refund->withdrawal)}; other != m_pool.m_refunds.end() && !ws.m_conflicts.contains(other->second)) {
+                    return ws.m_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "sc-refund-in-mempool");
+                }
+            }
+        }
+    }
+
     // The sidechains whose escrow this transaction touches.
     std::set<drivechain::SidechainId> slots;
     for (const CTxOut& out : tx.vout) {
@@ -1917,8 +1935,16 @@ PackageMempoolAcceptResult ProcessNewPackage(Chainstate& active_chainstate, CTxM
     return result;
 }
 
+std::optional<drivechain::SideContext> ChainstateManager::SideContext(CAmount& minted) const
+{
+    if (!GetConsensus().sidechain.enabled) return std::nullopt;
+    return drivechain::SideContext{GetConsensus().sidechain, *Assert(m_mainchain), minted};
+}
+
 CAmount GetBlockSubsidy(int nHeight, const Consensus::Params& consensusParams)
 {
+    // The coins of a sidechain all come from the mainchain.
+    if (consensusParams.sidechain.enabled) return 0;
     int halvings = nHeight / consensusParams.nSubsidyHalvingInterval;
     // Force block reward to zero when right shift is undefined.
     if (halvings >= 64)
@@ -2703,11 +2729,6 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
              Ticks<SecondsDouble>(m_chainman.time_connect),
              Ticks<MillisecondsDouble>(m_chainman.time_connect) / m_chainman.num_blocks_total);
 
-    CAmount blockReward = nFees + GetBlockSubsidy(pindex->nHeight, params.GetConsensus());
-    if (block.vtx[0]->GetValueOut() > blockReward && state.IsValid()) {
-        state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-cb-amount",
-                      strprintf("coinbase pays too much (actual=%d vs limit=%d)", block.vtx[0]->GetValueOut(), blockReward));
-    }
     if (control) {
         auto parallel_result = control->Complete();
         if (parallel_result.has_value() && state.IsValid()) {
@@ -2723,6 +2744,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     }
     drivechain::BlockUndo scdb_undo;
     std::vector<drivechain::Deposit> scdb_deposits;
+    CAmount minted{0};
     if (state.IsValid()) {
         // A sidechain database that has not seen a block yet is empty and fits any block.
         if (scdb->GetBlockHash().IsNull()) scdb->SetBlockHash(hashPrevBlock);
@@ -2735,9 +2757,17 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             return FatalError(m_chainman.GetNotifications(), state, _("The sidechain database does not match the block being connected."));
         }
         std::string reject_reason;
-        if (!scdb->ConnectBlock(block, pindex->nHeight, params.GetConsensus().drivechain, scdb_undo, &scdb_deposits, reject_reason)) {
+        const auto side{m_chainman.SideContext(minted)};
+        if (!scdb->ConnectBlock(block, pindex->nHeight, params.GetConsensus().drivechain, scdb_undo, &scdb_deposits, reject_reason, side ? &*side : nullptr)) {
             state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, reject_reason);
         }
+    }
+
+    // On a sidechain the coinbase also creates the coins of deposits and refunds.
+    CAmount blockReward = nFees + GetBlockSubsidy(pindex->nHeight, params.GetConsensus()) + minted;
+    if (block.vtx[0]->GetValueOut() > blockReward && state.IsValid()) {
+        state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-cb-amount",
+                      strprintf("coinbase pays too much (actual=%d vs limit=%d)", block.vtx[0]->GetValueOut(), blockReward));
     }
 
     if (!state.IsValid()) {
@@ -4237,6 +4267,30 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
     if (block.GetBlockTime() <= pindexPrev->GetMedianTimePast())
         return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "time-too-old", "block's timestamp is too early");
 
+    // Blind merged mining: a block of a sidechain is one that a mainchain block
+    // committed to, and the mainchain commits to the blocks of a chain in order.
+    if (consensusParams.sidechain.enabled) {
+        const sidechain::Mainchain& mainchain{*Assert(chainman.m_mainchain)};
+        const uint256 hash{block.GetHash()};
+        auto bmm_height{mainchain.BmmHeight(hash)};
+        if (!bmm_height && chainman.m_mainchain_poll) {
+            // The commitment may be in a mainchain block that is not on record yet.
+            chainman.m_mainchain_poll();
+            bmm_height = mainchain.BmmHeight(hash);
+        }
+        // Not a reason to remember the block as invalid: the commitment may still come.
+        if (!bmm_height) {
+            // Bounded, as anyone can send headers that will never be committed to.
+            chainman.AddBmmWaiting(block, /*peer=*/-1);
+            return state.Invalid(BlockValidationResult::BLOCK_TIME_FUTURE, "bmm-unknown", "no mainchain block is known to commit to this block");
+        }
+        if (pindexPrev->pprev) {
+            const auto prev_bmm_height{mainchain.BmmHeight(pindexPrev->GetBlockHash())};
+            if (!prev_bmm_height) return state.Invalid(BlockValidationResult::BLOCK_TIME_FUTURE, "bmm-prev-unknown", "no mainchain block is known to commit to the previous block");
+            if (*bmm_height <= *prev_bmm_height) return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "bmm-order", "the mainchain committed to this block before it committed to the previous block");
+        }
+    }
+
     // Testnet4 and regtest only: Check timestamp against prev for difficulty-adjustment
     // blocks to prevent timewarp attacks (see https://github.com/bitcoin/bitcoin/pull/15482).
     if (consensusParams.enforce_BIP94) {
@@ -4640,6 +4694,11 @@ BlockValidationState TestBlockValidity(
         return state;
     }
 
+    // A block of a sidechain is checked before the mainchain is asked to
+    // commit to it, as if the next mainchain block did.
+    std::optional<sidechain::Mainchain::AssumeCommitted> assume_bmm;
+    if (chainstate.m_chainman.m_mainchain) assume_bmm.emplace(*chainstate.m_chainman.m_mainchain, chainstate.m_chainman.m_mainchain->Height() + 1);
+
     // For signets CheckBlock() verifies the challenge iff fCheckPow is set.
     if (!CheckBlock(block, state, chainstate.m_chainman.GetConsensus(), /*fCheckPow=*/check_pow, /*fCheckMerkleRoot=*/check_merkle_root)) {
         // This should never happen, but belt-and-suspenders don't approve the
@@ -4823,11 +4882,19 @@ void Chainstate::RemoveStaleDrivechainTxs()
     AssertLockHeld(::cs_main);
     if (!m_mempool) return;
     AssertLockHeld(m_mempool->cs);
-    if (m_mempool->m_bmm_requests.empty() && m_mempool->m_escrow_txs.empty()) return;
+    if (m_mempool->m_bmm_requests.empty() && m_mempool->m_escrow_txs.empty() && m_mempool->m_refunds.empty()) return;
     const CBlockIndex* tip{m_chain.Tip()};
     if (!tip) return;
 
     std::vector<CTransactionRef> stale;
+
+    // On a sidechain: a withdrawal that was paid, refunded or put in a bundle can no longer be taken back.
+    if (m_chainman.GetConsensus().sidechain.enabled) {
+        for (const auto& [withdrawal, txid] : m_mempool->m_refunds) {
+            if (m_scdb.m_side.Withdrawals().contains(withdrawal) && !m_scdb.m_side.InBundle(withdrawal)) continue;
+            if (const CTransactionRef tx{m_mempool->get(txid)}) stale.push_back(tx);
+        }
+    }
 
     // Requests for blind merged mining are bound to the block they were made for.
     for (const auto& [id, txid] : m_mempool->m_bmm_requests) {
@@ -4921,7 +4988,9 @@ bool Chainstate::LoadDrivechainState()
         drivechain::BlockUndo undo;
         std::vector<drivechain::Deposit> deposits;
         std::string reject_reason;
-        if (!scdb.ConnectBlock(block, height, params, undo, &deposits, reject_reason)) {
+        CAmount minted{0};
+        const auto side{m_chainman.SideContext(minted)};
+        if (!scdb.ConnectBlock(block, height, params, undo, &deposits, reject_reason, side ? &*side : nullptr)) {
             LogError("%s: block %s breaks the drivechain rules (%s)", __func__, next->GetBlockHash().ToString(), reject_reason);
             return false;
         }
@@ -6469,6 +6538,15 @@ ChainstateManager::ChainstateManager(const util::SignalInterrupt& interrupt, Opt
       m_blockman{interrupt, std::move(blockman_options)},
       m_validation_cache{m_options.script_execution_cache_bytes, m_options.signature_cache_bytes}
 {
+    if (GetConsensus().sidechain.enabled) {
+        // The record of the mainchain lives next to the block index, but is not wiped with it:
+        // it is what the blocks on disk are checked against when the index is rebuilt.
+        DBParams db_params{m_blockman.m_opts.block_tree_db_params};
+        db_params.path = db_params.path.parent_path() / "mainchain";
+        db_params.cache_bytes = 2_MiB;
+        db_params.wipe_data = false;
+        m_mainchain = std::make_unique<sidechain::Mainchain>(db_params);
+    }
 }
 
 ChainstateManager::~ChainstateManager()
@@ -6733,4 +6811,27 @@ util::Result<void> ChainstateManager::ActivateBestChains()
         }
     }
     return {};
+}
+
+void ChainstateManager::AddBmmWaiting(const CBlockHeader& header, int64_t peer) const
+{
+    AssertLockHeld(::cs_main);
+    static constexpr size_t MAX_BMM_WAITING{1000};
+    const uint256 hash{header.GetHash()};
+    if (const auto it{m_bmm_waiting.find(hash)}; it != m_bmm_waiting.end()) {
+        // A header without a peer was looked at by validation; the peer that sent it is the one to keep.
+        if (it->second.peer < 0) it->second.peer = peer;
+        return;
+    }
+    if (m_bmm_waiting.size() >= MAX_BMM_WAITING) {
+        std::map<int64_t, size_t> counts;
+        for (const auto& [_, waiting] : m_bmm_waiting) ++counts[waiting.peer];
+        const int64_t crowded{std::max_element(counts.begin(), counts.end(), [](const auto& a, const auto& b) { return a.second < b.second; })->first};
+        auto oldest{m_bmm_waiting.end()};
+        for (auto it{m_bmm_waiting.begin()}; it != m_bmm_waiting.end(); ++it) {
+            if (it->second.peer == crowded && (oldest == m_bmm_waiting.end() || it->second.sequence < oldest->second.sequence)) oldest = it;
+        }
+        m_bmm_waiting.erase(oldest);
+    }
+    m_bmm_waiting.emplace(hash, BmmWaiting{header, peer, m_bmm_waiting_sequence++});
 }

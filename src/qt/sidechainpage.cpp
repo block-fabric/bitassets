@@ -4,49 +4,45 @@
 
 #include <qt/sidechainpage.h>
 
-#include <core_io.h>
-#include <drivechain/sidechain.h>
-#include <interfaces/node.h>
-#include <qt/bitcoinamountfield.h>
-#include <qt/bitcoinunits.h>
 #include <qt/clientmodel.h>
 #include <qt/guiutil.h>
-#include <qt/optionsmodel.h>
+#include <qt/noderpc.h>
 #include <qt/platformstyle.h>
+#include <qt/sidebarmining.h>
 #include <qt/walletmodel.h>
-#include <rpc/util.h>
 
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QHideEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QShowEvent>
-#include <QSpinBox>
 #include <QTableWidget>
 #include <QTabWidget>
-#include <QUrl>
+#include <QTimer>
 #include <QVBoxLayout>
 
 namespace {
+using NodeRpc::Args;
+using NodeRpc::Item;
+using NodeRpc::Text;
 
-QTableWidgetItem* Item(const QString& text)
+constexpr int REFRESH_INTERVAL_MS{5000};
+//! Columns of the table of withdrawals.
+enum { COL_STATUS, COL_AMOUNT, COL_FEE, COL_HEIGHT, COL_REFUND, COL_TXID, COL_VOUT };
+
+QString Amount(const UniValue& value) { return QString::number(value.get_real(), 'f', 8); }
+
+bool IsAmount(const QString& text)
 {
-    auto* item{new QTableWidgetItem(text)};
-    item->setFlags(item->flags() & ~Qt::ItemIsEditable);
-    return item;
+    static const QRegularExpression expression{QStringLiteral("^\\d{1,8}(\\.\\d{1,8})?$")};
+    return expression.match(text).hasMatch();
 }
-
-QString Text(const UniValue& value)
-{
-    return value.isStr() ? QString::fromStdString(value.get_str()) : QString::fromStdString(value.getValStr());
-}
-
-QString YesNo(const UniValue& value) { return value.get_bool() ? QObject::tr("yes") : QObject::tr("no"); }
-
 } // namespace
 
 SidechainPage::SidechainPage(const PlatformStyle* platform_style, QWidget* parent) : QWidget(parent)
@@ -54,200 +50,162 @@ SidechainPage::SidechainPage(const PlatformStyle* platform_style, QWidget* paren
     auto* layout{new QVBoxLayout(this)};
 
     m_summary = new QLabel(this);
+    m_summary->setObjectName("mainchainSummary");
     m_summary->setWordWrap(true);
     layout->addWidget(m_summary);
 
     m_tabs = new QTabWidget(this);
-    m_tabs->setObjectName("sidechainTabs");
-    m_tabs->addTab(createSidechainsTab(), tr("Sidechains"));
-    m_tabs->addTab(createProposalsTab(), tr("Proposals"));
-    m_tabs->addTab(createWithdrawalsTab(), tr("Withdrawals"));
+    m_tabs->setObjectName("mainchainTabs");
+    m_tabs->addTab(createDepositTab(), tr("&Deposit"));
+    m_tabs->addTab(createWithdrawTab(), tr("&Withdraw"));
+    m_tabs->addTab(createMiningTab(), tr("&Mine"));
     layout->addWidget(m_tabs);
 
-    auto* buttons{new QHBoxLayout()};
-    auto* refresh_button{new QPushButton(tr("&Refresh"), this)};
-    buttons->addStretch();
-    buttons->addWidget(refresh_button);
-    layout->addLayout(buttons);
-    connect(refresh_button, &QPushButton::clicked, this, &SidechainPage::refresh);
+    m_timer = new QTimer(this);
+    connect(m_timer, &QTimer::timeout, this, &SidechainPage::refresh);
 }
 
-QTableWidget* SidechainPage::createTable(const QStringList& headers, QWidget* parent)
-{
-    auto* table{new QTableWidget(0, headers.size(), parent)};
-    table->setHorizontalHeaderLabels(headers);
-    table->setSelectionBehavior(QAbstractItemView::SelectRows);
-    table->setSelectionMode(QAbstractItemView::SingleSelection);
-    table->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    table->setAlternatingRowColors(true);
-    table->verticalHeader()->hide();
-    table->horizontalHeader()->setStretchLastSection(true);
-    return table;
-}
-
-QString SidechainPage::selected(const QTableWidget* table, int column)
-{
-    const int row{table->currentRow()};
-    if (row < 0 || !table->item(row, column)) return {};
-    return table->item(row, column)->text();
-}
-
-QWidget* SidechainPage::createSidechainsTab()
+QWidget* SidechainPage::createDepositTab()
 {
     auto* tab{new QWidget(this)};
     auto* layout{new QVBoxLayout(tab)};
+    m_deposit_instructions = new QLabel(tab);
+    m_deposit_instructions->setWordWrap(true);
+    m_deposit_instructions->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    layout->addWidget(m_deposit_instructions);
 
-    m_sidechains = createTable({tr("Slot"), tr("Title"), tr("In escrow"), tr("Pending withdrawals"), tr("Active since block"), tr("Description")}, tab);
-    m_sidechains->setObjectName("sidechains");
-    layout->addWidget(m_sidechains);
-    connect(m_sidechains, &QTableWidget::itemSelectionChanged, this, &SidechainPage::updateDepositTarget);
+    auto* row{new QHBoxLayout};
+    m_deposit_address = new QLineEdit(tab);
+    m_deposit_address->setObjectName("depositAddress");
+    m_deposit_address->setReadOnly(true);
+    m_deposit_address->setPlaceholderText(tr("Press the button for a deposit address of this wallet"));
+    auto* new_address{new QPushButton(tr("New deposit address"), tab)};
+    new_address->setObjectName("depositNewAddress");
+    auto* copy{new QPushButton(tr("Copy"), tab)};
+    row->addWidget(m_deposit_address, 1);
+    row->addWidget(new_address);
+    row->addWidget(copy);
+    layout->addLayout(row);
+    layout->addStretch();
 
-    auto* box{new QGroupBox(tr("Deposit to the selected sidechain"), tab)};
-    auto* form{new QFormLayout(box)};
-    m_deposit_target = new QLabel(box);
-    m_deposit_destination = new QLineEdit(box);
-    m_deposit_destination->setPlaceholderText(tr("The deposit address from the wallet of the sidechain: s<slot>_<address>_<checksum>"));
-    m_deposit_destination->setMaxLength(static_cast<int>(drivechain::MAX_DEPOSIT_DESTINATION_SIZE));
-    // A deposit address says which sidechain it is for: select it, or say what is wrong with the address.
-    connect(m_deposit_destination, &QLineEdit::textChanged, this, [this](const QString& text) {
-        drivechain::DepositAddress deposit_address;
-        const auto kind{drivechain::ParseDepositAddress(text.trimmed().toStdString(), deposit_address)};
-        m_deposit_destination->setStyleSheet(kind == drivechain::DepositAddressKind::INVALID ? QStringLiteral("QLineEdit { color: red; }") : QString{});
-        m_deposit_destination->setToolTip(kind == drivechain::DepositAddressKind::INVALID ? tr("This deposit address has a typing error in it.") : QString{});
-        if (kind != drivechain::DepositAddressKind::VALID) return;
-        for (int row{0}; row < m_sidechains->rowCount(); ++row) {
-            if (m_sidechains->item(row, 0)->text().toUInt() == deposit_address.slot) {
-                m_sidechains->selectRow(row);
-                return;
-            }
-        }
-        m_deposit_destination->setToolTip(tr("This deposit address is for slot %1, which has no active sidechain.").arg(deposit_address.slot));
-    });
-    m_deposit_amount = new BitcoinAmountField(box);
-    m_deposit_button = new QPushButton(tr("&Deposit"), box);
-    m_deposit_button->setObjectName("depositButton");
-    m_deposit_destination->setObjectName("depositDestination");
-    m_deposit_amount->setObjectName("depositAmount");
-    form->addRow(tr("Sidechain:"), m_deposit_target);
-    form->addRow(tr("Destination:"), m_deposit_destination);
-    form->addRow(tr("Amount:"), m_deposit_amount);
-    form->addRow(QString(), m_deposit_button);
-    layout->addWidget(box);
-    connect(m_deposit_button, &QPushButton::clicked, this, &SidechainPage::deposit);
-
-    updateDepositTarget();
+    connect(new_address, &QPushButton::clicked, this, &SidechainPage::newDepositAddress);
+    connect(copy, &QPushButton::clicked, this, [this] { GUIUtil::setClipboard(m_deposit_address->text()); });
     return tab;
 }
 
-QWidget* SidechainPage::createProposalsTab()
+QWidget* SidechainPage::createWithdrawTab()
 {
     auto* tab{new QWidget(this)};
     auto* layout{new QVBoxLayout(tab)};
 
-    layout->addWidget(new QLabel(tr("Proposals in the chain. A proposal activates if enough blocks ack it; blocks this node mines ack the proposals marked below."), tab));
-    m_proposals = createTable({tr("Slot"), tr("Title"), tr("Age"), tr("Acks"), tr("Failures"), tr("Blocks left"), tr("Replaces a sidechain"), tr("Acked by this node"), tr("Proposal hash")}, tab);
-    m_proposals->setObjectName("proposals");
-    layout->addWidget(m_proposals);
-    auto* ack_buttons{new QHBoxLayout()};
-    auto* ack_button{new QPushButton(tr("&Ack"), tab)};
-    auto* nack_button{new QPushButton(tr("&Stop acking"), tab)};
-    nack_button->setObjectName("nackButton");
-    ack_buttons->addWidget(ack_button);
-    ack_buttons->addWidget(nack_button);
-    ack_buttons->addStretch();
-    layout->addLayout(ack_buttons);
-    connect(ack_button, &QPushButton::clicked, this, [this] { setAck(true); });
-    connect(nack_button, &QPushButton::clicked, this, [this] { setAck(false); });
-
-    layout->addWidget(new QLabel(tr("Proposals this node will make in the next block it mines:"), tab));
-    m_queued = createTable({tr("Slot"), tr("Title"), tr("Description"), tr("Proposal hash")}, tab);
-    m_queued->setObjectName("queuedProposals");
-    m_queued->setMaximumHeight(110);
-    layout->addWidget(m_queued);
-    auto* queued_buttons{new QHBoxLayout()};
-    auto* remove_button{new QPushButton(tr("Re&move"), tab)};
-    queued_buttons->addWidget(remove_button);
-    queued_buttons->addStretch();
-    layout->addLayout(queued_buttons);
-    connect(remove_button, &QPushButton::clicked, this, &SidechainPage::removeQueuedProposal);
-
-    auto* box{new QGroupBox(tr("Propose a sidechain"), tab)};
+    auto* box{new QGroupBox(tr("Withdraw to the mainchain"), tab)};
     auto* form{new QFormLayout(box)};
-    m_proposal_slot = new QSpinBox(box);
-    m_proposal_slot->setRange(0, 511);
-    m_proposal_title = new QLineEdit(box);
-    m_proposal_title->setMaxLength(255);
-    m_proposal_description = new QLineEdit(box);
-    m_proposal_description->setMaxLength(1024);
-    m_proposal_hash1 = new QLineEdit(box);
-    m_proposal_hash1->setPlaceholderText(tr("64 hexadecimal characters (optional)"));
-    m_proposal_hash1->setMaxLength(64);
-    m_proposal_hash2 = new QLineEdit(box);
-    m_proposal_hash2->setPlaceholderText(tr("40 hexadecimal characters (optional)"));
-    m_proposal_hash2->setMaxLength(40);
-    auto* propose_button{new QPushButton(tr("&Propose"), box)};
-    propose_button->setObjectName("proposeButton");
-    m_proposal_slot->setObjectName("proposalSlot");
-    m_proposal_title->setObjectName("proposalTitle");
-    m_proposal_description->setObjectName("proposalDescription");
-    form->addRow(tr("Slot:"), m_proposal_slot);
-    form->addRow(tr("Title:"), m_proposal_title);
-    form->addRow(tr("Description:"), m_proposal_description);
-    form->addRow(tr("Release tarball hash:"), m_proposal_hash1);
-    form->addRow(tr("Build commit hash:"), m_proposal_hash2);
-    form->addRow(QString(), propose_button);
+    auto* intro{new QLabel(tr("The coins leave this wallet at once. The mainchain pays them once its miners have voted the withdrawal "
+                              "through together with those of others, which takes long. Until the withdrawal is in a bundle that is "
+                              "being voted on, it can be taken back."), box)};
+    intro->setWordWrap(true);
+    form->addRow(intro);
+    m_withdraw_address = new QLineEdit(box);
+    m_withdraw_address->setObjectName("withdrawAddress");
+    form->addRow(tr("Mainchain address:"), m_withdraw_address);
+    m_withdraw_amount = new QLineEdit(box);
+    m_withdraw_amount->setObjectName("withdrawAmount");
+    m_withdraw_amount->setPlaceholderText(QStringLiteral("0.00000000"));
+    form->addRow(tr("Amount:"), m_withdraw_amount);
+    m_withdraw_fee = new QLineEdit(QStringLiteral("0.0001"), box);
+    m_withdraw_fee->setObjectName("withdrawFee");
+    m_withdraw_fee->setToolTip(tr("Paid to the miners of the mainchain, on top of the amount. Withdrawals that offer more go first."));
+    form->addRow(tr("Mainchain fee:"), m_withdraw_fee);
+    auto* withdraw_button{new QPushButton(tr("Withdraw"), box)};
+    withdraw_button->setObjectName("withdrawButton");
+    form->addRow(withdraw_button);
     layout->addWidget(box);
-    connect(propose_button, &QPushButton::clicked, this, &SidechainPage::propose);
 
+    m_bundle = new QLabel(tab);
+    m_bundle->setObjectName("bundleStatus");
+    m_bundle->setWordWrap(true);
+    layout->addWidget(m_bundle);
+
+    m_withdrawals = new QTableWidget(0, 7, tab);
+    m_withdrawals->setObjectName("withdrawals");
+    m_withdrawals->setHorizontalHeaderLabels({tr("Status"), tr("Amount"), tr("Mainchain fee"), tr("Block"), tr("Refund address"), tr("Transaction"), tr("Output")});
+    m_withdrawals->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_withdrawals->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_withdrawals->setAlternatingRowColors(true);
+    m_withdrawals->verticalHeader()->hide();
+    m_withdrawals->horizontalHeader()->setStretchLastSection(true);
+    layout->addWidget(m_withdrawals, 1);
+    auto* refund_button{new QPushButton(tr("Take the selected withdrawal back"), tab)};
+    refund_button->setObjectName("refundButton");
+    refund_button->setToolTip(tr("Works for withdrawals of this wallet that are waiting, not for those in the bundle being voted on."));
+    layout->addWidget(refund_button, 0, Qt::AlignLeft);
+
+    connect(withdraw_button, &QPushButton::clicked, this, &SidechainPage::withdraw);
+    connect(refund_button, &QPushButton::clicked, this, &SidechainPage::refund);
     return tab;
 }
 
-QWidget* SidechainPage::createWithdrawalsTab()
+QWidget* SidechainPage::createMiningTab()
 {
     auto* tab{new QWidget(this)};
     auto* layout{new QVBoxLayout(tab)};
+    auto* intro{new QLabel(tr("The blocks of this chain are mined by the miners of the mainchain, who commit to them for a fee (blind merged "
+                              "mining), which the wallet of the mainchain node pays.\n\n"
+                              "Automatic mining asks for a block whenever there are transactions whose fees pay for one. It offers the "
+                              "mainchain miners 99% of those fees and you keep the fees themselves, so one hundredth is yours. Without "
+                              "fees it asks for nothing and costs nothing.\n\n"
+                              "A block can also be mined by hand, for a fee you choose: this is how a deposit gets paid, or a "
+                              "withdrawal bundle started, when there are no transactions to pay for a block."), tab)};
+    intro->setWordWrap(true);
+    layout->addWidget(intro);
 
-    layout->addWidget(new QLabel(tr("Withdrawal bundles that miners are voting on. A bundle is paid out once its score reaches the minimum; upvoting one bundle of a sidechain downvotes its others."), tab));
-    m_bundles = createTable({tr("Slot"), tr("Score"), tr("Blocks left"), tr("Payable"), tr("Transaction known"), tr("Vote of this node"), tr("Bundle hash")}, tab);
-    m_bundles->setObjectName("bundles");
-    layout->addWidget(m_bundles);
+    auto* form{new QFormLayout};
+    m_mining_address = new QLineEdit(tab);
+    m_mining_address->setObjectName("bmmAddress");
+    m_mining_address->setPlaceholderText(tr("Address of this chain that receives the transaction fees; empty for a new one of this wallet"));
+    form->addRow(tr("Pay fees to:"), m_mining_address);
+    layout->addLayout(form);
 
-    auto* buttons{new QHBoxLayout()};
-    auto* upvote{new QPushButton(tr("&Upvote"), tab)};
-    upvote->setObjectName("upvoteButton");
-    auto* downvote{new QPushButton(tr("&Downvote sidechain"), tab)};
-    downvote->setObjectName("downvoteButton");
-    auto* abstain{new QPushButton(tr("&Abstain"), tab)};
-    auto* default_vote{new QPushButton(tr("Use de&fault"), tab)};
-    buttons->addWidget(upvote);
-    buttons->addWidget(downvote);
-    buttons->addWidget(abstain);
-    buttons->addWidget(default_vote);
+    auto* buttons{new QHBoxLayout};
+    m_mining_start = new QPushButton(tr("Start mining"), tab);
+    m_mining_start->setObjectName("bmmStart");
+    m_mining_stop = new QPushButton(tr("Stop mining"), tab);
+    m_mining_stop->setObjectName("bmmStop");
+    buttons->addWidget(m_mining_start);
+    buttons->addWidget(m_mining_stop);
     buttons->addStretch();
     layout->addLayout(buttons);
-    connect(upvote, &QPushButton::clicked, this, [this] { setVote(QStringLiteral("upvote")); });
-    connect(downvote, &QPushButton::clicked, this, [this] { setVote(QStringLiteral("downvote")); });
-    connect(abstain, &QPushButton::clicked, this, [this] { setVote(QStringLiteral("abstain")); });
-    connect(default_vote, &QPushButton::clicked, this, [this] { setVote(QStringLiteral("default")); });
 
+    auto* once{new QHBoxLayout};
+    once->addWidget(new QLabel(tr("One block by hand, offering in mainchain coins:"), tab));
+    m_mining_amount = new QLineEdit(QStringLiteral("0.0001"), tab);
+    m_mining_amount->setObjectName("bmmAmount");
+    m_mining_amount->setMaximumWidth(140);
+    once->addWidget(m_mining_amount);
+    auto* mine_once{new QPushButton(tr("Mine one block"), tab)};
+    mine_once->setObjectName("bmmOnce");
+    once->addWidget(mine_once);
+    once->addStretch();
+    layout->addLayout(once);
+    connect(mine_once, &QPushButton::clicked, this, &SidechainPage::mineOnce);
+
+    m_mining_status = new QLabel(tab);
+    m_mining_status->setObjectName("bmmStatus");
+    m_mining_status->setWordWrap(true);
+    layout->addWidget(m_mining_status);
+    layout->addStretch();
+
+    // Mining is also set from the bar at the left of the main window.
+    connect(MiningChanges(), &MiningSignals::changed, this, &SidechainPage::refresh);
+    connect(m_mining_start, &QPushButton::clicked, this, [this] { setMining(true); });
+    connect(m_mining_stop, &QPushButton::clicked, this, [this] { setMining(false); });
     return tab;
 }
 
 void SidechainPage::setClientModel(ClientModel* client_model)
 {
     m_client_model = client_model;
-    if (!m_client_model) return;
-    connect(m_client_model, &ClientModel::numBlocksChanged, this, [this] {
-        // Reloading takes a few RPC calls; only do it for a page someone is looking at.
-        if (isVisible()) refresh();
-    });
-    if (OptionsModel* options{m_client_model->getOptionsModel()}) {
-        m_deposit_amount->setDisplayUnit(options->getDisplayUnit());
-        connect(options, &OptionsModel::displayUnitChanged, this, [this](BitcoinUnit unit) {
-            m_deposit_amount->setDisplayUnit(unit);
-            if (isVisible()) refresh();
-        });
-    }
+    if (!client_model) m_timer->stop();
 }
 
 void SidechainPage::setWalletModel(WalletModel* wallet_model)
@@ -259,228 +217,168 @@ void SidechainPage::showEvent(QShowEvent* event)
 {
     QWidget::showEvent(event);
     refresh();
+    m_timer->start(REFRESH_INTERVAL_MS);
+}
+
+void SidechainPage::hideEvent(QHideEvent* event)
+{
+    QWidget::hideEvent(event);
+    m_timer->stop();
 }
 
 std::optional<UniValue> SidechainPage::call(const std::string& method, const UniValue& params, bool wallet, bool quiet)
 {
-    if (!m_client_model) return std::nullopt;
-    std::string uri{"/"};
+    QString error;
+    std::optional<QString> wallet_name;
     if (wallet) {
         if (!m_wallet_model) return std::nullopt;
-        uri = "/wallet/" + QString::fromUtf8(QUrl::toPercentEncoding(m_wallet_model->getWalletName())).toStdString();
+        wallet_name = m_wallet_model->getWalletName();
     }
-    QString error;
-    try {
-        return m_client_model->node().executeRpc(method, params, uri);
-    } catch (const UniValue& rpc_error) {
-        error = rpc_error.isObject() && rpc_error.exists("message") ? Text(rpc_error["message"]) : QString::fromStdString(rpc_error.write());
-    } catch (const std::exception& e) {
-        error = QString::fromStdString(e.what());
-    }
-    if (!quiet) QMessageBox::warning(this, tr("Sidechains"), error);
-    return std::nullopt;
+    auto result{NodeRpc::Call(m_client_model, method, params, error, wallet_name)};
+    if (!result && !quiet) QMessageBox::warning(this, tr("Mainchain"), error);
+    return result;
 }
 
-void SidechainPage::updateDepositTarget()
+void SidechainPage::newDepositAddress()
 {
-    const QString slot{selected(m_sidechains, 0)};
-    const bool has_selection{!slot.isEmpty()};
-    m_deposit_target->setText(has_selection ? tr("%1 (slot %2)").arg(selected(m_sidechains, 1), slot) : tr("Select a sidechain in the list above"));
-    m_deposit_button->setEnabled(has_selection);
+    if (const auto address{call("getdepositaddress", Args({}), /*wallet=*/true)}) m_deposit_address->setText(Text((*address)["depositaddress"]));
+}
+
+void SidechainPage::withdraw()
+{
+    const QString address{m_withdraw_address->text().trimmed()};
+    const QString amount{m_withdraw_amount->text().trimmed()};
+    const QString fee{m_withdraw_fee->text().trimmed()};
+    if (address.isEmpty() || !IsAmount(amount) || !IsAmount(fee)) {
+        QMessageBox::information(this, tr("Mainchain"), tr("Enter a mainchain address, and the amount and the fee as numbers, like 1.5"));
+        return;
+    }
+    if (QMessageBox::question(this, tr("Mainchain"), tr("Withdraw %1 to the mainchain address %2, offering mainchain miners %3? %4 leave this wallet now.")
+                                                         .arg(amount, address, fee, QString::number(amount.toDouble() + fee.toDouble(), 'f', 8))) != QMessageBox::Yes) return;
+    const auto result{call("createwithdrawal", Args({address.toStdString(), amount.toStdString(), fee.toStdString()}), /*wallet=*/true)};
+    if (!result) return;
+    m_withdraw_address->clear();
+    m_withdraw_amount->clear();
+    QMessageBox::information(this, tr("Mainchain"), tr("The withdrawal is in transaction %1. It shows in the list once the transaction is mined.").arg(Text((*result)["txid"])));
+    refresh();
+}
+
+void SidechainPage::refund()
+{
+    const int row{m_withdrawals->currentRow()};
+    if (row < 0) {
+        QMessageBox::information(this, tr("Mainchain"), tr("Select a withdrawal in the list first."));
+        return;
+    }
+    const auto result{call("refundwithdrawal", Args({m_withdrawals->item(row, COL_TXID)->text().toStdString(), m_withdrawals->item(row, COL_VOUT)->text().toInt()}), /*wallet=*/true)};
+    if (!result) return;
+    QMessageBox::information(this, tr("Mainchain"), tr("%1 will be paid back to %2 by the block that mines the request.").arg(Amount((*result)["amount"]), Text((*result)["refundaddress"])));
+    refresh();
+}
+
+QString SidechainPage::miningAddress()
+{
+    QString address{m_mining_address->text().trimmed()};
+    if (address.isEmpty()) {
+        const auto fresh{call("getnewaddress", Args({"mining"}), /*wallet=*/true)};
+        if (!fresh) return {};
+        address = Text(*fresh);
+        m_mining_address->setText(address);
+    }
+    return address;
+}
+
+void SidechainPage::setMining(bool mine)
+{
+    UniValue params{Args({mine})};
+    if (mine) {
+        const QString address{miningAddress()};
+        if (address.isEmpty()) return;
+        params.push_back(address.toStdString());
+    }
+    call("setbmm", params);
+    // The bar at the left shows the same.
+    Q_EMIT MiningChanges()->changed();
+}
+
+void SidechainPage::mineOnce()
+{
+    const QString amount{m_mining_amount->text().trimmed()};
+    if (!IsAmount(amount)) {
+        QMessageBox::information(this, tr("Mainchain"), tr("Enter the offer as a number, like 0.0001"));
+        return;
+    }
+    const QString address{miningAddress()};
+    if (address.isEmpty()) return;
+    UniValue params{Args({address.toStdString()})};
+    params.push_back(amount.toStdString());
+    if (const auto result{call("requestbmmblock", params)}) {
+        m_mining_once = tr("Asked for one block with %1 transactions and %2 of fees, offering %3. It is mined if the next block of the mainchain takes the offer.")
+                            .arg(QString::number((*result)["transactions"].getInt<int>() - 1), Amount((*result)["fees"]), Amount((*result)["amount"]));
+    }
+    Q_EMIT MiningChanges()->changed();
 }
 
 void SidechainPage::refresh()
 {
-    if (!m_client_model) return;
-    const BitcoinUnit unit{m_client_model->getOptionsModel() ? m_client_model->getOptionsModel()->getDisplayUnit() : BitcoinUnit::BTC};
-    const auto format_amount = [&](const UniValue& value) {
-        return BitcoinUnits::formatWithUnit(unit, AmountFromValue(value), false, BitcoinUnits::SeparatorStyle::ALWAYS);
-    };
-
-    const UniValue no_params{UniValue::VARR};
-    const auto info{call("getdrivechaininfo", no_params, /*wallet=*/false, /*quiet=*/true)};
+    const auto info{call("getmainchaininfo", Args({}), /*wallet=*/false, /*quiet=*/true)};
     if (!info) {
-        m_summary->setText(tr("The drivechain state is not available yet."));
+        m_summary->setText(tr("This chain is not running as a sidechain, so there is nothing to show here."));
+        m_tabs->setEnabled(false);
         return;
     }
-    m_min_score = (*info)["withdrawalminscore"].getInt<int>();
-    m_proposal_slot->setMaximum((*info)["maxsidechains"].getInt<int>() - 1);
-    m_summary->setText(tr("%1 of %2 sidechain slots in use, holding %3 in escrow. A proposal needs %4 blocks to activate and is rejected after %5 blocks without an ack. "
-                          "A withdrawal has %6 blocks to reach a score of %7.")
-                           .arg(Text((*info)["activesidechains"]), Text((*info)["maxsidechains"]), format_amount((*info)["escrowtotal"]),
-                                Text((*info)["activationperiod"]), Text((*info)["activationmaxfailures"]),
-                                Text((*info)["withdrawalperiod"]), Text((*info)["withdrawalminscore"])));
+    m_tabs->setEnabled(true);
+    m_slot = (*info)["slot"].getInt<int>();
+    const bool connected{(*info)["connected"].get_bool()};
+    m_summary->setText(connected
+                           ? tr("Following the mainchain node at %1, which is at block %2. This chain is the sidechain in slot %3 of the mainchain.")
+                                 .arg(Text((*info)["node"]), Text((*info)["height"])).arg(m_slot)
+                           : tr("<b>The mainchain node cannot be reached</b>, so this node cannot tell which new blocks are valid. %1").arg(Text((*info)["error"]).toHtmlEscaped()));
+    m_deposit_instructions->setText(tr("Coins come to this chain from the mainchain. Get a deposit address below and give it to the mainchain wallet "
+                                       "as the destination of a deposit (Sidechains, Deposit). The address names this sidechain, slot %1, and "
+                                       "ends in a checksum, so the mainchain wallet refuses it if it is mistyped or used for another sidechain. "
+                                       "The coins arrive with the next block of this chain after the deposit is mined on the mainchain.").arg(m_slot));
 
-    // Keep the selection across the reload, by the content of a column.
-    const auto reload = [](QTableWidget* table, int key_column, const std::function<void()>& fill) {
-        const QString key{selected(table, key_column)};
-        const QSignalBlocker blocker{table};
-        table->setRowCount(0);
-        fill();
-        for (int row{0}; row < table->rowCount(); ++row) {
-            if (!key.isEmpty() && table->item(row, key_column)->text() == key) table->setCurrentCell(row, 0);
+    if (const auto bundle{call("getwithdrawalbundle", Args({}), false, true)}) {
+        const QString status{Text((*bundle)["status"])};
+        QString text;
+        if (status == "pending") {
+            text = tr("The mainchain is voting on a bundle of %1 withdrawal(s) paying %2 (hash %3).").arg(Text((*bundle)["withdrawals"]), Amount((*bundle)["amount"]), Text((*bundle)["hash"]));
+        } else if (status == "next") {
+            text = tr("The next block can start a bundle of %1 withdrawal(s) paying %2.").arg(Text((*bundle)["withdrawals"]), Amount((*bundle)["amount"]));
+        } else {
+            text = bundle->exists("lastfailureheight") && (*bundle)["waiting"].getInt<int>() > 0
+                       ? tr("The last bundle failed on the mainchain; a new one can be made after a waiting time.")
+                       : tr("No bundle is being voted on.");
         }
-        table->resizeColumnsToContents();
-        // Resizing to the contents undoes the stretching of the last column.
-        table->horizontalHeader()->setStretchLastSection(false);
-        table->horizontalHeader()->setStretchLastSection(true);
-    };
-
-    if (const auto sidechains{call("listactivesidechains", no_params, false, true)}) {
-        reload(m_sidechains, 0, [&] {
-            for (const UniValue& sidechain : sidechains->getValues()) {
-                const int row{m_sidechains->rowCount()};
-                m_sidechains->insertRow(row);
-                m_sidechains->setItem(row, 0, Item(Text(sidechain["slot"])));
-                m_sidechains->setItem(row, 1, Item(Text(sidechain["title"])));
-                m_sidechains->setItem(row, 2, Item(sidechain.exists("escrow") ? format_amount(sidechain["escrow"]["amount"]) : tr("no deposits yet")));
-                m_sidechains->setItem(row, 3, Item(Text(sidechain["pendingbundles"])));
-                m_sidechains->setItem(row, 4, Item(Text(sidechain["activationheight"])));
-                m_sidechains->setItem(row, 5, Item(Text(sidechain["description"])));
-            }
-        });
-        updateDepositTarget();
+        m_bundle->setText(text);
     }
-
-    if (const auto proposals{call("listsidechainproposals", no_params, false, true)}) {
-        reload(m_proposals, 8, [&] {
-            for (const UniValue& proposal : (*proposals)["pending"].getValues()) {
-                const int row{m_proposals->rowCount()};
-                m_proposals->insertRow(row);
-                m_proposals->setItem(row, 0, Item(Text(proposal["slot"])));
-                m_proposals->setItem(row, 1, Item(Text(proposal["title"])));
-                m_proposals->setItem(row, 2, Item(Text(proposal["age"])));
-                m_proposals->setItem(row, 3, Item(Text(proposal["acks"])));
-                m_proposals->setItem(row, 4, Item(Text(proposal["failures"])));
-                m_proposals->setItem(row, 5, Item(Text(proposal["blocksleft"])));
-                m_proposals->setItem(row, 6, Item(YesNo(proposal["replacement"])));
-                m_proposals->setItem(row, 7, Item(YesNo(proposal["ack"])));
-                m_proposals->setItem(row, 8, Item(Text(proposal["proposalhash"])));
-            }
-        });
-        reload(m_queued, 3, [&] {
-            for (const UniValue& proposal : (*proposals)["queued"].getValues()) {
-                const int row{m_queued->rowCount()};
-                m_queued->insertRow(row);
-                m_queued->setItem(row, 0, Item(Text(proposal["slot"])));
-                m_queued->setItem(row, 1, Item(Text(proposal["title"])));
-                m_queued->setItem(row, 2, Item(Text(proposal["description"])));
-                m_queued->setItem(row, 3, Item(Text(proposal["proposalhash"])));
-            }
-        });
+    if (const auto withdrawals{call("listwithdrawals", Args({}), false, true)}) {
+        const QString selected{m_withdrawals->currentRow() >= 0 ? m_withdrawals->item(m_withdrawals->currentRow(), COL_TXID)->text() : QString{}};
+        m_withdrawals->setRowCount(withdrawals->size());
+        for (size_t row{0}; row < withdrawals->size(); ++row) {
+            const UniValue& w{(*withdrawals)[row]};
+            m_withdrawals->setItem(row, COL_STATUS, Item(Text(w["status"]) == "bundled" ? tr("Being voted on") : tr("Waiting")));
+            m_withdrawals->setItem(row, COL_AMOUNT, Item(Amount(w["amount"])));
+            m_withdrawals->setItem(row, COL_FEE, Item(Amount(w["mainchainfee"])));
+            m_withdrawals->setItem(row, COL_HEIGHT, Item(Text(w["height"])));
+            m_withdrawals->setItem(row, COL_REFUND, Item(Text(w["refundaddress"])));
+            m_withdrawals->setItem(row, COL_TXID, Item(Text(w["txid"])));
+            m_withdrawals->setItem(row, COL_VOUT, Item(Text(w["vout"])));
+            if (Text(w["txid"]) == selected) m_withdrawals->selectRow(row);
+        }
+        m_withdrawals->resizeColumnsToContents();
     }
-
-    if (const auto bundles{call("listwithdrawalbundles", no_params, false, true)}) {
-        reload(m_bundles, 6, [&] {
-            for (const UniValue& bundle : bundles->getValues()) {
-                const int row{m_bundles->rowCount()};
-                m_bundles->insertRow(row);
-                m_bundles->setItem(row, 0, Item(Text(bundle["slot"])));
-                m_bundles->setItem(row, 1, Item(tr("%1 of %2").arg(Text(bundle["score"])).arg(m_min_score)));
-                m_bundles->setItem(row, 2, Item(Text(bundle["blocksleft"])));
-                m_bundles->setItem(row, 3, Item(YesNo(bundle["payable"])));
-                m_bundles->setItem(row, 4, Item(YesNo(bundle["known"])));
-                m_bundles->setItem(row, 5, Item(Text(bundle["vote"])));
-                m_bundles->setItem(row, 6, Item(Text(bundle["hash"])));
-            }
-        });
+    if (const auto mining{call("getbmminfo", Args({}), false, true)}) {
+        const bool on{(*mining)["mining"].get_bool()};
+        m_mining_start->setEnabled(!on);
+        m_mining_stop->setEnabled(on);
+        m_mining_address->setEnabled(!on);
+        QString text{on ? tr("Automatic mining is on. Blocks asked for: %1. Blocks mined: %2. Outbid by other nodes: %3.").arg(Text((*mining)["requests"]), Text((*mining)["blocks"]), Text((*mining)["outbid"])) : tr("Automatic mining is off.")};
+        if (on && mining->exists("idle") && (*mining)["idle"].get_bool()) text += QStringLiteral(" ") + tr("Waiting for transactions whose fees pay for a block.");
+        if (on && mining->exists("lastoffer")) text += QStringLiteral(" ") + tr("Last block asked for: %1 of fees, %2 offered.").arg(Amount((*mining)["lastfees"]), Amount((*mining)["lastoffer"]));
+        if (!m_mining_once.isEmpty()) text += QStringLiteral("\n") + m_mining_once;
+        if (mining->exists("error")) text += ' ' + tr("Last attempt failed: %1").arg(Text((*mining)["error"]));
+        m_mining_status->setText(text);
     }
-}
-
-void SidechainPage::deposit()
-{
-    if (!m_wallet_model) return;
-    const QString slot{selected(m_sidechains, 0)};
-    if (slot.isEmpty()) return;
-    const QString destination{m_deposit_destination->text().trimmed()};
-    if (destination.isEmpty()) {
-        QMessageBox::warning(this, tr("Sidechains"), tr("Enter the deposit address that the wallet of the sidechain gives."));
-        return;
-    }
-    drivechain::DepositAddress deposit_address;
-    const auto kind{drivechain::ParseDepositAddress(destination.toStdString(), deposit_address)};
-    if (kind == drivechain::DepositAddressKind::INVALID) {
-        QMessageBox::warning(this, tr("Sidechains"), tr("This deposit address has a typing error in it. Copy it again from the wallet of the sidechain."));
-        return;
-    }
-    if (kind == drivechain::DepositAddressKind::VALID && deposit_address.slot != slot.toUInt()) {
-        QMessageBox::warning(this, tr("Sidechains"), tr("This deposit address is for the sidechain in slot %1, and the sidechain selected is the one in slot %2.").arg(deposit_address.slot).arg(slot));
-        return;
-    }
-    // Without the checks of a deposit address, a destination the sidechain does not understand is lost there.
-    if (kind == drivechain::DepositAddressKind::PLAIN &&
-        QMessageBox::question(this, tr("Sidechains"), tr("\"%1\" is not a deposit address (s<slot>_<address>_<checksum>), so it cannot be checked. If the sidechain does not understand it, the coins are lost. Deposit anyway?").arg(destination),
-                              QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes) return;
-    if (!m_deposit_amount->validate() || m_deposit_amount->value() <= 0) {
-        QMessageBox::warning(this, tr("Sidechains"), tr("Enter the amount to deposit."));
-        return;
-    }
-    const CAmount amount{m_deposit_amount->value()};
-    const BitcoinUnit unit{m_client_model && m_client_model->getOptionsModel() ? m_client_model->getOptionsModel()->getDisplayUnit() : BitcoinUnit::BTC};
-    const QString question{tr("Deposit %1 to the sidechain \"%2\" (slot %3), to be credited there to:\n\n%4\n\nCoins deposited to a sidechain can only come back through a withdrawal approved by the miners.")
-                               .arg(BitcoinUnits::formatWithUnit(unit, amount), selected(m_sidechains, 1), slot, destination)};
-    if (QMessageBox::question(this, tr("Confirm sidechain deposit"), question, QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes) return;
-
-    WalletModel::UnlockContext unlock{m_wallet_model->requestUnlock()};
-    if (!unlock.isValid()) return;
-
-    UniValue params{UniValue::VARR};
-    params.push_back(slot.toInt());
-    params.push_back(destination.toStdString());
-    params.push_back(ValueFromAmount(amount));
-    if (const auto result{call("createsidechaindeposit", params, /*wallet=*/true)}) {
-        QMessageBox::information(this, tr("Sidechains"), tr("Deposit sent in transaction %1.").arg(Text((*result)["txid"])));
-        m_deposit_destination->clear();
-        m_deposit_amount->clear();
-        refresh();
-    }
-}
-
-void SidechainPage::propose()
-{
-    UniValue params{UniValue::VARR};
-    params.push_back(m_proposal_slot->value());
-    params.push_back(m_proposal_title->text().trimmed().toStdString());
-    params.push_back(m_proposal_description->text().trimmed().toStdString());
-    const QString hash1{m_proposal_hash1->text().trimmed()};
-    const QString hash2{m_proposal_hash2->text().trimmed()};
-    params.push_back(hash1.isEmpty() ? std::string(64, '0') : hash1.toStdString());
-    params.push_back(hash2.isEmpty() ? std::string(40, '0') : hash2.toStdString());
-    if (call("createsidechainproposal", params)) {
-        m_proposal_title->clear();
-        m_proposal_description->clear();
-        m_proposal_hash1->clear();
-        m_proposal_hash2->clear();
-        refresh();
-    }
-}
-
-void SidechainPage::setAck(bool ack)
-{
-    const QString hash{selected(m_proposals, 8)};
-    if (hash.isEmpty()) return;
-    UniValue params{UniValue::VARR};
-    params.push_back(hash.toStdString());
-    params.push_back(ack);
-    if (call("acksidechain", params)) refresh();
-}
-
-void SidechainPage::removeQueuedProposal()
-{
-    const QString hash{selected(m_queued, 3)};
-    if (hash.isEmpty()) return;
-    UniValue params{UniValue::VARR};
-    params.push_back(hash.toStdString());
-    if (call("removesidechainproposal", params)) refresh();
-}
-
-void SidechainPage::setVote(const QString& vote)
-{
-    const QString slot{selected(m_bundles, 0)};
-    if (slot.isEmpty()) return;
-    UniValue params{UniValue::VARR};
-    params.push_back(slot.toInt());
-    params.push_back(vote.toStdString());
-    if (vote == QStringLiteral("upvote")) params.push_back(selected(m_bundles, 6).toStdString());
-    if (call("setwithdrawalvote", params)) refresh();
 }

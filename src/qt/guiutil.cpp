@@ -2,6 +2,8 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <bitcoin-build-config.h> // IWYU pragma: keep
+
 #include <qt/guiutil.h>
 
 #include <qt/bitcoinaddressvalidator.h>
@@ -12,6 +14,7 @@
 
 #include <addresstype.h>
 #include <base58.h>
+#include <bech32.h>
 #include <chainparams.h>
 #include <common/args.h>
 #include <interfaces/node.h>
@@ -25,6 +28,7 @@
 #include <util/exception.h>
 #include <util/fs.h>
 #include <util/fs_helpers.h>
+#include <util/strencodings.h>
 #include <util/time.h>
 
 #ifdef WIN32
@@ -108,20 +112,13 @@ QFont fixedPitchFont(bool use_embedded_font)
 // Return a pre-generated dummy bech32m address (P2TR) with invalid checksum.
 static std::string DummyAddress(const CChainParams &params)
 {
-    std::string addr;
-    switch (params.GetChainType()) {
-    case ChainType::MAIN:
-        addr = "chn1p35yvjel7srp783ztf8v6jdra7dhfzk5jaun8xz2qp6ws7z80n4tqy47s4q";
-        break;
-    case ChainType::SIGNET:
-    case ChainType::TESTNET:
-        addr = "tchn1p35yvjel7srp783ztf8v6jdra7dhfzk5jaun8xz2qp6ws7z80n4tq066w2q";
-        break;
-    case ChainType::REGTEST:
-        addr = "rchn1p35yvjel7srp783ztf8v6jdra7dhfzk5jaun8xz2qp6ws7z80n4tq4rxk0q";
-        break;
-    } // no default case, so the compiler can warn about missing cases
-    assert(!addr.empty());
+    // An address of the network that looks right and is not valid: a P2TR
+    // address with the prefix of the network, and a checksum that is off.
+    std::vector<uint8_t> data{1};
+    const std::vector<uint8_t> program(32, 0x8d);
+    ConvertBits<8, 5, true>([&](unsigned char c) { data.push_back(c); }, program.begin(), program.end());
+    std::string addr{bech32::Encode(bech32::Encoding::BECH32M, params.Bech32HRP(), data)};
+    addr.back() = addr.back() == 'q' ? 'p' : 'q';
 
     if (Assume(!IsValidDestinationString(addr))) return addr;
     return {};
@@ -148,7 +145,7 @@ void AddButtonShortcut(QAbstractButton* button, const QKeySequence& shortcut)
 bool parseBitcoinURI(const QUrl &uri, SendCoinsRecipient *out)
 {
     // return if URI is not valid or is no bitcoin: URI
-    if(!uri.isValid() || uri.scheme() != QString("chains"))
+    if(!uri.isValid() || uri.scheme() != QString(CLIENT_BIN_NAME))
         return false;
 
     SendCoinsRecipient rv;
@@ -211,7 +208,7 @@ QString formatBitcoinURI(const SendCoinsRecipient &info)
 {
     bool bech_32 = info.address.startsWith(QString::fromStdString(Params().Bech32HRP() + "1"));
 
-    QString ret = QString("chains:%1").arg(bech_32 ? info.address.toUpper() : info.address);
+    QString ret = QString(CLIENT_BIN_NAME ":%1").arg(bech_32 ? info.address.toUpper() : info.address);
     int paramCount = 0;
 
     if (info.amount)

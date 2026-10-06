@@ -1,21 +1,18 @@
 {
   "chain": "test",
   "test_chain": true,
-  "genesis": "eefe78514103157ba084099934d062739889030f506927208f61781600000000",
+  "genesis": "895b64a63927e7a2c3ccec3a5adb2a8d14c7264237455e85b71540e357382f0a",
   "subsidy_halving_interval": 210000,
   "pow": {
-    "limit": "00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-    "target_spacing": 60,
-    "difficulty_retarget_interval": 2016,
-    "mindiff_blocks": "yes"
+    "limit": "7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
   },
   "net": {
-    "default_port": 19555,
-    "magic": "c7e8b4f3",
+    "default_port": 19655,
+    "magic": "5c1dec02",
     "dns_seeds": [
     ]
   },
   "addresses": {
-    "bech32_hrp": "tchn"
+    "bech32_hrp": "tsc"
   }
 }

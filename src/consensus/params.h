@@ -85,6 +85,23 @@ struct BIP9Deployment {
 };
 
 /**
+ * Parameters of a chain that is a sidechain of the mainchain: its blocks are
+ * blind merged mined, and its coins come from and return to the mainchain.
+ */
+struct SidechainParams {
+    /** Whether this chain is a sidechain. If not, none of the sidechain rules apply. */
+    bool enabled{false};
+    /** The slot the mainchain gave to this sidechain. */
+    uint32_t slot{0};
+    /** Smallest amount, in the smallest unit, that can be withdrawn to the mainchain. */
+    int64_t min_withdrawal{10000};
+    /** Most withdrawals that one withdrawal bundle pays out. */
+    uint32_t max_bundle_withdrawals{1000};
+    /** Number of blocks to wait after a withdrawal bundle failed before the next one can be made. */
+    int bundle_retry_delay{144};
+};
+
+/**
  * Parameters of the drivechain (sidechain escrow and blind merged mining) rules.
  * All periods and thresholds are counted in blocks.
  */
@@ -159,6 +176,7 @@ struct Params {
      */
     int asert_anchor_height{0};
     DrivechainParams drivechain;
+    SidechainParams sidechain;
     /** Maximum weight of a block. */
     uint32_t max_block_weight{MAX_BLOCK_WEIGHT};
     /**

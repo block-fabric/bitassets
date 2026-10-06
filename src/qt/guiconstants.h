@@ -5,6 +5,8 @@
 #ifndef BITCOIN_QT_GUICONSTANTS_H
 #define BITCOIN_QT_GUICONSTANTS_H
 
+#include <bitcoin-build-config.h> // IWYU pragma: keep
+
 #include <chrono>
 #include <cstdint>
 
@@ -46,12 +48,12 @@ inline constexpr int TOOLTIP_WRAP_THRESHOLD = 80;
 /* Number of frames in spinner animation */
 #define SPINNER_FRAMES 36
 
-#define QAPP_ORG_NAME "Chains"
-#define QAPP_ORG_DOMAIN "chains.invalid"
-#define QAPP_APP_NAME_DEFAULT "Chains-Qt"
-#define QAPP_APP_NAME_TESTNET "Chains-Qt-testnet"
-#define QAPP_APP_NAME_SIGNET "Chains-Qt-signet"
-#define QAPP_APP_NAME_REGTEST "Chains-Qt-regtest"
+#define QAPP_ORG_NAME CLIENT_NAME
+#define QAPP_ORG_DOMAIN CLIENT_BIN_NAME ".invalid"
+#define QAPP_APP_NAME_DEFAULT CLIENT_NAME "-Qt"
+#define QAPP_APP_NAME_TESTNET CLIENT_NAME "-Qt-testnet"
+#define QAPP_APP_NAME_SIGNET CLIENT_NAME "-Qt-signet"
+#define QAPP_APP_NAME_REGTEST CLIENT_NAME "-Qt-regtest"
 
 /* One gigabyte (GB) in bytes */
 inline constexpr uint64_t GB_BYTES{1'000'000'000};

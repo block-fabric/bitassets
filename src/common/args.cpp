@@ -3,6 +3,8 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <bitcoin-build-config.h> // IWYU pragma: keep
+
 #include <common/args.h>
 
 #include <chainparamsbase.h>
@@ -32,7 +34,7 @@
 #include <utility>
 #include <variant>
 
-const char * const BITCOIN_CONF_FILENAME = "chains.conf";
+const char * const BITCOIN_CONF_FILENAME = CLIENT_BIN_NAME ".conf";
 const char * const BITCOIN_SETTINGS_FILENAME = "settings.json";
 
 ArgsManager gArgs;
@@ -865,11 +867,11 @@ fs::path GetDefaultDataDir()
 #ifdef WIN32
     // Windows
     // Check for existence of datadir in old location and keep it there
-    fs::path legacy_path = GetSpecialFolderPath(CSIDL_APPDATA) / "Chains";
+    fs::path legacy_path = GetSpecialFolderPath(CSIDL_APPDATA) / CLIENT_NAME;
     if (fs::exists(legacy_path)) return legacy_path;
 
     // Otherwise, fresh installs can start in the new, "proper" location
-    return GetSpecialFolderPath(CSIDL_LOCAL_APPDATA) / "Chains";
+    return GetSpecialFolderPath(CSIDL_LOCAL_APPDATA) / CLIENT_NAME;
 #else
     fs::path pathRet;
     char* pszHome = getenv("HOME");
@@ -882,7 +884,7 @@ fs::path GetDefaultDataDir()
     return pathRet / "Library/Application Support/Chains";
 #else
     // Unix-like
-    return pathRet / ".chains";
+    return pathRet / "." CLIENT_BIN_NAME;
 #endif
 #endif
 }

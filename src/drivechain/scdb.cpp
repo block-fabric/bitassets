@@ -220,7 +220,8 @@ bool SidechainDB::ConnectTx(const CTransaction& tx, const Consensus::DrivechainP
 }
 
 bool SidechainDB::ConnectBlock(const CBlock& block, int height, const Consensus::DrivechainParams& params,
-                               BlockUndo& undo, std::vector<Deposit>* deposits, std::string& reject_reason)
+                               BlockUndo& undo, std::vector<Deposit>* deposits, std::string& reject_reason,
+                               const SideContext* side)
 {
     const auto invalid = [&](const char* reason) {
         reject_reason = reason;
@@ -229,6 +230,14 @@ bool SidechainDB::ConnectBlock(const CBlock& block, int height, const Consensus:
 
     undo = BlockUndo{};
     undo.prev_block_hash = m_block_hash;
+
+    if (side) {
+        if (block.vtx.empty() || !block.vtx[0]->IsCoinBase()) {
+            reject_reason = "bad-dc-no-coinbase";
+            return false;
+        }
+        if (!m_side.ConnectBlock(block, height, side->params, side->mainchain, undo.side, side->minted, reject_reason)) return false;
+    }
 
     if (block.vtx.empty() || !block.vtx[0]->IsCoinBase()) return invalid("bad-dc-no-coinbase");
     const uint256 block_hash{block.GetHash()};
@@ -500,6 +509,7 @@ bool SidechainDB::ConnectBlock(const CBlock& block, int height, const Consensus:
 
 void SidechainDB::DisconnectBlock(const BlockUndo& undo)
 {
+    m_side.DisconnectBlock(undo.side);
     for (const BlockUndo::SlotUndo& saved : undo.slots) {
         if (saved.existed) {
             m_slots[saved.id] = saved.slot;

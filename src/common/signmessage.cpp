@@ -3,6 +3,8 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <bitcoin-build-config.h> // IWYU pragma: keep
+
 #include <common/signmessage.h>
 
 #include <addresstype.h>
@@ -24,6 +26,7 @@
  * Text used to signify that a signed message follows and to prevent
  * inadvertently signing a transaction.
  */
+// The same on the mainchain and on all its sidechains, whose addresses differ.
 const std::string MESSAGE_MAGIC = "Chains Signed Message:\n";
 
 MessageVerificationResult MessageVerify(

@@ -36,6 +36,7 @@
 #include <node/blockstorage.h>
 #include <node/coin.h>
 #include <node/context.h>
+#include <sidechain/follower.h>
 #include <node/interface_ui.h>
 #include <node/kernel_notifications.h>
 #include <node/miner.h>
@@ -664,6 +665,27 @@ public:
             escrow.amount = state->ctip.amount;
         }
         return escrow;
+    }
+    std::optional<uint32_t> getSidechainSlot() override
+    {
+        const Consensus::SidechainParams& params{chainman().GetConsensus().sidechain};
+        if (!params.enabled) return std::nullopt;
+        return params.slot;
+    }
+    util::Result<CScript> getMainchainScript(const std::string& address) override
+    {
+        if (!m_node.follower) return util::Error{Untranslated("This chain is not a sidechain")};
+        try {
+            UniValue params(UniValue::VARR);
+            params.push_back(address);
+            const UniValue info{m_node.follower->Client().Call("validateaddress", params)};
+            if (!info["isvalid"].get_bool()) return util::Error{Untranslated("Not an address of the mainchain")};
+            const auto script{TryParseHex<unsigned char>(info["scriptPubKey"].get_str())};
+            if (!script) return util::Error{Untranslated("The mainchain node sent a malformed script")};
+            return CScript{script->begin(), script->end()};
+        } catch (const std::exception& e) {
+            return util::Error{Untranslated(e.what())};
+        }
     }
     double guessVerificationProgress(const uint256& block_hash) override
     {

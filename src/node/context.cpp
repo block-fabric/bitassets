@@ -18,6 +18,7 @@
 #include <node/warnings.h>
 #include <policy/fees/estimator_man.h>
 #include <scheduler.h>
+#include <sidechain/follower.h>
 #include <torcontrol.h>
 #include <txmempool.h>
 #include <validation.h>

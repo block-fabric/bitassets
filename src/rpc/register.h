@@ -13,6 +13,7 @@ class CRPCTable;
 
 void RegisterBlockchainRPCCommands(CRPCTable &tableRPC);
 void RegisterDrivechainRPCCommands(CRPCTable&);
+void RegisterSidechainRPCCommands(CRPCTable&);
 void RegisterFeeRPCCommands(CRPCTable&);
 void RegisterMempoolRPCCommands(CRPCTable&);
 void RegisterMiningRPCCommands(CRPCTable &tableRPC);
@@ -27,7 +28,9 @@ void RegisterTxoutProofRPCCommands(CRPCTable&);
 static inline void RegisterAllCoreRPCCommands(CRPCTable &t)
 {
     RegisterBlockchainRPCCommands(t);
-    RegisterDrivechainRPCCommands(t);
+    // This chain is a sidechain and has none of its own, so the commands that
+    // manage the sidechains of a chain (RegisterDrivechainRPCCommands) are left out.
+    RegisterSidechainRPCCommands(t);
     RegisterFeeRPCCommands(t);
     RegisterMempoolRPCCommands(t);
     RegisterMiningRPCCommands(t);

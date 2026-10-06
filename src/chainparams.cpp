@@ -119,6 +119,10 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
 {
     if (auto value = args.GetBoolArg("-fastprune")) options.fastprune = *value;
     if (HasTestOption(args, "bip94")) options.enforce_bip94 = true;
+    if (const auto slot{args.GetIntArg("-sidechainslot")}) {
+        if (*slot < 0 || *slot > 0xFFFF) throw std::runtime_error("Invalid -sidechainslot");
+        options.sidechain_slot = static_cast<uint32_t>(*slot);
+    }
 
     HandleDeploymentArgs(args, options.dep_opts);
 }

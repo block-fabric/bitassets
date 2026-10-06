@@ -5,6 +5,8 @@
 
 #include <kernel/chainparams.h>
 
+#include <arith_uint256.h>
+
 #include <chainparamsseeds.h>
 #include <consensus/amount.h>
 #include <consensus/merkle.h>
@@ -71,6 +73,43 @@ static CBlock CreateGenesisBlock(uint32_t nTime, uint32_t nNonce, uint32_t nBits
     const char* pszTimestamp = "The Times 03/Jan/2009 Chancellor on brink of second bailout for banks";
     const CScript genesisOutputScript = CScript() << "04678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5f"_hex << OP_CHECKSIG;
     return CreateGenesisBlock(pszTimestamp, genesisOutputScript, nTime, nNonce, nBits, nVersion, genesisReward);
+}
+
+void CChainParams::MakeSidechain(const SidechainIdentity& identity)
+{
+    consensus.sidechain.enabled = true;
+    consensus.sidechain.slot = identity.slot;
+    // A sidechain has no sidechains of its own.
+    consensus.drivechain.max_sidechains = 0;
+    // The mainchain makes no rule about how the blocks of a sidechain are signed.
+    consensus.signet_blocks = false;
+    consensus.signet_challenge.clear();
+
+    // The chain is secured by the work of the mainchain. The proof of work of
+    // its own blocks is kept as a formality that takes a couple of hashes, so
+    // that the code inherited from the mainchain needs no changes.
+    consensus.powLimit = uint256{"7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+    consensus.fPowNoRetargeting = true;
+    consensus.fPowAllowMinDifficultyBlocks = false;
+    consensus.enforce_BIP94 = false;
+    consensus.nMinimumChainWork = uint256{};
+    consensus.defaultAssumeValid = uint256{};
+
+    pchMessageStart = identity.message_start;
+    nDefaultPort = identity.default_port;
+    bech32_hrp = identity.bech32_hrp;
+
+    // The first block. It creates no coins: all coins come from the mainchain.
+    genesis = CreateGenesisBlock(identity.genesis_message, CScript() << OP_RETURN, identity.genesis_time, /*nNonce=*/0, 0x207fffff, 1, 0);
+    arith_uint256 target;
+    target.SetCompact(genesis.nBits);
+    while (UintToArith256(genesis.GetHash()) > target) ++genesis.nNonce;
+    consensus.hashGenesisBlock = genesis.GetHash();
+
+    vFixedSeeds.clear();
+    vSeeds.clear();
+    m_assumeutxo_data = {};
+    chainTxData = ChainTxData{.nTime = identity.genesis_time, .tx_count = 1, .dTxRate = 0};
 }
 
 void CChainParams::ApplyDeploymentOptions(const DeploymentOptions& opts)
@@ -193,6 +232,12 @@ public:
             .commitment_period = 649,
             .redownload_buffer_size = 15400,
         };
+
+        // This chain is a sidechain of the Chains mainchain.
+        // TODO for a new sidechain: its slot, its own message, magic bytes, port and address prefix.
+        MakeSidechain({.slot = 0, .genesis_message = "Sidechain template, main network", .genesis_time = 1790900000,
+                       .message_start = {0x5c, 0x1d, 0xec, 0x01}, .default_port = 9655, .bech32_hrp = "sc"});
+        consensus.coinbase_maturity = 0; // what a block pays (deposits, fees) can be spent in the next
     }
 };
 
@@ -224,12 +269,6 @@ public:
         consensus.max_block_weight = 6'000'000;
         consensus.max_block_tx_weight = 4'000'000;
         consensus.coinbase_maturity = 360; // six hours
-        // Drivechain periods of a test network: short enough to go through a sidechain's life in a day.
-        consensus.drivechain.activation_period = 60;
-        consensus.drivechain.activation_max_failures = 30;
-        consensus.drivechain.replacement_period = 120;
-        consensus.drivechain.withdrawal_period = 600;
-        consensus.drivechain.withdrawal_min_score = 300;
         consensus.fPowAllowMinDifficultyBlocks = true;
         consensus.enforce_BIP94 = false; // aserti3 is not subject to the timewarp attack
         consensus.fPowNoRetargeting = false;
@@ -260,11 +299,10 @@ public:
         m_assumed_chain_state_size = 1;
 
         // The genesis reward pays an unspendable output: there is no premine.
-        // Restarted on 05/Oct/2026, after a third security audit changed the drivechain and sidechain rules.
-        genesis = CreateGenesisBlock("Chains testnet 05/Oct/2026 after the third audit: one chain to mine them all", CScript() << OP_RETURN, 1791205858, 3092956453, 0x1d00ffff, 1, 50 * COIN);
+        genesis = CreateGenesisBlock("Chains testnet 01/Oct/2026 One chain to mine them all: drivechains for everyone", CScript() << OP_RETURN, 1790879566, 447901697, 0x1d00ffff, 1, 50 * COIN);
         consensus.hashGenesisBlock = genesis.GetHash();
-        assert(consensus.hashGenesisBlock == uint256{"000000001678618f202769500f0389987362d034990984a07b1503415178feee"});
-        assert(genesis.hashMerkleRoot == uint256{"96200bfc5ef1d780fe11c33d73b7d44fd95628b91d7189f83bf0fe6541188d10"});
+        assert(consensus.hashGenesisBlock == uint256{"00000000b9f0e845fb2e059b3a648408ed9544d1b954f153d8a77f483a982894"});
+        assert(genesis.hashMerkleRoot == uint256{"a4d0cd8aadbb7b5f90668570e675964d7bea62da9cfe9d18a92a7d06bcab398b"});
 
         // No DNS or fixed seeds yet; peers are added with -addnode.
         vFixedSeeds.clear();
@@ -284,7 +322,7 @@ public:
         m_assumeutxo_data = {};
 
         chainTxData = ChainTxData{
-            .nTime    = 1791205858,
+            .nTime    = 1790879566,
             .tx_count = 1,
             .dTxRate  = 0,
         };
@@ -294,6 +332,13 @@ public:
             .commitment_period = 649,
             .redownload_buffer_size = 15400,
         };
+
+        // This chain is a sidechain of the Chains testnet.
+        MakeSidechain({.slot = 0, .genesis_message = "Sidechain template, test network", .genesis_time = 1790900000,
+                       .message_start = {0x5c, 0x1d, 0xec, 0x02}, .default_port = 19655, .bech32_hrp = "tsc"});
+        // The mainchain of the test network votes on a withdrawal bundle within 600 blocks.
+        consensus.sidechain.bundle_retry_delay = 20;
+        consensus.coinbase_maturity = 0; // what a block pays (deposits, fees) can be spent in the next
     }
 };
 
@@ -397,6 +442,11 @@ public:
             .commitment_period = 629,
             .redownload_buffer_size = 15885,
         };
+
+        // This chain is a sidechain of the Chains signet. Its own blocks are not signed.
+        MakeSidechain({.slot = 0, .genesis_message = "Sidechain template, signet", .genesis_time = 1790900000,
+                       .message_start = {0x5c, 0x1d, 0xec, 0x03}, .default_port = 39655, .bech32_hrp = "tsc"});
+        consensus.coinbase_maturity = 0; // what a block pays (deposits, fees) can be spent in the next
     }
 };
 
@@ -443,12 +493,22 @@ public:
         consensus.nMinimumChainWork = uint256{};
         consensus.defaultAssumeValid = uint256{};
 
-        pchMessageStart[0] = 0xc7;
-        pchMessageStart[1] = 0xe8;
-        pchMessageStart[2] = 0xc1;
-        pchMessageStart[3] = 0xda;
-        nDefaultPort = 29555;
+        pchMessageStart[0] = 0x5c;
+        pchMessageStart[1] = 0x1d;
+        pchMessageStart[2] = 0xec;
+        pchMessageStart[3] = 0x04;
+        nDefaultPort = 29655;
         nPruneAfterHeight = opts.fastprune ? 100 : 1000;
+
+        // On request this chain is a sidechain, with what tests need to be quick.
+        if (opts.sidechain_slot) {
+            consensus.sidechain.enabled = true;
+            consensus.sidechain.slot = *opts.sidechain_slot;
+            consensus.sidechain.bundle_retry_delay = 5;
+            // A sidechain has no sidechains of its own.
+            consensus.drivechain.max_sidechains = 0;
+            consensus.coinbase_maturity = 0;
+        }
         m_assumed_blockchain_size = 0;
         m_assumed_chain_state_size = 0;
 
@@ -501,7 +561,8 @@ public:
         base58Prefixes[EXT_PUBLIC_KEY] = {0x04, 0x35, 0x87, 0xCF};
         base58Prefixes[EXT_SECRET_KEY] = {0x04, 0x35, 0x83, 0x94};
 
-        bech32_hrp = "rchn";
+        // Its own, so that an address of another chain is not taken for one of this chain.
+        bech32_hrp = "rsc";
 
         // Copied from Testnet4.
         m_headers_sync_params = HeadersSyncParams{
