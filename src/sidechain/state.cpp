@@ -125,7 +125,9 @@ bool State::MainPending(const Mainchain& mainchain, int height, const Consensus:
 
 bool State::MainPendingNext(const Mainchain& mainchain, int height, const Consensus::SidechainParams& params) const
 {
-    return height >= params.single_bundle_height && (mainchain.BundlePending(m_main_height) || mainchain.BundlePending(mainchain.Height()));
+    // A record not filled in yet may miss proposals: as if one were pending.
+    return height >= params.single_bundle_height &&
+           (mainchain.NeedsBackfill() || mainchain.BundlePending(m_main_height) || mainchain.BundlePending(mainchain.Height()));
 }
 
 std::optional<CMutableTransaction> State::NextBundle(int height, const uint256& prev, const Consensus::SidechainParams& params, std::vector<COutPoint>* withdrawals, bool main_pending) const
@@ -205,6 +207,21 @@ bool State::CheckRefund(const RefundRequest& request, std::string& reject_reason
 
 bool State::ApplyTx(const CTransaction& tx, int height, const Consensus::SidechainParams& params, StateUndo& undo,
                     std::vector<CTxOut>& payouts, std::string& reject_reason, bool main_pending)
+{
+    // All or nothing: a transaction that breaks a rule leaves the state as it was, so that block
+    // assembly can leave it out and go on, rather than start over.
+    const size_t added{undo.added.size()}, removed{undo.removed.size()}, paid{payouts.size()};
+    if (ApplyTxSteps(tx, height, params, undo, payouts, reject_reason, main_pending)) return true;
+    for (size_t i{added}; i < undo.added.size(); ++i) m_withdrawals.erase(undo.added[i]);
+    for (size_t i{removed}; i < undo.removed.size(); ++i) m_withdrawals.emplace(undo.removed[i].outpoint, undo.removed[i]);
+    undo.added.resize(added);
+    undo.removed.resize(removed);
+    payouts.resize(paid);
+    return false;
+}
+
+bool State::ApplyTxSteps(const CTransaction& tx, int height, const Consensus::SidechainParams& params, StateUndo& undo,
+                         std::vector<CTxOut>& payouts, std::string& reject_reason, bool main_pending)
 {
     for (uint32_t n{0}; n < tx.vout.size(); ++n) {
         const CTxOut& out{tx.vout[n]};
