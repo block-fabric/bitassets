@@ -125,7 +125,9 @@ bool State::MainPending(const Mainchain& mainchain, int height, const Consensus:
 
 bool State::MainPendingNext(const Mainchain& mainchain, int height, const Consensus::SidechainParams& params) const
 {
-    return height >= params.single_bundle_height && (mainchain.BundlePending(m_main_height) || mainchain.BundlePending(mainchain.Height()));
+    // A record not filled in yet may miss proposals: as if one were pending.
+    return height >= params.single_bundle_height &&
+           (mainchain.NeedsBackfill() || mainchain.BundlePending(m_main_height) || mainchain.BundlePending(mainchain.Height()));
 }
 
 std::optional<CMutableTransaction> State::NextBundle(int height, const uint256& prev, const Consensus::SidechainParams& params, std::vector<COutPoint>* withdrawals, bool main_pending) const
@@ -206,26 +208,24 @@ bool State::CheckRefund(const RefundRequest& request, std::string& reject_reason
 bool State::ApplyTx(const CTransaction& tx, int height, const Consensus::SidechainParams& params, StateUndo& undo,
                     std::vector<CTxOut>& payouts, std::string& reject_reason, bool main_pending)
 {
-    // The assets: a transaction that breaks their rules is invalid, so they come first, and change
-    // nothing if it fails. What pools and auctions pay out in CHN, the coinbase pays.
-    CAmount released{0};
-    if (!m_bitassets.ApplyTx(tx, height, undo.bitassets, payouts, reject_reason, params.bitassets_pool_rules_height, &released, params.bitassets_release_height, params.bitassets_audit_height)) return false;
-    // CHN freed by retiring an asset go to mainchain miners: a withdrawal of 1 satoshi, burned on the
-    // mainchain (a bundle has to pay something), whose fee is the rest. Nobody can take it back.
-    if (released >= 2) {
-        Withdrawal withdrawal;
-        withdrawal.outpoint = COutPoint{tx.GetHash(), RELEASE_WITHDRAWAL_INDEX};
-        withdrawal.amount = 1;
-        withdrawal.main_fee = released - 1;
-        std::vector<unsigned char> tag{'r', 'e', 'l', 'e', 'a', 's', 'e'};
-        // From the audit's rules, a script of its own: withdrawals are matched across branches by script
-        // and amount, and releases that looked alike could be taken one for another.
-        if (height >= params.bitassets_audit_height) tag.insert(tag.end(), tx.GetHash().begin(), tx.GetHash().end());
-        withdrawal.main_script = CScript() << OP_RETURN << tag;
-        withdrawal.height = height;
-        undo.added.push_back(withdrawal.outpoint);
-        m_withdrawals.emplace(withdrawal.outpoint, std::move(withdrawal));
-    }
+    // All or nothing: a transaction that breaks a rule leaves the state as it was, so that block
+    // assembly can leave it out and go on, rather than start over.
+    const size_t added{undo.added.size()}, removed{undo.removed.size()}, paid{payouts.size()};
+    if (ApplyTxSteps(tx, height, params, undo, payouts, reject_reason, main_pending)) return true;
+    for (size_t i{added}; i < undo.added.size(); ++i) m_withdrawals.erase(undo.added[i]);
+    for (size_t i{removed}; i < undo.removed.size(); ++i) m_withdrawals.emplace(undo.removed[i].outpoint, undo.removed[i]);
+    undo.added.resize(added);
+    undo.removed.resize(removed);
+    payouts.resize(paid);
+    return false;
+}
+
+bool State::ApplyTxSteps(const CTransaction& tx, int height, const Consensus::SidechainParams& params, StateUndo& undo,
+                         std::vector<CTxOut>& payouts, std::string& reject_reason, bool main_pending)
+{
+    // The chain's own rules go last, once nothing else can fail: they cannot be taken back here,
+    // and fail only before they change anything. What they pay still comes first, as it always has.
+    std::vector<CTxOut> refunds;
     for (uint32_t n{0}; n < tx.vout.size(); ++n) {
         const CTxOut& out{tx.vout[n]};
         if (IsWithdrawalScript(out.scriptPubKey)) {
@@ -245,10 +245,31 @@ bool State::ApplyTx(const CTransaction& tx, int height, const Consensus::Sidecha
         } else if (const auto refund{ParseRefundScript(out.scriptPubKey)}) {
             if (!CheckRefund(*refund, reject_reason, main_pending)) return false;
             const Withdrawal& withdrawal{m_withdrawals.at(refund->withdrawal)};
-            payouts.emplace_back(withdrawal.Burned(), GetScriptForDestination(WitnessV0KeyHash{withdrawal.refund_keyhash}));
+            refunds.emplace_back(withdrawal.Burned(), GetScriptForDestination(WitnessV0KeyHash{withdrawal.refund_keyhash}));
             Remove(refund->withdrawal, undo);
         }
     }
+    // The assets: a transaction that breaks their rules is invalid, and changes nothing. What pools
+    // and auctions pay out in CHN, the coinbase pays.
+    CAmount released{0};
+    if (!m_bitassets.ApplyTx(tx, height, undo.bitassets, payouts, reject_reason, params.bitassets_pool_rules_height, &released, params.bitassets_release_height, params.bitassets_audit_height)) return false;
+    // CHN freed by retiring an asset go to mainchain miners: a withdrawal of 1 satoshi, burned on the
+    // mainchain (a bundle has to pay something), whose fee is the rest. Nobody can take it back.
+    if (released >= 2) {
+        Withdrawal withdrawal;
+        withdrawal.outpoint = COutPoint{tx.GetHash(), RELEASE_WITHDRAWAL_INDEX};
+        withdrawal.amount = 1;
+        withdrawal.main_fee = released - 1;
+        std::vector<unsigned char> tag{'r', 'e', 'l', 'e', 'a', 's', 'e'};
+        // From the audit's rules, a script of its own: withdrawals are matched across branches by script
+        // and amount, and releases that looked alike could be taken one for another.
+        if (height >= params.bitassets_audit_height) tag.insert(tag.end(), tx.GetHash().begin(), tx.GetHash().end());
+        withdrawal.main_script = CScript() << OP_RETURN << tag;
+        withdrawal.height = height;
+        undo.added.push_back(withdrawal.outpoint);
+        m_withdrawals.emplace(withdrawal.outpoint, std::move(withdrawal));
+    }
+    payouts.insert(payouts.end(), refunds.begin(), refunds.end());
     return true;
 }
 
