@@ -798,7 +798,8 @@ bool MemPoolAccept::DrivechainChecks(Workspace& ws)
                 if (withdrawal->amount < side_params.min_withdrawal) return ws.m_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "bad-sc-withdrawal-amount");
             } else if (const auto refund{sidechain::ParseRefundScript(out.scriptPubKey)}) {
                 std::string reject_reason;
-                if (!side.CheckRefund(*refund, reject_reason)) return ws.m_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, reject_reason);
+                const bool main_pending{side.MainPending(*Assert(m_active_chainstate.m_chainman.m_mainchain), m_active_chainstate.m_chain.Height() + 1, side_params)};
+                if (!side.CheckRefund(*refund, reject_reason, main_pending)) return ws.m_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, reject_reason);
                 if (const auto other{m_pool.m_refunds.find(refund->withdrawal)}; other != m_pool.m_refunds.end() && !ws.m_conflicts.contains(other->second)) {
                     return ws.m_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "sc-refund-in-mempool");
                 }
@@ -4890,8 +4891,10 @@ void Chainstate::RemoveStaleDrivechainTxs()
 
     // On a sidechain: a withdrawal that was paid, refunded or put in a bundle can no longer be taken back.
     if (m_chainman.GetConsensus().sidechain.enabled) {
+        // Nor while a bundle of this sidechain is pending on the mainchain.
+        const bool main_pending{m_scdb.m_side.MainPending(*Assert(m_chainman.m_mainchain), tip->nHeight + 1, m_chainman.GetConsensus().sidechain)};
         for (const auto& [withdrawal, txid] : m_mempool->m_refunds) {
-            if (m_scdb.m_side.Withdrawals().contains(withdrawal) && !m_scdb.m_side.InBundle(withdrawal)) continue;
+            if (m_scdb.m_side.Withdrawals().contains(withdrawal) && !m_scdb.m_side.InBundle(withdrawal) && !main_pending) continue;
             if (const CTransactionRef tx{m_mempool->get(txid)}) stale.push_back(tx);
         }
     }

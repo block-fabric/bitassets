@@ -99,6 +99,13 @@ struct SidechainParams {
     uint32_t max_bundle_withdrawals{1000};
     /** Number of blocks to wait after a withdrawal bundle failed before the next one can be made. */
     int bundle_retry_delay{144};
+    /**
+     * From this height, no withdrawal is refunded, and no bundle started, while a bundle of this
+     * sidechain is pending on the mainchain. It may hold any withdrawal: one committed on another
+     * branch of this chain, after a reorg, holds withdrawals this branch thinks are free; paid,
+     * it would pay them a second time.
+     */
+    int single_bundle_height{0};
 };
 
 /**

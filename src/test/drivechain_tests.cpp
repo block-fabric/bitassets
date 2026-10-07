@@ -14,6 +14,8 @@
 #include <drivechain/miner.h>
 #include <drivechain/scdb.h>
 #include <drivechain/sidechain.h>
+#include <common/signmessage.h>
+#include <key.h>
 #include <key_io.h>
 #include <hash.h>
 #include <policy/policy.h>
@@ -1220,6 +1222,100 @@ BOOST_AUTO_TEST_CASE(paid_on_another_branch_oldest_first)
     BOOST_REQUIRE_EQUAL(state.Withdrawals().size(), 1U);
     BOOST_CHECK(state.Withdrawals().contains(newer));
     BOOST_CHECK(!state.Withdrawals().contains(older));
+}
+
+BOOST_AUTO_TEST_CASE(no_refund_while_a_bundle_is_pending_on_the_mainchain)
+{
+    // The double payout: a bundle committed on another branch of this chain is pending on the
+    // mainchain. This branch never had it, so the withdrawals in it look free here. Refunded here and
+    // then paid there, a withdrawal is paid twice. While a bundle of this sidechain is pending on the
+    // mainchain, nothing is refunded and no other bundle is started.
+    Consensus::SidechainParams params;
+    sidechain::State state;
+    CKey key;
+    key.MakeNewKey(/*fCompressed=*/true);
+    const uint160 keyhash{key.GetPubKey().GetID()};
+    const CScript pay{GetScriptForDestination(WitnessV0KeyHash{keyhash})};
+    CMutableTransaction tx;
+    tx.vin.resize(1);
+    tx.vout.emplace_back(COIN, sidechain::WithdrawalScript(1000, keyhash, pay));
+    sidechain::StateUndo undo;
+    std::vector<CTxOut> payouts;
+    std::string reason;
+    BOOST_REQUIRE_MESSAGE(state.ApplyTx(CTransaction{tx}, 1, params, undo, payouts, reason), reason);
+    sidechain::RefundRequest refund;
+    refund.withdrawal = COutPoint{tx.GetHash(), 0};
+    BOOST_REQUIRE(key.SignCompact(MessageHash(sidechain::RefundMessage(refund.withdrawal)), refund.signature));
+
+    // Mainchain block 1 proposes a bundle of this sidechain (from the other branch); block 2 fails it.
+    sidechain::Mainchain mainchain;
+    sidechain::MainBlock block0, block1, block2;
+    block0.hash = uint256{1};
+    block1.hash = uint256{2};
+    block1.prev_hash = block0.hash;
+    block1.proposed.push_back(uint256{0xb});
+    block2.hash = uint256{3};
+    block2.prev_hash = block1.hash;
+    block2.bundles.push_back({uint256{0xb}, /*paid=*/false});
+    BOOST_REQUIRE(mainchain.Append(block0));
+    BOOST_REQUIRE(mainchain.Append(block1));
+    BOOST_REQUIRE(mainchain.Append(block2));
+    BOOST_CHECK(!mainchain.BundlePending(0));
+    BOOST_CHECK(mainchain.BundlePending(1));
+    BOOST_CHECK(!mainchain.BundlePending(2));
+
+    sidechain::StateUndo main_undo;
+    BOOST_REQUIRE_MESSAGE(state.ApplyMainEvents(1, mainchain, 2, params, main_undo, payouts, reason), reason);
+    // Before the rule: the refund goes through, though the pending bundle may pay the same withdrawal.
+    params.single_bundle_height = 100;
+    BOOST_CHECK(!state.MainPending(mainchain, 2, params));
+    BOOST_CHECK(state.CheckRefund(refund, reason, state.MainPending(mainchain, 2, params)));
+    // With it: refused, and no bundle is started.
+    params.single_bundle_height = 0;
+    BOOST_CHECK(state.MainPending(mainchain, 2, params));
+    BOOST_CHECK(!state.CheckRefund(refund, reason, state.MainPending(mainchain, 2, params)));
+    BOOST_CHECK_EQUAL(reason, "bad-sc-refund-bundle-pending");
+    BOOST_CHECK(!state.NextBundle(2, uint256{0xa}, params, nullptr, state.MainPending(mainchain, 2, params)));
+    std::string start_reason;
+    BOOST_CHECK(!state.StartBundle(uint256{0xc}, 2, uint256{0xa}, params, main_undo, start_reason, state.MainPending(mainchain, 2, params)));
+    BOOST_CHECK_EQUAL(start_reason, "bad-sc-bundle-not-allowed");
+    // Once the mainchain has failed it, the withdrawal can be refunded, or bundled again.
+    BOOST_REQUIRE_MESSAGE(state.ApplyMainEvents(2, mainchain, 3, params, main_undo, payouts, reason), reason);
+    BOOST_CHECK(!state.MainPending(mainchain, 3, params));
+    BOOST_CHECK(state.CheckRefund(refund, reason, false));
+    BOOST_CHECK(state.NextBundle(3, uint256{0xa}, params));
+
+    // A record truncated below the proposal forgets it.
+    mainchain.Truncate(0);
+    BOOST_CHECK(!mainchain.BundlePending(1));
+}
+
+BOOST_AUTO_TEST_CASE(record_of_old_format_is_filled_in)
+{
+    // A block written before blocks kept their proposed bundles reads with none.
+    sidechain::MainBlock block;
+    block.hash = uint256{7};
+    block.bundles.push_back({uint256{0xb}, true});
+    DataStream old_format{};
+    old_format << block.hash << block.prev_hash << block.time << false << block.deposits << block.bundles;
+    sidechain::MainBlock read;
+    old_format >> read;
+    BOOST_CHECK(read == block);
+    BOOST_CHECK(read.proposed.empty());
+    // The current format round-trips.
+    block.proposed.push_back(uint256{0xc});
+    DataStream current{};
+    current << block;
+    current >> read;
+    BOOST_CHECK(read == block);
+    // Backfill fills in a block on record, and only the one it names.
+    sidechain::Mainchain mainchain;
+    sidechain::MainBlock first;
+    first.hash = uint256{1};
+    BOOST_REQUIRE(mainchain.Append(first));
+    BOOST_CHECK(!mainchain.Backfill(0, uint256{9}, {uint256{0xd}}));
+    BOOST_CHECK(mainchain.Backfill(0, uint256{1}, {uint256{0xd}}));
+    BOOST_CHECK(mainchain.BundlePending(0));
 }
 
 BOOST_AUTO_TEST_CASE(duplicate_commitment_survives_reorg)
