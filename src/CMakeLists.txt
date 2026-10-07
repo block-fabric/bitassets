@@ -93,6 +93,7 @@ endif()
 # Home for common functionality shared by different executables and libraries.
 # Similar to `bitcoin_util` library, but higher-level.
 add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
+  sidechain/store.cpp
   addresstype.cpp
   base58.cpp
   bech32.cpp
@@ -223,7 +224,7 @@ add_library(bitcoin_node STATIC EXCLUDE_FROM_ALL
   sidechain/mainchain.cpp
   sidechain/mainclient.cpp
   sidechain/state.cpp
-  sidechain/store.cpp
+  sidechain/store_db.cpp
   drivechain/miner.cpp
   node/blockstorage.cpp
   node/caches.cpp
