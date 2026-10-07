@@ -263,7 +263,10 @@ bool State::ApplyTxSteps(const CTransaction& tx, int height, const Consensus::Si
         std::vector<unsigned char> tag{'r', 'e', 'l', 'e', 'a', 's', 'e'};
         // From the audit's rules, a script of its own: withdrawals are matched across branches by script
         // and amount, and releases that looked alike could be taken one for another.
-        if (height >= params.bitassets_audit_height) tag.insert(tag.end(), tx.GetHash().begin(), tx.GetHash().end());
+        if (height >= params.bitassets_audit_height) {
+            const uint256 txid{tx.GetHash().ToUint256()};
+            tag.insert(tag.end(), txid.begin(), txid.end());
+        }
         withdrawal.main_script = CScript() << OP_RETURN << tag;
         withdrawal.height = height;
         undo.added.push_back(withdrawal.outpoint);

@@ -113,6 +113,7 @@ struct SidechainParams {
      * a script of its own (OP_RETURN "release" and the txid), so that it cannot be taken for another.
      */
     int bitassets_audit_height{0};
+    /**
      * From this height, no withdrawal is refunded, and no bundle started, while a bundle of this
      * sidechain is pending on the mainchain. It may hold any withdrawal: one committed on another
      * branch of this chain, after a reorg, holds withdrawals this branch thinks are free; paid,
