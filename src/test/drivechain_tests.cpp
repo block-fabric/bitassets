@@ -115,6 +115,10 @@ struct TestChain {
         reject_reason.clear();
         if (!after.ConnectBlock(block, height + 1, params, undo, &deposits, reject_reason)) {
             BOOST_CHECK(!reject_reason.empty());
+            // Failed part way, the block is taken back by its undo data so far (as validation does).
+            after.DisconnectBlock(undo);
+            BOOST_CHECK(after == before);
+            BOOST_CHECK(after.GetHash() == before.GetHash());
             return false;
         }
         BOOST_CHECK(after.GetBlockHash() == block.GetHash());
