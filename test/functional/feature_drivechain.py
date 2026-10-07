@@ -459,6 +459,8 @@ class DrivechainTest(BitcoinTestFramework):
         block = self.generateblock(node, node.getnewaddress(), [])["hash"]
         assert_equal(node.getrawmempool(), [])
         assert_equal(node.verifybmm(block, SLOT, "04" * 32)["verified"], False)
+        # The wallet gives its coins back: the request can never be mined.
+        assert all(d["abandoned"] for d in node.gettransaction(stale["txid"])["details"])
         raw = node.gettransaction(stale["txid"])["hex"]
         assert_raises_rpc_error(-26, "dc-bmm-prev-block", node.sendrawtransaction, raw)
         assert_raises_rpc_error(-25, "bad-dc-bmm-prev-block", self.generateblock, node, node.getnewaddress(), [raw])

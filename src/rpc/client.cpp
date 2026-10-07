@@ -66,6 +66,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "acksidechain", 2, "slot" },
     { "receivewithdrawalbundle", 0, "slot" },
     { "sendwithdrawalbundle", 0, "slot" },
+    { "vouchwithdrawalbundle", 0, "slot" },
     { "listwithdrawalbundles", 0, "slot" },
     { "getwithdrawalbundle", 0, "slot" },
     { "getaveragefee", 0, "blocks" },
