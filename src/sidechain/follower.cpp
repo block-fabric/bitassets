@@ -302,7 +302,6 @@ void Follower::Act()
         LOCK(m_mutex);
         uncommitted.swap(m_uncommitted);
         committed.swap(m_committed);
-        const Mainchain& record{*chainman.m_mainchain};
         for (const uint256& hash : committed) {
             const auto it{m_candidates.find(hash)};
             if (it == m_candidates.end()) continue;
@@ -315,7 +314,6 @@ void Follower::Act()
     if (uncommitted.empty() && committed.empty()) return;
 
     // A block that lost its commitment is no longer valid, and neither is what was built on it.
-    const Mainchain& record{*chainman.m_mainchain};
     // That includes a block whose commitment moved to another mainchain block in the same update:
     // what the mainchain did before its commitment may differ now, so it is checked again, from the
     // list of committed blocks below.
