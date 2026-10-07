@@ -103,6 +103,12 @@ struct DrivechainParams {
     int withdrawal_min_score{64800};
     /** Maximum number of pending withdrawal bundles per sidechain. */
     uint32_t max_pending_bundles{64};
+    /**
+     * From this height, paying a bundle of a sidechain fails its other pending bundles. A sidechain
+     * means one bundle to be paid; others pending for its slot are copies left by a reorg of the
+     * sidechain, holding the same withdrawals, which would otherwise be paid a second time.
+     */
+    int single_payout_height{0};
 };
 
 /**

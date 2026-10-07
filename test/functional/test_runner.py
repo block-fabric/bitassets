@@ -169,6 +169,7 @@ BASE_SCRIPTS = [
     'wallet_anchor.py',
     'feature_reindex.py',
     'feature_drivechain.py',
+    'feature_drivechain_rules.py',
     'feature_drivechain_forks.py',
     'rpc_setgenerate.py',
     'feature_reindex_readonly.py',

@@ -811,7 +811,7 @@ bool MemPoolAccept::DrivechainChecks(Workspace& ws)
     drivechain::BlockUndo undo;
     std::string reject_reason;
     // A withdrawal is welcome once its bundle has the work score (BIP300 M6): any miner can then mine it.
-    if (!scdb.ConnectTx(tx, params, escrow_outputs, /*allow_withdrawal=*/true, undo, nullptr, reject_reason)) {
+    if (!scdb.ConnectTx(tx, params, escrow_outputs, undo, nullptr, reject_reason)) {
         return ws.m_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, reject_reason);
     }
     return true;
@@ -4803,7 +4803,7 @@ drivechain::SidechainDB Chainstate::GetMempoolSidechainDB(const std::set<drivech
                     drivechain::SidechainDB probe{scdb};
                     drivechain::SidechainDB::EscrowOutputs probe_outputs{escrow_outputs};
                     drivechain::BlockUndo probe_undo;
-                    if (probe.ConnectTx(*candidate, params, probe_outputs, /*allow_withdrawal=*/true, probe_undo, nullptr, reject_reason)) {
+                    if (probe.ConnectTx(*candidate, params, probe_outputs, probe_undo, nullptr, reject_reason)) {
                         next = candidate;
                         break;
                     }
@@ -4811,7 +4811,7 @@ drivechain::SidechainDB Chainstate::GetMempoolSidechainDB(const std::set<drivech
             }
             if (!next) break;
             if (stop_before && stop_before->contains(next->GetHash())) break;
-            if (!scdb.ConnectTx(*next, params, escrow_outputs, /*allow_withdrawal=*/true, undo, nullptr, reject_reason)) break;
+            if (!scdb.ConnectTx(*next, params, escrow_outputs, undo, nullptr, reject_reason)) break;
             if (applied) applied->insert(next->GetHash());
         }
     }

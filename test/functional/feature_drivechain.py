@@ -333,7 +333,10 @@ class DrivechainTest(BitcoinTestFramework):
             # Withdrawals say which bundle they paid, and what.
             assert all(("bundle" in d and "payouts" in d) == (d["destination"] == "D") for d in deposits)
             assert "D" in [d["destination"] for d in deposits]
-            assert_equal(n.getsidechainevents(SLOT + 1, 0, 2000), [{k: v for k, v in e.items() if k != "bmm"} | {"deposits": [], "bundles": []} for e in events])
+            # Each bundle is reported proposed once, by the block that proposed it.
+            proposed = [h for e in events for h in e["proposed"]]
+            assert_equal(sorted(proposed), sorted([bundle_hash, other_hash]))
+            assert_equal(n.getsidechainevents(SLOT + 1, 0, 2000), [{k: v for k, v in e.items() if k != "bmm"} | {"deposits": [], "bundles": [], "proposed": []} for e in events])
             assert_equal(n.getsidechainevents(SLOT, n.getblockcount() + 1, 5), [])
         assert_raises_rpc_error(-8, "between 1 and 2000", node.getsidechainevents, SLOT, 0, 2001)
         # The record of a closed bundle goes away with the block that closed it.

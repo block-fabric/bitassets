@@ -230,6 +230,8 @@ public:
         consensus.drivechain.replacement_period = 120;
         consensus.drivechain.withdrawal_period = 600;
         consensus.drivechain.withdrawal_min_score = 300;
+        // The test network ran without it until then; see DrivechainParams.
+        consensus.drivechain.single_payout_height = 20000;
         consensus.fPowAllowMinDifficultyBlocks = true;
         consensus.enforce_BIP94 = false; // aserti3 is not subject to the timewarp attack
         consensus.fPowNoRetargeting = false;

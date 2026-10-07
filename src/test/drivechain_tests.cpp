@@ -375,6 +375,7 @@ BOOST_AUTO_TEST_CASE(acks)
     BOOST_CHECK(!chain.Connect({Ack(a), Ack(b)}));
     BOOST_CHECK_EQUAL(chain.reject_reason, "bad-dc-multiple-acks");
     BOOST_CHECK(!chain.Connect({Ack(a), Ack(a)}));
+    BOOST_CHECK_EQUAL(chain.reject_reason, "bad-dc-multiple-acks");
     // An ack names the slot too.
     BOOST_REQUIRE(chain.Connect({AckScript(2, a.GetHash())}));
     BOOST_CHECK_EQUAL(chain.scdb.GetProposal(a.GetHash())->acks, 0U);
@@ -431,6 +432,7 @@ BOOST_AUTO_TEST_CASE(deposits)
     third.vout.emplace_back(0, DestinationScript("carol"));
     // Both spending the same escrow output: the second one no longer spends the current one.
     BOOST_CHECK(!chain.Connect({}, {second, chain.DepositTx(2, 9 * COIN)}));
+    BOOST_CHECK_EQUAL(chain.reject_reason, "bad-dc-escrow-unspent");
     BOOST_REQUIRE(chain.Connect({}, {second, third}));
     BOOST_CHECK_EQUAL(chain.scdb.GetSlot(2)->ctip.amount, 8 * COIN);
     BOOST_REQUIRE_EQUAL(chain.deposits.size(), 2U);
@@ -448,7 +450,9 @@ BOOST_AUTO_TEST_CASE(deposits)
     BOOST_CHECK(!chain.Connect({}, {late_dest}));
     BOOST_CHECK_EQUAL(chain.reject_reason, "bad-dc-deposit-destination");
     BOOST_CHECK(!chain.Connect({}, {chain.DepositTx(2, 9 * COIN, WITHDRAWAL_RETURN_DEST)}));
+    BOOST_CHECK_EQUAL(chain.reject_reason, "bad-dc-deposit-destination");
     BOOST_CHECK(!chain.Connect({}, {chain.DepositTx(2, 9 * COIN, std::string(MAX_DEPOSIT_DESTINATION_SIZE + 1, 'x'))}));
+    BOOST_CHECK_EQUAL(chain.reject_reason, "bad-dc-deposit-destination");
 
     // The escrow cannot be respent for the same amount, taken without a return output, or split.
     BOOST_CHECK(!chain.Connect({}, {chain.DepositTx(2, 8 * COIN)}));
@@ -750,7 +754,9 @@ BOOST_AUTO_TEST_CASE(bmm)
     BOOST_CHECK(!chain.Connect({}, {request_tx(1, h1, chain.tip)}));
     BOOST_CHECK_EQUAL(chain.reject_reason, "bad-dc-bmm-not-accepted");
     BOOST_CHECK(!chain.Connect({BmmAcceptScript(1, h2)}, {request_tx(1, h1, chain.tip)}));
+    BOOST_CHECK_EQUAL(chain.reject_reason, "bad-dc-bmm-not-accepted");
     BOOST_CHECK(!chain.Connect({BmmAcceptScript(2, h1)}, {request_tx(1, h1, chain.tip)}));
+    BOOST_CHECK_EQUAL(chain.reject_reason, "bad-dc-bmm-not-accepted");
     BOOST_CHECK(chain.Connect({BmmAcceptScript(1, h1)}, {request_tx(1, h1, chain.tip)}));
 
     // A request is bound to the block it was made for.
@@ -1031,6 +1037,152 @@ BOOST_AUTO_TEST_CASE(deposit_address_format)
                                     "s3_alice_7ec2c", "s3_alice_7ec2ccc", "rchn1qne4dtvnal6mql3kusvxq74vk9mcj4u2gks3txn"}) {
         BOOST_CHECK_MESSAGE(ParseDepositAddress(plain, parsed) == DepositAddressKind::PLAIN, plain);
     }
+}
+
+BOOST_AUTO_TEST_CASE(full_queue_rejects)
+{
+    // A full queue makes room only by failing a bundle no more voted for than a new one: when every
+    // pending bundle has votes, a new bundle is refused.
+    TestChain chain;
+    chain.Activate(MakeSidechain(1));
+    BOOST_REQUIRE_EQUAL(chain.params.max_pending_bundles, 3U);
+    const uint256 a{0xa1}, b{0xb1}, c{0xc1}, d{0xd1};
+    const auto score{[&](size_t i) { return chain.scdb.GetSlot(1)->bundles[i].score; }};
+    // Upvoting one bundle lowers the others: a reaches 6, then b 4 (a 3), then c 2 (a 2, b 3).
+    BOOST_REQUIRE(chain.Connect({BundleScript(1, a)}));
+    for (int i{0}; i < 5; ++i) BOOST_REQUIRE(chain.Connect({Votes({0})}));
+    BOOST_REQUIRE(chain.Connect({BundleScript(1, b)}));
+    for (int i{0}; i < 3; ++i) BOOST_REQUIRE(chain.Connect({Votes({1})}));
+    BOOST_REQUIRE(chain.Connect({BundleScript(1, c)}));
+    BOOST_REQUIRE(chain.Connect({Votes({2})}));
+    BOOST_REQUIRE_EQUAL(chain.scdb.GetSlot(1)->bundles.size(), 3U);
+    BOOST_CHECK_EQUAL(score(0), 2U);
+    BOOST_CHECK_EQUAL(score(1), 3U);
+    BOOST_CHECK_EQUAL(score(2), 2U);
+    BOOST_CHECK(!chain.Connect({BundleScript(1, d)}));
+    BOOST_CHECK_EQUAL(chain.reject_reason, "bad-dc-too-many-bundles");
+    // Once the weakest is down to a new bundle's score, the new one takes its place.
+    BOOST_REQUIRE(chain.Connect({Votes({1})}));
+    BOOST_CHECK_EQUAL(score(0), 1U);
+    BOOST_REQUIRE(chain.Connect({BundleScript(1, d)}));
+    BOOST_CHECK(chain.scdb.WasPaid(1, a) == std::optional<bool>{false});
+    BOOST_CHECK(chain.scdb.GetSlot(1)->bundles.back().hash == d);
+}
+
+BOOST_AUTO_TEST_CASE(escrow_inputs_of_two_sidechains)
+{
+    // One transaction cannot spend the treasuries of two sidechains, merging them.
+    TestChain chain;
+    chain.Activate(MakeSidechain(2));
+    chain.Activate(MakeSidechain(5));
+    BOOST_REQUIRE(chain.Connect({}, {chain.DepositTx(2, 10 * COIN), chain.DepositTx(5, 10 * COIN)}));
+    CMutableTransaction merge{chain.BaseTx()};
+    merge.vin.emplace_back(chain.scdb.GetSlot(2)->ctip.outpoint);
+    merge.vin.emplace_back(chain.scdb.GetSlot(5)->ctip.outpoint);
+    merge.vout.emplace_back(25 * COIN, EscrowScript(2));
+    merge.vout.emplace_back(0, DestinationScript("dest"));
+    BOOST_CHECK(!chain.Connect({}, {merge}));
+    BOOST_CHECK_EQUAL(chain.reject_reason, "bad-dc-multiple-escrow-inputs");
+}
+
+BOOST_AUTO_TEST_CASE(withdrawal_paying_more_than_the_treasury)
+{
+    // A withdrawal whose payouts and new treasury add up to more than the old treasury is no
+    // withdrawal (blocks refuse it earlier, as spending more than its inputs).
+    TestChain chain;
+    chain.Activate(MakeSidechain(1));
+    BOOST_REQUIRE(chain.Connect({}, {chain.DepositTx(1, 10 * COIN)}));
+    const CMutableTransaction blind{TestChain::BlindBundle(3 * COIN, COIN / 10)};
+    BOOST_REQUIRE(chain.Connect({BundleScript(1, blind.GetHash().ToUint256())}));
+    while (chain.scdb.GetSlot(1)->bundles[0].score < static_cast<uint32_t>(chain.params.withdrawal_min_score)) BOOST_REQUIRE(chain.Connect({Votes({0})}));
+    CMutableTransaction tx{chain.WithdrawalTx(1, blind, 3 * COIN, COIN / 10)};
+    tx.vout[0].nValue = 9 * COIN; // below the treasury of 10, but with the payout of 3 more than 10 leaves
+    BOOST_CHECK(!chain.Connect({}, {tx}));
+    BOOST_CHECK_EQUAL(chain.reject_reason, "bad-dc-withdrawal-amount");
+}
+
+namespace {
+/** Two bundles of slot 1 pending, both with the score: the same withdrawals put in two bundles. */
+struct TwoBundles {
+    TestChain chain;
+    CMutableTransaction first{TestChain::BlindBundle(2 * COIN, COIN / 10, 1)};
+    CMutableTransaction second{TestChain::BlindBundle(2 * COIN, COIN / 10, 2)};
+
+    TwoBundles()
+    {
+        chain.Activate(MakeSidechain(1));
+        BOOST_REQUIRE(chain.Connect({}, {chain.DepositTx(1, 10 * COIN)}));
+        chain.params.withdrawal_min_score = 2;
+        // Upvoting one bundle lowers the other: the second to 4 (the first to 0), then the first to 2 (the second to 2).
+        BOOST_REQUIRE(chain.Connect({BundleScript(1, first.GetHash().ToUint256())}));
+        BOOST_REQUIRE(chain.Connect({BundleScript(1, second.GetHash().ToUint256())}));
+        for (int i{0}; i < 3; ++i) BOOST_REQUIRE(chain.Connect({Votes({1})}));
+        for (int i{0}; i < 2; ++i) BOOST_REQUIRE(chain.Connect({Votes({0})}));
+        BOOST_REQUIRE_EQUAL(chain.scdb.GetSlot(1)->bundles.size(), 2U);
+        BOOST_REQUIRE_GE(chain.scdb.GetSlot(1)->bundles[0].score, 2U);
+        BOOST_REQUIRE_GE(chain.scdb.GetSlot(1)->bundles[1].score, 2U);
+    }
+};
+} // namespace
+
+BOOST_AUTO_TEST_CASE(one_withdrawal_per_sidechain_per_block)
+{
+    // A sidechain has one bundle that it means to be paid; others pending for its slot are copies,
+    // left by a reorg of the sidechain, with the same withdrawals in them. Paying two in one block
+    // would pay those withdrawals twice out of the treasury.
+    TwoBundles setup;
+    TestChain& chain{setup.chain};
+    const CMutableTransaction pay_first{chain.WithdrawalTx(1, setup.first, 2 * COIN, COIN / 10)};
+    CMutableTransaction pay_second{setup.second};
+    pay_second.vin.assign(1, CTxIn{COutPoint{pay_first.GetHash(), 0}});
+    pay_second.vout[0] = CTxOut{pay_first.vout[0].nValue - 2 * COIN - COIN / 10, EscrowScript(1)};
+    BOOST_CHECK(!chain.Connect({}, {pay_first, pay_second}));
+    // Paying the first failed the second.
+    BOOST_CHECK_EQUAL(chain.reject_reason, "bad-dc-withdrawal-unknown");
+}
+
+BOOST_AUTO_TEST_CASE(single_payout_activation)
+{
+    // Below the activation height, paying a bundle left the others pending, as the test network did.
+    TwoBundles setup;
+    TestChain& chain{setup.chain};
+    chain.params.single_payout_height = chain.height + 2;
+    BOOST_REQUIRE(chain.Connect({}, {chain.WithdrawalTx(1, setup.first, 2 * COIN, COIN / 10)}));
+    BOOST_CHECK(!chain.scdb.WasPaid(1, setup.second.GetHash().ToUint256()));
+    BOOST_CHECK_EQUAL(chain.scdb.GetSlot(1)->bundles.size(), 1U);
+    // From the activation height on, the next payout fails the rest.
+    TwoBundles at;
+    at.chain.params.single_payout_height = at.chain.height + 1;
+    BOOST_REQUIRE(at.chain.Connect({}, {at.chain.WithdrawalTx(1, at.first, 2 * COIN, COIN / 10)}));
+    BOOST_CHECK(at.chain.scdb.WasPaid(1, at.second.GetHash().ToUint256()) == std::optional<bool>{false});
+}
+
+BOOST_AUTO_TEST_CASE(paying_a_bundle_fails_the_others)
+{
+    // Once a bundle of a sidechain is paid, its other pending bundles fail: they can never be paid
+    // after it, in a later block either.
+    TwoBundles setup;
+    TestChain& chain{setup.chain};
+    BOOST_REQUIRE(chain.Connect({}, {chain.WithdrawalTx(1, setup.first, 2 * COIN, COIN / 10)}));
+    BOOST_CHECK(chain.scdb.WasPaid(1, setup.first.GetHash().ToUint256()) == std::optional<bool>{true});
+    BOOST_CHECK(chain.scdb.WasPaid(1, setup.second.GetHash().ToUint256()) == std::optional<bool>{false});
+    BOOST_CHECK(chain.scdb.GetSlot(1)->bundles.empty());
+    BOOST_CHECK(!chain.Connect({}, {chain.WithdrawalTx(1, setup.second, 2 * COIN, COIN / 10)}));
+    BOOST_CHECK_EQUAL(chain.reject_reason, "bad-dc-withdrawal-unknown");
+    // Nor can it be proposed again.
+    BOOST_CHECK(!chain.Connect({BundleScript(1, setup.second.GetHash().ToUint256())}));
+    BOOST_CHECK_EQUAL(chain.reject_reason, "bad-dc-bundle-closed");
+}
+
+BOOST_AUTO_TEST_CASE(block_without_coinbase)
+{
+    TestChain chain;
+    CBlock empty;
+    empty.hashPrevBlock = chain.tip;
+    BlockUndo undo;
+    std::string reason;
+    BOOST_CHECK(!chain.scdb.ConnectBlock(empty, 1, chain.params, undo, nullptr, reason));
+    BOOST_CHECK_EQUAL(reason, "bad-dc-no-coinbase");
 }
 
 BOOST_AUTO_TEST_SUITE_END()
