@@ -97,3 +97,29 @@ database taken beforehand, which the in-place rollback must give back exactly.
 
 The mainchain targets `drivechain_messages` and `drivechain_scdb` are here too
 (`src/test/fuzz/drivechain.cpp`).
+
+## BitAssets
+
+`src/test/bitassets_tests.cpp`:
+
+| Test | What it checks |
+|---|---|
+| `marker_round_trip`, `seq_format` | Markers and asset numbers read back what built them; one encoding only. |
+| `register_and_conserve` | Registration, then: <br>• tokens are conserved by every transaction; <br>• minting and data changes need the asset's control coin; <br>• burning, and fixing the supply. |
+| `oldest_reservation_reveals` | A copy of someone's reservation is younger and refused; before the activation height, any would do. |
+| `state_of_old_format_reads` | A state written before reservations had an order reads back. |
+| `pools` | Liquidity pools: adding, swapping, taking out. |
+| `abandoned_pools_close` | Pools nobody provides for close. |
+| `dead_assets_retire` | A dead asset is retired; its pools' CHN go to mainchain miners. |
+| `swap_math_exact` | Swaps against a 256-bit reference, where the products overflow 128 bits. |
+| `retired_number_names_nothing` | After an asset is retired and its name registered again, the old number names nothing. |
+| `auction_prices`, `auctions` | Dutch auctions: prices over time, bids, cancellation. |
+| `revert_restores` | Every operation is undone exactly. |
+
+`feature_bitassets.py`:
+
+- reserve, register (with and without supply, private assets), send, mint,
+  burn, change data, hand over control;
+- a pool with CHN: trading, taking liquidity out, trades too large refused;
+- Dutch auctions, with and without bids;
+- retiring a dead asset, releases, undoing blocks.
