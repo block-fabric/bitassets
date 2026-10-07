@@ -573,7 +573,7 @@ bool State::Releasable(const AssetId& asset, std::string* why) const
     return true;
 }
 
-std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, std::string& reject_reason, int pool_rules_height, int release_height) const
+std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, std::string& reject_reason, int pool_rules_height, int release_height, int audit_height) const
 {
     const bool pool_rules{height >= pool_rules_height};
     const auto invalid{[&](const char* reason) -> std::optional<Plan> {
@@ -649,6 +649,18 @@ std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, s
             }
         }
         if (!reservation) return invalid("bad-ba-no-reservation");
+        if (height >= audit_height) {
+            // Only the oldest reservation of a commitment reveals it: a copy of someone else's, made to
+            // register the asset first once they reveal it, is younger.
+            const auto order_of{[&](const Txid& id) {
+                const auto it{m_reservation_order.find(id)};
+                return it == m_reservation_order.end() ? uint64_t{0} : it->second;
+            }};
+            for (const auto& [other, commitment] : m_reservations) {
+                if (commitment != implied || other == *reservation) continue;
+                if (order_of(other) < order_of(*reservation)) return invalid("bad-ba-reservation-not-first");
+            }
+        }
         debit(Token::Kind::RESERVATION, reservation->ToUint256(), 1);
         plan.reservations_gone.push_back(*reservation);
         credit(Token::Kind::CONTROL, reg->name, 1);
@@ -900,17 +912,17 @@ std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, s
     return plan;
 }
 
-bool State::CheckTx(const CTransaction& tx, int height, std::string& reject_reason, std::vector<Result>* results, int pool_rules_height, int release_height) const
+bool State::CheckTx(const CTransaction& tx, int height, std::string& reject_reason, std::vector<Result>* results, int pool_rules_height, int release_height, int audit_height) const
 {
-    auto plan{MakePlan(tx, height, reject_reason, pool_rules_height, release_height)};
+    auto plan{MakePlan(tx, height, reject_reason, pool_rules_height, release_height, audit_height)};
     if (!plan) return false;
     if (results) *results = std::move(plan->results);
     return true;
 }
 
-bool State::ApplyTx(const CTransaction& tx, int height, StateUndo& undo, std::vector<CTxOut>& payouts, std::string& reject_reason, int pool_rules_height, CAmount* released, int release_height)
+bool State::ApplyTx(const CTransaction& tx, int height, StateUndo& undo, std::vector<CTxOut>& payouts, std::string& reject_reason, int pool_rules_height, CAmount* released, int release_height, int audit_height)
 {
-    const auto plan{MakePlan(tx, height, reject_reason, pool_rules_height, release_height)};
+    const auto plan{MakePlan(tx, height, reject_reason, pool_rules_height, release_height, audit_height)};
     if (!plan) return false;
     if (!undo.next_seq) undo.next_seq = m_next_seq;
     // Every change is noted with the value it replaced; reverting them in reverse order restores the state.
@@ -927,6 +939,14 @@ bool State::ApplyTx(const CTransaction& tx, int height, StateUndo& undo, std::ve
     for (const auto& [outpoint, token] : plan->created) set(m_tokens, undo.tokens, outpoint, std::optional{token});
     if (plan->reservation_made) set(m_reservations, undo.reservations, plan->reservation_made->first, std::optional{plan->reservation_made->second});
     for (const Txid& id : plan->reservations_gone) set(m_reservations, undo.reservations, id, std::optional<uint256>{});
+    // The order of reservations, for the rule that the oldest of a commitment reveals it.
+    if (plan->reservation_made && height >= audit_height) {
+        if (!undo.next_reservation_order) undo.next_reservation_order = m_next_reservation_order;
+        set(m_reservation_order, undo.reservation_orders, plan->reservation_made->first, std::optional<uint64_t>{m_next_reservation_order++});
+    }
+    for (const Txid& id : plan->reservations_gone) {
+        if (m_reservation_order.contains(id)) set(m_reservation_order, undo.reservation_orders, id, std::optional<uint64_t>{});
+    }
     for (const auto& [id, record] : plan->assets) set(m_assets, undo.assets, id, std::optional{record});
     if (plan->seq) {
         m_seq.emplace(plan->seq->first, plan->seq->second);
@@ -956,6 +976,8 @@ void State::Revert(const StateUndo& undo)
     revert(m_tokens, undo.tokens);
     revert(m_assets, undo.assets);
     revert(m_reservations, undo.reservations);
+    revert(m_reservation_order, undo.reservation_orders);
+    if (undo.next_reservation_order) m_next_reservation_order = *undo.next_reservation_order;
     revert(m_pools, undo.pools);
     revert(m_auctions, undo.auctions);
     if (undo.next_seq) {

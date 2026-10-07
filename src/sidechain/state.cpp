@@ -209,7 +209,7 @@ bool State::ApplyTx(const CTransaction& tx, int height, const Consensus::Sidecha
     // The assets: a transaction that breaks their rules is invalid, so they come first, and change
     // nothing if it fails. What pools and auctions pay out in CHN, the coinbase pays.
     CAmount released{0};
-    if (!m_bitassets.ApplyTx(tx, height, undo.bitassets, payouts, reject_reason, params.bitassets_pool_rules_height, &released, params.bitassets_release_height)) return false;
+    if (!m_bitassets.ApplyTx(tx, height, undo.bitassets, payouts, reject_reason, params.bitassets_pool_rules_height, &released, params.bitassets_release_height, params.bitassets_audit_height)) return false;
     // CHN freed by retiring an asset go to mainchain miners: a withdrawal of 1 satoshi, burned on the
     // mainchain (a bundle has to pay something), whose fee is the rest. Nobody can take it back.
     if (released >= 2) {
@@ -217,7 +217,11 @@ bool State::ApplyTx(const CTransaction& tx, int height, const Consensus::Sidecha
         withdrawal.outpoint = COutPoint{tx.GetHash(), RELEASE_WITHDRAWAL_INDEX};
         withdrawal.amount = 1;
         withdrawal.main_fee = released - 1;
-        withdrawal.main_script = CScript() << OP_RETURN << std::vector<unsigned char>{'r', 'e', 'l', 'e', 'a', 's', 'e'};
+        std::vector<unsigned char> tag{'r', 'e', 'l', 'e', 'a', 's', 'e'};
+        // From the audit's rules, a script of its own: withdrawals are matched across branches by script
+        // and amount, and releases that looked alike could be taken one for another.
+        if (height >= params.bitassets_audit_height) tag.insert(tag.end(), tx.GetHash().begin(), tx.GetHash().end());
+        withdrawal.main_script = CScript() << OP_RETURN << tag;
         withdrawal.height = height;
         undo.added.push_back(withdrawal.outpoint);
         m_withdrawals.emplace(withdrawal.outpoint, std::move(withdrawal));

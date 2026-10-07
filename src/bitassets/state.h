@@ -468,7 +468,8 @@ struct Auction {
     }
     friend bool operator==(const Auction&, const Auction&) = default;
 
-    int32_t EndHeight() const { return start_height + duration - 1; }
+    //! In 64 bits: a start height near the top of 32 bits plus the duration would overflow.
+    int64_t EndHeight() const { return int64_t{start_height} + duration - 1; }
     /** The price of all of it (base_amount) in the block at `height`, between the start and the end. */
     uint64_t PriceAt(int height) const;
     /** What a bid of `quote_amount` buys in the block at `height` (more than is left, if it is too much). */
@@ -532,8 +533,11 @@ struct StateUndo {
     std::vector<std::pair<Txid, std::optional<uint256>>> reservations;
     std::vector<std::pair<uint256, std::optional<Pool>>> pools;
     std::vector<std::pair<Txid, std::optional<Auction>>> auctions;
+    //! The order of reservations (State::m_reservation_order) the block changed, and the next one.
+    std::vector<std::pair<Txid, std::optional<uint64_t>>> reservation_orders;
+    std::optional<uint64_t> next_reservation_order;
 
-    bool empty() const { return !next_seq && tokens.empty() && assets.empty() && reservations.empty() && pools.empty() && auctions.empty(); }
+    bool empty() const { return !next_seq && tokens.empty() && assets.empty() && reservations.empty() && pools.empty() && auctions.empty() && reservation_orders.empty() && !next_reservation_order; }
 
     template <typename Stream>
     void Serialize(Stream& s) const
@@ -544,6 +548,8 @@ struct StateUndo {
         detail::WriteChanges(s, reservations);
         detail::WriteChanges(s, pools);
         detail::WriteChanges(s, auctions);
+        detail::WriteChanges(s, reservation_orders);
+        s << BA_OPT(next_reservation_order);
     }
     template <typename Stream>
     void Unserialize(Stream& s)
@@ -554,6 +560,14 @@ struct StateUndo {
         detail::ReadChanges(s, reservations);
         detail::ReadChanges(s, pools);
         detail::ReadChanges(s, auctions);
+        // Undo data written before reservations had an order ends here.
+        reservation_orders.clear();
+        next_reservation_order.reset();
+        if constexpr (requires { s.empty(); }) {
+            if (s.empty()) return;
+        }
+        detail::ReadChanges(s, reservation_orders);
+        s >> BA_OPT(next_reservation_order);
     }
 };
 
@@ -574,11 +588,11 @@ public:
     /**
      * @param[out] released  CHN freed by retiring an asset (ReleaseAsset), for mainchain miners
      */
-    [[nodiscard]] bool ApplyTx(const CTransaction& tx, int height, StateUndo& undo, std::vector<CTxOut>& payouts, std::string& reject_reason, int pool_rules_height = 0, CAmount* released = nullptr, int release_height = 0);
+    [[nodiscard]] bool ApplyTx(const CTransaction& tx, int height, StateUndo& undo, std::vector<CTxOut>& payouts, std::string& reject_reason, int pool_rules_height = 0, CAmount* released = nullptr, int release_height = 0, int audit_height = 0);
     /** Whether an asset is dead and can be retired; if not, why (`why`). */
     bool Releasable(const AssetId& asset, std::string* why = nullptr) const;
     /** Whether ApplyTx would accept the transaction now; `results`, if given, gets what it would pay out. */
-    [[nodiscard]] bool CheckTx(const CTransaction& tx, int height, std::string& reject_reason, std::vector<Result>* results = nullptr, int pool_rules_height = 0, int release_height = 0) const;
+    [[nodiscard]] bool CheckTx(const CTransaction& tx, int height, std::string& reject_reason, std::vector<Result>* results = nullptr, int pool_rules_height = 0, int release_height = 0, int audit_height = 0) const;
     /** What the inputs of a transaction carry, in the order of the inputs. */
     std::vector<std::pair<uint32_t, Token>> SpentTokens(const CTransaction& tx) const;
     void Revert(const StateUndo& undo);
@@ -592,13 +606,31 @@ public:
     uint32_t NextSeq() const { return m_next_seq; }
     /** The pool of two assets, if there is one. */
     const Pool* FindPool(const AssetId& a, const AssetId& b) const;
+    const std::map<Txid, uint64_t>& ReservationOrder() const { return m_reservation_order; }
+    uint64_t NextReservationOrder() const { return m_next_reservation_order; }
 
-    SERIALIZE_METHODS(State, obj) { READWRITE(obj.m_tokens, obj.m_assets, obj.m_reservations, obj.m_seq, obj.m_next_seq, obj.m_pools, obj.m_auctions); }
+    template <typename Stream>
+    void Serialize(Stream& s) const
+    {
+        s << m_tokens << m_assets << m_reservations << m_seq << m_next_seq << m_pools << m_auctions << m_reservation_order << m_next_reservation_order;
+    }
+    template <typename Stream>
+    void Unserialize(Stream& s)
+    {
+        s >> m_tokens >> m_assets >> m_reservations >> m_seq >> m_next_seq >> m_pools >> m_auctions;
+        // A state written before reservations had an order ends here: theirs count as the oldest.
+        m_reservation_order.clear();
+        m_next_reservation_order = 1;
+        if constexpr (requires { s.empty(); }) {
+            if (s.empty()) return;
+        }
+        s >> m_reservation_order >> m_next_reservation_order;
+    }
     friend bool operator==(const State&, const State&) = default;
 
 private:
     struct Plan;
-    std::optional<Plan> MakePlan(const CTransaction& tx, int height, std::string& reject_reason, int pool_rules_height, int release_height) const;
+    std::optional<Plan> MakePlan(const CTransaction& tx, int height, std::string& reject_reason, int pool_rules_height, int release_height, int audit_height) const;
 
     std::map<COutPoint, Token> m_tokens;
     std::map<AssetId, AssetRecord> m_assets;
@@ -608,6 +640,9 @@ private:
     uint32_t m_next_seq{0};
     std::map<uint256, Pool> m_pools;
     std::map<Txid, Auction> m_auctions;
+    //! The order in which reservations were made (from bitassets_audit_height; older ones count as 0).
+    std::map<Txid, uint64_t> m_reservation_order;
+    uint64_t m_next_reservation_order{1};
 };
 
 /** Whether the marker of a transaction, if any, is well formed. This depends on the transaction alone. */

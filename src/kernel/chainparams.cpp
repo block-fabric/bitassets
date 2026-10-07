@@ -340,6 +340,7 @@ public:
         // The test network had a trade into an abandoned pool before (block 621).
         consensus.sidechain.bitassets_pool_rules_height = 660;
         consensus.sidechain.bitassets_release_height = 720;
+        consensus.sidechain.bitassets_audit_height = 1'000'000;
         // The test network ran without it until then; see SidechainParams.
         consensus.sidechain.single_bundle_height = 1'000'000;
         consensus.coinbase_maturity = 0; // what a block pays (deposits, fees) can be spent in the next

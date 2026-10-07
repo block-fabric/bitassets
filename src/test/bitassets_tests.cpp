@@ -6,6 +6,7 @@
 #include <addresstype.h>
 #include <arith_uint256.h>
 #include <script/script.h>
+#include <streams.h>
 #include <test/util/setup_common.h>
 
 #include <boost/test/unit_test.hpp>
@@ -165,6 +166,63 @@ BOOST_AUTO_TEST_CASE(register_and_conserve)
     const CTransaction fix{MakeTx({COutPoint{update.GetHash(), 0}}, Burn{{Unit(Token::Kind::CONTROL, GOLD)}}, {})};
     BOOST_CHECK(f.Apply(fix));
     BOOST_CHECK(f.state.Assets().at(GOLD).fixed);
+}
+
+BOOST_AUTO_TEST_CASE(oldest_reservation_reveals)
+{
+    // Someone sees a registration in the mempool, which reveals the name and nonce of a reservation,
+    // makes a reservation of the same commitment and tries to register first: refused, the oldest
+    // reservation of a commitment is the one that reveals it.
+    Fixture f;
+    const State empty{f.state};
+    const uint256 nonce{HashName("secret")};
+    const uint256 commitment{ReservationCommitment(GOLD, nonce)};
+    const CTransaction mine{MakeTx({}, Reserve{commitment}, {Unit(Token::Kind::RESERVATION, uint256{})})};
+    BOOST_REQUIRE(f.Apply(mine));
+    const CTransaction copy{MakeTx({}, Reserve{commitment}, {Unit(Token::Kind::RESERVATION, uint256{})})};
+    BOOST_REQUIRE(f.Apply(copy));
+    bitassets::Register reg;
+    reg.name = GOLD;
+    reg.nonce = nonce;
+    reg.text = "GOLD";
+    BOOST_CHECK_EQUAL(f.Reject(MakeTx({COutPoint{copy.GetHash(), 0}}, reg, {Unit(Token::Kind::CONTROL, GOLD)})), "bad-ba-reservation-not-first");
+    std::string reason;
+    BOOST_CHECK_MESSAGE(f.Apply(MakeTx({COutPoint{mine.GetHash(), 0}}, reg, {Unit(Token::Kind::CONTROL, GOLD)}), &reason), reason);
+    BOOST_CHECK(f.state.Assets().contains(GOLD));
+
+    // Undone, the order of the reservations goes with them.
+    State reverted{f.state};
+    reverted.Revert(f.undo);
+    BOOST_CHECK(reverted == empty);
+
+    // Before the rule, any reservation of the commitment would do.
+    Fixture before;
+    const CTransaction a{MakeTx({}, Reserve{commitment}, {Unit(Token::Kind::RESERVATION, uint256{})})};
+    const CTransaction b{MakeTx({}, Reserve{commitment}, {Unit(Token::Kind::RESERVATION, uint256{})})};
+    std::string r;
+    BOOST_REQUIRE(before.state.ApplyTx(a, 100, before.undo, before.payouts, r, 0, nullptr, 0, /*audit_height=*/1000));
+    BOOST_REQUIRE(before.state.ApplyTx(b, 100, before.undo, before.payouts, r, 0, nullptr, 0, /*audit_height=*/1000));
+    BOOST_CHECK_MESSAGE(before.state.ApplyTx(MakeTx({COutPoint{b.GetHash(), 0}}, reg, {Unit(Token::Kind::CONTROL, GOLD)}), 100, before.undo, before.payouts, r, 0, nullptr, 0, /*audit_height=*/1000), r);
+}
+
+BOOST_AUTO_TEST_CASE(state_of_old_format_reads)
+{
+    // A state written before reservations had an order reads back, its reservations the oldest.
+    Fixture f;
+    f.Issue("GOLD", 10);
+    const CTransaction reserve{MakeTx({}, Reserve{ReservationCommitment(SILVER, uint256{1})}, {Unit(Token::Kind::RESERVATION, uint256{})})};
+    BOOST_REQUIRE(f.Apply(reserve));
+    DataStream full{};
+    full << f.state;
+    // The old format is the new one less its last two fields: the order map and the next order.
+    DataStream tail{};
+    tail << f.state.ReservationOrder() << f.state.NextReservationOrder();
+    DataStream old{std::span{full}.first(full.size() - tail.size())};
+    State read;
+    old >> read;
+    BOOST_CHECK(read.Reservations() == f.state.Reservations());
+    BOOST_CHECK(read.ReservationOrder().empty());
+    BOOST_CHECK_EQUAL(read.NextReservationOrder(), 1U);
 }
 
 BOOST_AUTO_TEST_CASE(pools)

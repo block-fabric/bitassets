@@ -106,6 +106,13 @@ struct SidechainParams {
     int bitassets_pool_rules_height{0};
     /** BitAssets: the height from which a dead asset can be retired (ReleaseAsset). */
     int bitassets_release_height{0};
+    /**
+     * From this height, the rules of the audit of October 2026: an asset is registered only from the
+     * oldest reservation of its commitment (a copy, made to register it first once its maker reveals
+     * it, never is); and the withdrawal that gives the CHN of a retired asset to mainchain miners pays
+     * a script of its own (OP_RETURN "release" and the txid), so that it cannot be taken for another.
+     */
+    int bitassets_audit_height{0};
      * From this height, no withdrawal is refunded, and no bundle started, while a bundle of this
      * sidechain is pending on the mainchain. It may hold any withdrawal: one committed on another
      * branch of this chain, after a reorg, holds withdrawals this branch thinks are free; paid,
