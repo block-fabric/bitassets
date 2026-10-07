@@ -476,4 +476,42 @@ BOOST_AUTO_TEST_CASE(revert_restores)
     BOOST_CHECK(f.state == before);
 }
 
+BOOST_AUTO_TEST_CASE(undo_formats_inside_a_record)
+{
+    // The undo data is followed by more in its record (the deposits of the block): each format reads
+    // back, the old one written before the reservation orders included, and leaves the rest alone.
+    for (const bool with_seq : {false, true}) {
+        StateUndo undo;
+        if (with_seq) undo.next_seq = 5;
+        undo.tokens.emplace_back(COutPoint{Txid::FromUint256(uint256{7}), 1}, std::nullopt);
+        DataStream current{};
+        current << undo;
+        // The old format: no version byte in front, and no orders (an empty list and an empty
+        // optional, a byte each) at the end.
+        DataStream old{std::span{current}.subspan(1, current.size() - 3)};
+        for (DataStream* stream : {&current, &old}) {
+            *stream << uint8_t{0xab};
+            StateUndo read;
+            *stream >> read;
+            uint8_t after;
+            *stream >> after;
+            BOOST_CHECK_EQUAL(after, 0xab);
+            BOOST_CHECK(read.next_seq == undo.next_seq);
+            BOOST_CHECK(read.tokens == undo.tokens);
+            BOOST_CHECK(read.reservation_orders.empty() && !read.next_reservation_order);
+        }
+    }
+    StateUndo orders;
+    orders.reservation_orders.emplace_back(Txid::FromUint256(uint256{9}), 3);
+    orders.next_reservation_order = 4;
+    DataStream stream{};
+    stream << orders << uint8_t{0xab};
+    StateUndo read;
+    uint8_t after;
+    stream >> read >> after;
+    BOOST_CHECK_EQUAL(after, 0xab);
+    BOOST_CHECK(read.reservation_orders == orders.reservation_orders);
+    BOOST_CHECK(read.next_reservation_order == orders.next_reservation_order);
+}
+
 BOOST_AUTO_TEST_SUITE_END()
