@@ -28,9 +28,9 @@ using node::NodeContext;
 
 namespace {
 
-const bitassets::State& StateOf(ChainstateManager& chainman) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+bitassets::State StateOf(ChainstateManager& chainman) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
 {
-    return chainman.ActiveChainstate().m_scdb.m_side.BitAssets();
+    return chainman.ActiveChainstate().SideState().BitAssets();
 }
 
 AssetId ParseAsset(const UniValue& value, const bitassets::State& state)
@@ -38,23 +38,28 @@ AssetId ParseAsset(const UniValue& value, const bitassets::State& state)
     return bitassets::ParseAssetArg(value, [&](uint32_t seq) { return state.AssetOfSeq(seq); });
 }
 
-const bitassets::AssetRecord* RecordOf(const bitassets::State& state, const AssetId& asset)
+std::optional<bitassets::AssetRecord> RecordOf(const bitassets::State& state, const AssetId& asset)
 {
-    const auto it{state.Assets().find(asset)};
-    return it == state.Assets().end() ? nullptr : &it->second;
+    return state.GetAsset(asset);
+}
+
+std::string LabelOf(const bitassets::State& state, const AssetId& asset)
+{
+    const auto record{RecordOf(state, asset)};
+    return bitassets::AssetLabel(asset, record ? &*record : nullptr);
 }
 
 uint8_t DecimalsOf(const bitassets::State& state, const AssetId& asset)
 {
     if (asset.IsNull()) return bitassets::CHN_DECIMALS;
-    const auto* record{RecordOf(state, asset)};
+    const auto record{RecordOf(state, asset)};
     return record ? record->decimals : 0;
 }
 
 /** A registered asset, else an error. */
-const bitassets::AssetRecord& Registered(const bitassets::State& state, const AssetId& asset)
+bitassets::AssetRecord Registered(const bitassets::State& state, const AssetId& asset)
 {
-    const auto* record{RecordOf(state, asset)};
+    const auto record{RecordOf(state, asset)};
     if (!record) throw JSONRPCError(RPC_INVALID_PARAMETER, "No such asset is registered");
     return *record;
 }
@@ -124,18 +129,13 @@ UniValue AssetToJSON(Chainstate& chainstate, const bitassets::State& state, cons
     obj.pushKV("releasable", releasable);
     if (releasable) {
         CAmount fee{0};
-        for (const auto& [id, pool] : state.Pools()) {
+        for (const auto& [id, pool] : state.PoolsOf(asset)) {
             if (pool.asset0.IsNull() && pool.asset1 == asset) fee += static_cast<CAmount>(pool.reserve0);
         }
         obj.pushKV("release_fee", ValueFromAmount(fee));
     }
     if (!record.fixed) {
-        for (const auto& [outpoint, token] : state.Tokens()) {
-            if (token.kind == bitassets::Token::Kind::CONTROL && token.id == asset) {
-                obj.pushKV("control", OutputToJSON(chainstate, outpoint));
-                break;
-            }
-        }
+        if (const auto outpoint{state.FirstTokenOf(asset, bitassets::Token::Kind::CONTROL)}) obj.pushKV("control", OutputToJSON(chainstate, *outpoint));
     }
     return obj;
 }
@@ -188,8 +188,8 @@ UniValue PoolToJSON(const bitassets::State& state, const uint256& id, const bita
     const uint8_t da{DecimalsOf(state, a)}, db{DecimalsOf(state, b)};
     UniValue obj(UniValue::VOBJ);
     obj.pushKV("pool", id.GetHex());
-    obj.pushKV("asset_a", AssetLabel(a, RecordOf(state, a)));
-    obj.pushKV("asset_b", AssetLabel(b, RecordOf(state, b)));
+    obj.pushKV("asset_a", LabelOf(state, a));
+    obj.pushKV("asset_b", LabelOf(state, b));
     obj.pushKV("asset_a_id", a.GetHex());
     obj.pushKV("asset_b_id", b.GetHex());
     obj.pushKV("reserve_a", AmountToJSON(reserve_a, da));
@@ -246,8 +246,8 @@ UniValue AuctionToJSON(Chainstate& chainstate, const bitassets::State& state, co
     const uint8_t db{DecimalsOf(state, auction.base)}, dq{DecimalsOf(state, auction.quote)};
     UniValue obj(UniValue::VOBJ);
     obj.pushKV("auction", id.GetHex());
-    obj.pushKV("base", AssetLabel(auction.base, RecordOf(state, auction.base)));
-    obj.pushKV("quote", AssetLabel(auction.quote, RecordOf(state, auction.quote)));
+    obj.pushKV("base", LabelOf(state, auction.base));
+    obj.pushKV("quote", LabelOf(state, auction.quote));
     obj.pushKV("base_id", auction.base.GetHex());
     obj.pushKV("quote_id", auction.quote.GetHex());
     obj.pushKV("amount", AmountToJSON(auction.base_amount, db));
@@ -263,12 +263,7 @@ UniValue AuctionToJSON(Chainstate& chainstate, const bitassets::State& state, co
     obj.pushKV("bids", auction.bids);
     obj.pushKV("status", AuctionStatus(auction, height));
     if (!auction.closed) {
-        for (const auto& [outpoint, token] : state.Tokens()) {
-            if (token.kind == bitassets::Token::Kind::RECEIPT && token.id == id.ToUint256()) {
-                obj.pushKV("receipt", OutputToJSON(chainstate, outpoint));
-                break;
-            }
-        }
+        if (const auto outpoint{state.FirstTokenOf(id.ToUint256(), bitassets::Token::Kind::RECEIPT)}) obj.pushKV("receipt", OutputToJSON(chainstate, *outpoint));
     }
     return obj;
 }
@@ -288,7 +283,7 @@ RPCMethod getasset()
 {
     ChainstateManager& chainman{EnsureAnyChainman(request.context)};
     LOCK(::cs_main);
-    const bitassets::State& state{StateOf(chainman)};
+    const bitassets::State state{StateOf(chainman)};
     const AssetId asset{ParseAsset(request.params[0], state)};
     if (asset.IsNull()) throw JSONRPCError(RPC_INVALID_PARAMETER, "CHN is the coin of the chain, not a registered asset");
     const auto& record{Registered(state, asset)};
@@ -318,16 +313,16 @@ RPCMethod listassets()
     if (count < 0 || skip < 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "Negative count or skip");
     const std::optional<std::string> match{request.params[2].isNull() ? std::nullopt : std::optional{ToLower(request.params[2].get_str())}};
     LOCK(::cs_main);
-    const bitassets::State& state{StateOf(chainman)};
+    const bitassets::State state{StateOf(chainman)};
     UniValue result(UniValue::VARR);
     int skipped{0};
     for (uint32_t seq{0}; seq < state.NextSeq() && result.size() < static_cast<size_t>(count); ++seq) {
         const auto asset{state.AssetOfSeq(seq)};
         if (!asset) continue;
         // A retired asset keeps its number, and its name may be registered again under another.
-        const auto it{state.Assets().find(*asset)};
-        if (it == state.Assets().end() || it->second.seq != seq) continue;
-        const auto& record{it->second};
+        const auto found{state.GetAsset(*asset)};
+        if (!found || found->seq != seq) continue;
+        const auto& record{*found};
         if (match && ToLower(record.text).find(*match) == std::string::npos) continue;
         if (skipped++ < skip) continue;
         result.push_back(AssetToJSON(chainman.ActiveChainstate(), state, *asset, record, std::nullopt));
@@ -359,7 +354,7 @@ RPCMethod getassethistory()
 {
     ChainstateManager& chainman{EnsureAnyChainman(request.context)};
     LOCK(::cs_main);
-    const bitassets::State& state{StateOf(chainman)};
+    const bitassets::State state{StateOf(chainman)};
     const auto& record{Registered(state, ParseAsset(request.params[0], state))};
     UniValue result(UniValue::VOBJ);
     const auto add{[&](const std::string& field, const auto& history, const auto& format) {
@@ -415,12 +410,17 @@ RPCMethod getbitassetsinfo()
 {
     ChainstateManager& chainman{EnsureAnyChainman(request.context)};
     LOCK(::cs_main);
-    const bitassets::State& state{StateOf(chainman)};
+    const bitassets::State state{StateOf(chainman)};
     UniValue result(UniValue::VOBJ);
-    result.pushKV("assets", state.Assets().size());
-    result.pushKV("reservations", state.Reservations().size());
-    result.pushKV("pools", state.Pools().size());
-    result.pushKV("auctions", std::count_if(state.Auctions().begin(), state.Auctions().end(), [](const auto& a) { return !a.second.closed; }));
+    // Counted: for information.
+    size_t assets{0}, reservations{0}, open_auctions{0};
+    state.ForEachAsset([&](const AssetId&, const bitassets::AssetRecord&) { ++assets; return true; });
+    state.ForEachReservation([&](const Txid&, const uint256&) { ++reservations; return true; });
+    state.ForEachAuction([&](const Txid&, const bitassets::Auction& a) { if (!a.closed) ++open_auctions; return true; });
+    result.pushKV("assets", assets);
+    result.pushKV("reservations", reservations);
+    result.pushKV("pools", state.PoolCount());
+    result.pushKV("auctions", open_auctions);
     result.pushKV("height", chainman.ActiveChain().Height() + 1);
     return result;
 },
@@ -441,11 +441,16 @@ RPCMethod listpools()
 {
     ChainstateManager& chainman{EnsureAnyChainman(request.context)};
     LOCK(::cs_main);
-    const bitassets::State& state{StateOf(chainman)};
+    const bitassets::State state{StateOf(chainman)};
     const std::optional<AssetId> only{request.params[0].isNull() ? std::nullopt : std::optional{ParseAsset(request.params[0], state)}};
     UniValue result(UniValue::VARR);
-    for (const auto& [id, pool] : state.Pools()) {
-        if (only && pool.asset0 != *only && pool.asset1 != *only) continue;
+    std::vector<std::pair<uint256, bitassets::Pool>> pools;
+    if (only) {
+        pools = state.PoolsOf(*only);
+    } else {
+        state.ForEachPool([&](const uint256& id, const bitassets::Pool& pool) { pools.emplace_back(id, pool); return true; });
+    }
+    for (const auto& [id, pool] : pools) {
         // A pool with CHN shows its price in CHN.
         AssetId first{pool.asset0.IsNull() ? pool.asset1 : pool.asset0};
         if (only) first = *only;
@@ -471,9 +476,9 @@ RPCMethod getpool()
 {
     ChainstateManager& chainman{EnsureAnyChainman(request.context)};
     LOCK(::cs_main);
-    const bitassets::State& state{StateOf(chainman)};
+    const bitassets::State state{StateOf(chainman)};
     const AssetId a{ParseAsset(request.params[0], state)}, b{ParseAsset(request.params[1], state)};
-    const auto* pool{state.FindPool(a, b)};
+    const auto pool{state.FindPool(a, b)};
     if (!pool) throw JSONRPCError(RPC_INVALID_PARAMETER, "There is no pool of these assets (addliquidity makes one)");
     return PoolToJSON(state, bitassets::PoolId(a, b), *pool, a);
 },
@@ -506,10 +511,10 @@ RPCMethod quoteswap()
 {
     ChainstateManager& chainman{EnsureAnyChainman(request.context)};
     LOCK(::cs_main);
-    const bitassets::State& state{StateOf(chainman)};
+    const bitassets::State state{StateOf(chainman)};
     const AssetId in{ParseAsset(request.params[0], state)}, out{ParseAsset(request.params[2], state)};
     if (in == out) throw JSONRPCError(RPC_INVALID_PARAMETER, "The same asset in and out");
-    const auto* pool{state.FindPool(in, out)};
+    const auto pool{state.FindPool(in, out)};
     if (!pool) throw JSONRPCError(RPC_INVALID_PARAMETER, "There is no pool of these assets");
     const bool zero_in{pool->asset0 == in};
     const uint64_t reserve_in{zero_in ? pool->reserve0 : pool->reserve1}, reserve_out{zero_in ? pool->reserve1 : pool->reserve0};
@@ -557,15 +562,16 @@ RPCMethod listauctions()
     ChainstateManager& chainman{EnsureAnyChainman(request.context)};
     const bool closed{!request.params[0].isNull() && request.params[0].get_bool()};
     LOCK(::cs_main);
-    const bitassets::State& state{StateOf(chainman)};
+    const bitassets::State state{StateOf(chainman)};
     const int height{chainman.ActiveChain().Height() + 1};
-    std::vector<std::pair<Txid, const bitassets::Auction*>> auctions;
-    for (const auto& [id, auction] : state.Auctions()) {
-        if (!auction.closed || closed) auctions.emplace_back(id, &auction);
-    }
-    std::sort(auctions.begin(), auctions.end(), [](const auto& x, const auto& y) { return x.second->created > y.second->created; });
+    std::vector<std::pair<Txid, bitassets::Auction>> auctions;
+    state.ForEachAuction([&](const Txid& id, const bitassets::Auction& auction) {
+        if (!auction.closed || closed) auctions.emplace_back(id, auction);
+        return true;
+    });
+    std::stable_sort(auctions.begin(), auctions.end(), [](const auto& x, const auto& y) { return x.second.created > y.second.created; });
     UniValue result(UniValue::VARR);
-    for (const auto& [id, auction] : auctions) result.push_back(AuctionToJSON(chainman.ActiveChainstate(), state, id, *auction, height));
+    for (const auto& [id, auction] : auctions) result.push_back(AuctionToJSON(chainman.ActiveChainstate(), state, id, auction, height));
     return result;
 },
     };
@@ -586,10 +592,10 @@ RPCMethod getauction()
     ChainstateManager& chainman{EnsureAnyChainman(request.context)};
     const Txid id{Txid::FromUint256(ParseHashV(request.params[0], "auction"))};
     LOCK(::cs_main);
-    const bitassets::State& state{StateOf(chainman)};
-    const auto it{state.Auctions().find(id)};
-    if (it == state.Auctions().end()) throw JSONRPCError(RPC_INVALID_PARAMETER, "No such auction");
-    return AuctionToJSON(chainman.ActiveChainstate(), state, id, it->second, chainman.ActiveChain().Height() + 1);
+    const bitassets::State state{StateOf(chainman)};
+    const auto found{state.GetAuction(id)};
+    if (!found) throw JSONRPCError(RPC_INVALID_PARAMETER, "No such auction");
+    return AuctionToJSON(chainman.ActiveChainstate(), state, id, *found, chainman.ActiveChain().Height() + 1);
 },
     };
 }
@@ -616,10 +622,10 @@ RPCMethod quotebid()
     ChainstateManager& chainman{EnsureAnyChainman(request.context)};
     const Txid id{Txid::FromUint256(ParseHashV(request.params[0], "auction"))};
     LOCK(::cs_main);
-    const bitassets::State& state{StateOf(chainman)};
-    const auto it{state.Auctions().find(id)};
-    if (it == state.Auctions().end()) throw JSONRPCError(RPC_INVALID_PARAMETER, "No such auction");
-    const bitassets::Auction& auction{it->second};
+    const bitassets::State state{StateOf(chainman)};
+    const auto found{state.GetAuction(id)};
+    if (!found) throw JSONRPCError(RPC_INVALID_PARAMETER, "No such auction");
+    const bitassets::Auction auction{*found};
     const int height{chainman.ActiveChain().Height() + 1};
     const uint8_t db{DecimalsOf(state, auction.base)}, dq{DecimalsOf(state, auction.quote)};
     const uint64_t amount{bitassets::ParseUnits(request.params[1], dq)};

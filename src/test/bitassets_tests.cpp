@@ -14,6 +14,79 @@
 using namespace bitassets;
 
 namespace {
+
+/** The undo data of the blocks of a test, a journal each, reverted last first. */
+struct TUndo {
+    std::vector<sidechain::StoreUndo> parts;
+    template <typename Stream>
+    void Serialize(Stream& s) const { s << parts; }
+    template <typename Stream>
+    void Unserialize(Stream& s) { s >> parts; }
+};
+
+/** The assets on a store of their own, with the shape the tests were written for (tables as maps: for tests). */
+class TState
+{
+public:
+    TState() : m_store{std::make_unique<sidechain::StoreOverlay>(m_empty, /*journal=*/true)} {}
+    TState(const TState& other) : TState()
+    {
+        other.m_store->ForEach({}, [&](const sidechain::StoreBytes& k, const sidechain::StoreBytes& v) {
+            m_store->Put(k, v);
+            return true;
+        });
+        m_store->TakeUndo();
+    }
+    TState& operator=(const TState& other)
+    {
+        // A store of our own, over our own (empty) base, with the other's entries.
+        auto store{std::make_unique<sidechain::StoreOverlay>(m_empty, /*journal=*/true)};
+        other.m_store->ForEach({}, [&](const sidechain::StoreBytes& k, const sidechain::StoreBytes& v) {
+            store->Put(k, v);
+            return true;
+        });
+        store->TakeUndo();
+        m_store = std::move(store);
+        return *this;
+    }
+    bool ApplyTx(const CTransaction& tx, int height, TUndo& undo, std::vector<CTxOut>& payouts, std::string& reason, int pool_rules_height = 0, CAmount* released = nullptr, int release_height = 0, int audit_height = 0)
+    {
+        const bool ok{bitassets::State{*m_store}.ApplyTx(tx, height, payouts, reason, pool_rules_height, released, release_height, audit_height)};
+        undo.parts.push_back(m_store->TakeUndo());
+        return ok;
+    }
+    bool CheckTx(const CTransaction& tx, int height, std::string& reason, std::vector<Result>* results = nullptr, int pool_rules_height = 0, int release_height = 0, int audit_height = 0) const
+    {
+        return View().CheckTx(tx, height, reason, results, pool_rules_height, release_height, audit_height);
+    }
+    void Revert(const TUndo& undo)
+    {
+        for (auto it{undo.parts.rbegin()}; it != undo.parts.rend(); ++it) m_store->Revert(*it);
+        m_store->TakeUndo();
+    }
+    bitassets::State View() const { return bitassets::State{*m_store}; }
+    bool Releasable(const AssetId& asset, std::string* why = nullptr) const { return View().Releasable(asset, why); }
+    std::optional<AssetId> AssetOfSeq(uint32_t seq) const { return View().AssetOfSeq(seq); }
+    uint32_t NextSeq() const { return View().NextSeq(); }
+    std::optional<Pool> FindPool(const AssetId& a, const AssetId& b) const { return View().FindPool(a, b); }
+    uint64_t NextReservationOrder() const { return View().NextReservationOrder(); }
+    std::map<COutPoint, Token> Tokens() const { std::map<COutPoint, Token> m; View().ForEachToken([&](const COutPoint& k, const Token& v) { m.emplace(k, v); return true; }); return m; }
+    std::map<AssetId, AssetRecord> Assets() const { std::map<AssetId, AssetRecord> m; View().ForEachAsset([&](const AssetId& k, const AssetRecord& v) { m.emplace(k, v); return true; }); return m; }
+    std::map<Txid, uint256> Reservations() const { std::map<Txid, uint256> m; View().ForEachReservation([&](const Txid& k, const uint256& v) { m.emplace(k, v); return true; }); return m; }
+    std::map<uint256, Pool> Pools() const { std::map<uint256, Pool> m; View().ForEachPool([&](const uint256& k, const Pool& v) { m.emplace(k, v); return true; }); return m; }
+    std::map<Txid, Auction> Auctions() const { std::map<Txid, Auction> m; View().ForEachAuction([&](const Txid& k, const Auction& v) { m.emplace(k, v); return true; }); return m; }
+    std::map<Txid, uint64_t> ReservationOrder() const
+    {
+        std::map<Txid, uint64_t> m;
+        sidechain::Table<uint256, uint64_t>{0x36}.ForEach(*m_store, [&](const uint256& k, const uint64_t& v) { m.emplace(Txid::FromUint256(k), v); return true; });
+        return m;
+    }
+    friend bool operator==(const TState& a, const TState& b) { return sidechain::StoreHash(*a.m_store) == sidechain::StoreHash(*b.m_store); }
+
+private:
+    sidechain::EmptyStore m_empty;
+    std::unique_ptr<sidechain::StoreOverlay> m_store;
+};
 const CScript HOLDER{GetScriptForDestination(WitnessV0KeyHash{uint160{}})};
 const AssetId GOLD{HashName("GOLD")};
 const AssetId SILVER{HashName("SILVER")};
@@ -41,8 +114,8 @@ Token Asset(const AssetId& id, uint64_t amount) { return Token{Token::Kind::ASSE
 Token Unit(Token::Kind kind, const uint256& id) { return Token{kind, id, 1}; }
 
 struct Fixture {
-    State state;
-    StateUndo undo;
+    TState state;
+    TUndo undo;
     std::vector<CTxOut> payouts;
     int height{100};
 
@@ -56,7 +129,7 @@ struct Fixture {
     std::string Reject(const CTransaction& tx)
     {
         std::string r;
-        const State before{state};
+        const TState before{state};
         BOOST_CHECK(!state.ApplyTx(tx, height, undo, payouts, r));
         BOOST_CHECK(state == before);
         return r;
@@ -174,7 +247,7 @@ BOOST_AUTO_TEST_CASE(oldest_reservation_reveals)
     // makes a reservation of the same commitment and tries to register first: refused, the oldest
     // reservation of a commitment is the one that reveals it.
     Fixture f;
-    const State empty{f.state};
+    const TState empty{f.state};
     const uint256 nonce{HashName("secret")};
     const uint256 commitment{ReservationCommitment(GOLD, nonce)};
     const CTransaction mine{MakeTx({}, Reserve{commitment}, {Unit(Token::Kind::RESERVATION, uint256{})})};
@@ -191,7 +264,7 @@ BOOST_AUTO_TEST_CASE(oldest_reservation_reveals)
     BOOST_CHECK(f.state.Assets().contains(GOLD));
 
     // Undone, the order of the reservations goes with them.
-    State reverted{f.state};
+    TState reverted{f.state};
     reverted.Revert(f.undo);
     BOOST_CHECK(reverted == empty);
 
@@ -205,25 +278,6 @@ BOOST_AUTO_TEST_CASE(oldest_reservation_reveals)
     BOOST_CHECK_MESSAGE(before.state.ApplyTx(MakeTx({COutPoint{b.GetHash(), 0}}, reg, {Unit(Token::Kind::CONTROL, GOLD)}), 100, before.undo, before.payouts, r, 0, nullptr, 0, /*audit_height=*/1000), r);
 }
 
-BOOST_AUTO_TEST_CASE(state_of_old_format_reads)
-{
-    // A state written before reservations had an order reads back, its reservations the oldest.
-    Fixture f;
-    f.Issue("GOLD", 10);
-    const CTransaction reserve{MakeTx({}, Reserve{ReservationCommitment(SILVER, uint256{1})}, {Unit(Token::Kind::RESERVATION, uint256{})})};
-    BOOST_REQUIRE(f.Apply(reserve));
-    DataStream full{};
-    full << f.state;
-    // The old format is the new one less its last two fields: the order map and the next order.
-    DataStream tail{};
-    tail << f.state.ReservationOrder() << f.state.NextReservationOrder();
-    DataStream old{std::span{full}.first(full.size() - tail.size())};
-    State read;
-    old >> read;
-    BOOST_CHECK(read.Reservations() == f.state.Reservations());
-    BOOST_CHECK(read.ReservationOrder().empty());
-    BOOST_CHECK_EQUAL(read.NextReservationOrder(), 1U);
-}
 
 BOOST_AUTO_TEST_CASE(pools)
 {
@@ -237,7 +291,7 @@ BOOST_AUTO_TEST_CASE(pools)
     std::string reason;
     BOOST_REQUIRE_MESSAGE(f.Apply(added, &reason), reason);
     const uint256 id{PoolId(GOLD, CHN)};
-    const Pool& pool{f.state.Pools().at(id)};
+    const Pool pool{f.state.Pools().at(id)};
     BOOST_CHECK(pool.asset0 == CHN);
     BOOST_CHECK_EQUAL(pool.reserve0, 50'000'000u);
     BOOST_CHECK_EQUAL(pool.reserve1, 100'000u);
@@ -302,7 +356,7 @@ BOOST_AUTO_TEST_CASE(abandoned_pools_close)
     BOOST_CHECK_EQUAL(f.Reject(MakeTx({}, Swap{CHN, 500'000'000, GOLD, 1, CScript{}}, {std::nullopt}, 500'000'000)), "bad-ba-pool-closed");
     // Before the rules' height, as on the test network before them, the trade went through.
     std::string r2;
-    State before{f.state};
+    TState before{f.state};
     BOOST_CHECK(before.CheckTx(MakeTx({}, Swap{CHN, 500'000'000, GOLD, 1, CScript{}}, {std::nullopt}, 500'000'000), f.height, r2, nullptr, f.height + 1));
     // A dust deposit does not reopen it; a real one does, and it trades again.
     const COutPoint gold{added.GetHash(), 0};
@@ -340,8 +394,8 @@ BOOST_AUTO_TEST_CASE(dead_assets_retire)
     std::string reason;
     BOOST_CHECK(!f.state.CheckTx(MakeTx({}, ReleaseAsset{GOLD}, {}), f.height, reason, nullptr, 0, f.height + 1));
     BOOST_CHECK_EQUAL(reason, "bad-ba-release-not-active");
-    const State before{f.state};
-    f.undo = StateUndo{};
+    const TState before{f.state};
+    f.undo = TUndo{};
     CAmount released{0};
     BOOST_REQUIRE(f.state.ApplyTx(MakeTx({}, ReleaseAsset{GOLD}, {}), f.height, f.undo, f.payouts, reason, 0, &released));
     BOOST_CHECK_EQUAL(released, left);
@@ -461,14 +515,14 @@ BOOST_AUTO_TEST_CASE(revert_restores)
 {
     Fixture f;
     const auto [control, coins]{f.Issue("GOLD", 1'000'000)};
-    const State before{f.state};
-    f.undo = StateUndo{};
+    const TState before{f.state};
+    f.undo = TUndo{};
     // A block that makes a pool, trades in it, registers another asset and mints.
     const CTransaction added{MakeTx({coins}, AddLiquidity{GOLD, CHN, 100'000, 50'000'000, 1}, {Asset(GOLD, 900'000), std::nullopt}, 50'000'000)};
     BOOST_REQUIRE(f.Apply(added));
     BOOST_REQUIRE(f.Apply(MakeTx({}, Swap{CHN, 10'000, GOLD, 1, CScript{}}, {std::nullopt}, 10'000)));
     BOOST_REQUIRE(f.Apply(MakeTx({control}, Mint{GOLD, 5}, {Unit(Token::Kind::CONTROL, GOLD), Asset(GOLD, 5)})));
-    const StateUndo undo{f.undo};
+    const TUndo undo{f.undo};
     f.Issue("SILVER", 7);
     BOOST_CHECK(!(f.state == before));
     // Undo everything since `before` (the registration's undo is in f.undo too).
@@ -476,42 +530,5 @@ BOOST_AUTO_TEST_CASE(revert_restores)
     BOOST_CHECK(f.state == before);
 }
 
-BOOST_AUTO_TEST_CASE(undo_formats_inside_a_record)
-{
-    // The undo data is followed by more in its record (the deposits of the block): each format reads
-    // back, the old one written before the reservation orders included, and leaves the rest alone.
-    for (const bool with_seq : {false, true}) {
-        StateUndo undo;
-        if (with_seq) undo.next_seq = 5;
-        undo.tokens.emplace_back(COutPoint{Txid::FromUint256(uint256{7}), 1}, std::nullopt);
-        DataStream current{};
-        current << undo;
-        // The old format: no version byte in front, and no orders (an empty list and an empty
-        // optional, a byte each) at the end.
-        DataStream old{std::span{current}.subspan(1, current.size() - 3)};
-        for (DataStream* stream : {&current, &old}) {
-            *stream << uint8_t{0xab};
-            StateUndo read;
-            *stream >> read;
-            uint8_t after;
-            *stream >> after;
-            BOOST_CHECK_EQUAL(after, 0xab);
-            BOOST_CHECK(read.next_seq == undo.next_seq);
-            BOOST_CHECK(read.tokens == undo.tokens);
-            BOOST_CHECK(read.reservation_orders.empty() && !read.next_reservation_order);
-        }
-    }
-    StateUndo orders;
-    orders.reservation_orders.emplace_back(Txid::FromUint256(uint256{9}), 3);
-    orders.next_reservation_order = 4;
-    DataStream stream{};
-    stream << orders << uint8_t{0xab};
-    StateUndo read;
-    uint8_t after;
-    stream >> read >> after;
-    BOOST_CHECK_EQUAL(after, 0xab);
-    BOOST_CHECK(read.reservation_orders == orders.reservation_orders);
-    BOOST_CHECK(read.next_reservation_order == orders.next_reservation_order);
-}
 
 BOOST_AUTO_TEST_SUITE_END()

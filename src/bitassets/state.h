@@ -11,10 +11,12 @@
 #include <primitives/transaction.h>
 #include <script/script.h>
 #include <serialize.h>
+#include <sidechain/store.h>
 #include <uint256.h>
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <optional>
 #include <set>
@@ -525,61 +527,6 @@ void ReadChanges(Stream& s, std::vector<std::pair<Key, std::optional<Value>>>& c
 }
 } // namespace detail
 
-/** What a block changed in the State: the earlier value of every entry it changed, nullopt where it added one. */
-struct StateUndo {
-    std::optional<uint32_t> next_seq;
-    std::vector<std::pair<COutPoint, std::optional<Token>>> tokens;
-    std::vector<std::pair<AssetId, std::optional<AssetRecord>>> assets;
-    std::vector<std::pair<Txid, std::optional<uint256>>> reservations;
-    std::vector<std::pair<uint256, std::optional<Pool>>> pools;
-    std::vector<std::pair<Txid, std::optional<Auction>>> auctions;
-    //! The order of reservations (State::m_reservation_order) the block changed, and the next one.
-    std::vector<std::pair<Txid, std::optional<uint64_t>>> reservation_orders;
-    std::optional<uint64_t> next_reservation_order;
-
-    bool empty() const { return !next_seq && tokens.empty() && assets.empty() && reservations.empty() && pools.empty() && auctions.empty() && reservation_orders.empty() && !next_reservation_order; }
-
-    template <typename Stream>
-    void Serialize(Stream& s) const
-    {
-        // The format from the audit's rules on: a first byte of 2, where the older format has the
-        // flag of next_seq (0 or 1). The undo data is followed by more in its record, so the end of
-        // the stream cannot tell the formats apart.
-        s << uint8_t{2};
-        s << BA_OPT(next_seq);
-        detail::WriteChanges(s, tokens);
-        detail::WriteChanges(s, assets);
-        detail::WriteChanges(s, reservations);
-        detail::WriteChanges(s, pools);
-        detail::WriteChanges(s, auctions);
-        detail::WriteChanges(s, reservation_orders);
-        s << BA_OPT(next_reservation_order);
-    }
-    template <typename Stream>
-    void Unserialize(Stream& s)
-    {
-        uint8_t first;
-        s >> first;
-        const bool with_orders{first == 2};
-        next_seq.reset();
-        if (with_orders) {
-            s >> BA_OPT(next_seq);
-        } else if (first != 0) {
-            s >> next_seq.emplace();
-        }
-        detail::ReadChanges(s, tokens);
-        detail::ReadChanges(s, assets);
-        detail::ReadChanges(s, reservations);
-        detail::ReadChanges(s, pools);
-        detail::ReadChanges(s, auctions);
-        // Undo data written before reservations had an order has none.
-        reservation_orders.clear();
-        next_reservation_order.reset();
-        if (!with_orders) return;
-        detail::ReadChanges(s, reservation_orders);
-        s >> BA_OPT(next_reservation_order);
-    }
-};
 
 /** What an operation did, for those who look: its results, in order. */
 struct Result {
@@ -587,72 +534,74 @@ struct Result {
     uint64_t amount{0};
 };
 
+/**
+ * The assets, on the store of the sidechain state (sidechain/store.h), one entry per key. Tables:
+ * 0x30 what outputs carry, 0x31 assets, 0x32 reservations not revealed yet, 0x33 assets by number,
+ * 0x34 pools, 0x35 auctions, 0x36 the order of reservations; single values 0x37 the next number,
+ * 0x38 the next order. Indexes, so that no rule reads a table whole: 0x39 outputs by what they
+ * carry (its id, with the kind), 0x3a pools by asset, 0x3b auctions by asset, 0x3c reservations by
+ * commitment then order. What a block changes, the store's journal notes: its undo data.
+ */
 class State
 {
 public:
+    /** Read only. */
+    explicit State(const sidechain::StoreView& view) : m_view{&view}, m_overlay{nullptr} {}
+    /** Read and write. */
+    explicit State(sidechain::StoreOverlay& overlay) : m_view{&overlay}, m_overlay{&overlay} {}
+
     /**
-     * Check a transaction against the state and, if it follows the rules, apply it, noting the
-     * earlier values in `undo`. The CHN it pays out are added to `payouts`, for the coinbase. A
-     * transaction that does not follow the rules changes nothing.
-     */
-    /**
+     * Check a transaction against the state and, if it follows the rules, apply it. The CHN it pays
+     * out are added to `payouts`, for the coinbase. A transaction that does not follow the rules
+     * changes nothing.
      * @param[out] released  CHN freed by retiring an asset (ReleaseAsset), for mainchain miners
      */
-    [[nodiscard]] bool ApplyTx(const CTransaction& tx, int height, StateUndo& undo, std::vector<CTxOut>& payouts, std::string& reject_reason, int pool_rules_height = 0, CAmount* released = nullptr, int release_height = 0, int audit_height = 0);
+    [[nodiscard]] bool ApplyTx(const CTransaction& tx, int height, std::vector<CTxOut>& payouts, std::string& reject_reason, int pool_rules_height = 0, CAmount* released = nullptr, int release_height = 0, int audit_height = 0);
     /** Whether an asset is dead and can be retired; if not, why (`why`). */
     bool Releasable(const AssetId& asset, std::string* why = nullptr) const;
     /** Whether ApplyTx would accept the transaction now; `results`, if given, gets what it would pay out. */
     [[nodiscard]] bool CheckTx(const CTransaction& tx, int height, std::string& reject_reason, std::vector<Result>* results = nullptr, int pool_rules_height = 0, int release_height = 0, int audit_height = 0) const;
     /** What the inputs of a transaction carry, in the order of the inputs. */
     std::vector<std::pair<uint32_t, Token>> SpentTokens(const CTransaction& tx) const;
-    void Revert(const StateUndo& undo);
 
-    const std::map<COutPoint, Token>& Tokens() const { return m_tokens; }
-    const std::map<AssetId, AssetRecord>& Assets() const { return m_assets; }
-    const std::map<Txid, uint256>& Reservations() const { return m_reservations; }
-    const std::map<uint256, Pool>& Pools() const { return m_pools; }
-    const std::map<Txid, Auction>& Auctions() const { return m_auctions; }
+    std::optional<Token> GetToken(const COutPoint& outpoint) const;
+    std::optional<AssetRecord> GetAsset(const AssetId& asset) const;
+    bool HasAsset(const AssetId& asset) const;
+    std::optional<uint256> GetReservation(const Txid& id) const;
+    std::optional<Pool> GetPool(const uint256& id) const;
+    std::optional<Auction> GetAuction(const Txid& id) const;
     std::optional<AssetId> AssetOfSeq(uint32_t seq) const;
-    uint32_t NextSeq() const { return m_next_seq; }
+    uint32_t NextSeq() const;
     /** The pool of two assets, if there is one. */
-    const Pool* FindPool(const AssetId& a, const AssetId& b) const;
-    const std::map<Txid, uint64_t>& ReservationOrder() const { return m_reservation_order; }
-    uint64_t NextReservationOrder() const { return m_next_reservation_order; }
-
-    template <typename Stream>
-    void Serialize(Stream& s) const
-    {
-        s << m_tokens << m_assets << m_reservations << m_seq << m_next_seq << m_pools << m_auctions << m_reservation_order << m_next_reservation_order;
-    }
-    template <typename Stream>
-    void Unserialize(Stream& s)
-    {
-        s >> m_tokens >> m_assets >> m_reservations >> m_seq >> m_next_seq >> m_pools >> m_auctions;
-        // A state written before reservations had an order ends here: theirs count as the oldest.
-        m_reservation_order.clear();
-        m_next_reservation_order = 1;
-        if constexpr (requires { s.empty(); }) {
-            if (s.empty()) return;
-        }
-        s >> m_reservation_order >> m_next_reservation_order;
-    }
-    friend bool operator==(const State&, const State&) = default;
+    std::optional<Pool> FindPool(const AssetId& a, const AssetId& b) const;
+    std::optional<uint64_t> OrderOf(const Txid& id) const;
+    uint64_t NextReservationOrder() const;
+    void ForEachToken(const std::function<bool(const COutPoint&, const Token&)>& fn) const;
+    void ForEachAsset(const std::function<bool(const AssetId&, const AssetRecord&)>& fn) const;
+    void ForEachPool(const std::function<bool(const uint256&, const Pool&)>& fn) const;
+    void ForEachAuction(const std::function<bool(const Txid&, const Auction&)>& fn) const;
+    void ForEachReservation(const std::function<bool(const Txid&, const uint256&)>& fn) const;
+    /** The first output, by outpoint, that carries a token of this kind and id. */
+    std::optional<COutPoint> FirstTokenOf(const uint256& id, Token::Kind kind) const;
+    /** The pools of an asset, by id. */
+    std::vector<std::pair<uint256, Pool>> PoolsOf(const AssetId& asset) const;
+    /** How many pools and auctions there are (read whole: for information). */
+    size_t PoolCount() const;
 
 private:
     struct Plan;
     std::optional<Plan> MakePlan(const CTransaction& tx, int height, std::string& reject_reason, int pool_rules_height, int release_height, int audit_height) const;
 
-    std::map<COutPoint, Token> m_tokens;
-    std::map<AssetId, AssetRecord> m_assets;
-    //! Reservations not revealed yet, by the transaction that made them: their commitments.
-    std::map<Txid, uint256> m_reservations;
-    std::map<uint32_t, AssetId> m_seq;
-    uint32_t m_next_seq{0};
-    std::map<uint256, Pool> m_pools;
-    std::map<Txid, Auction> m_auctions;
-    //! The order in which reservations were made (from bitassets_audit_height; older ones count as 0).
-    std::map<Txid, uint64_t> m_reservation_order;
-    uint64_t m_next_reservation_order{1};
+    // Writes, with the indexes kept in step.
+    sidechain::StoreOverlay& Writable() const;
+    void SetToken(const COutPoint& outpoint, const std::optional<Token>& token);
+    void SetReservation(const Txid& id, const std::optional<uint256>& commitment);
+    void SetOrder(const Txid& id, const std::optional<uint64_t>& order);
+    void SetPool(const uint256& id, const std::optional<Pool>& pool);
+    void SetAuction(const Txid& id, const std::optional<Auction>& auction);
+
+    const sidechain::StoreView* m_view;
+    sidechain::StoreOverlay* m_overlay;
 };
 
 /** Whether the marker of a transaction, if any, is well formed. This depends on the transaction alone. */

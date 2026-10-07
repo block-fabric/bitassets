@@ -15,6 +15,7 @@
 #include <script/solver.h>
 #include <streams.h>
 #include <tinyformat.h>
+#include <util/check.h>
 
 #include <algorithm>
 
@@ -523,31 +524,196 @@ struct State::Plan {
     CAmount released{0};
 };
 
+namespace {
+const sidechain::Table<COutPoint, Token> TOKENS{0x30};
+const sidechain::Table<uint256, AssetRecord> ASSETS{0x31};
+const sidechain::Table<uint256, uint256> RESERVATIONS{0x32};
+const sidechain::Table<uint32_t, uint256> SEQ{0x33};
+const sidechain::Table<uint256, Pool> POOLS{0x34};
+const sidechain::Table<uint256, Auction> AUCTIONS{0x35};
+const sidechain::Table<uint256, uint64_t> ORDER{0x36};
+const sidechain::Cell<uint32_t> NEXT_SEQ{0x37, 0};
+const sidechain::Cell<uint64_t> NEXT_ORDER{0x38, 1};
+constexpr uint8_t TOKENS_BY_ID{0x39};
+constexpr uint8_t POOLS_BY_ASSET{0x3a};
+constexpr uint8_t AUCTIONS_BY_ASSET{0x3b};
+constexpr uint8_t BY_COMMITMENT{0x3c};
+
+sidechain::StoreBytes Key2(uint8_t table, const uint256& a, const uint256& b)
+{
+    sidechain::StoreBytes key{table};
+    sidechain::KeyCodec<uint256>::Encode(key, a);
+    sidechain::KeyCodec<uint256>::Encode(key, b);
+    return key;
+}
+sidechain::StoreBytes TokenIdKey(const uint256& id, const COutPoint& outpoint)
+{
+    sidechain::StoreBytes key{TOKENS_BY_ID};
+    sidechain::KeyCodec<uint256>::Encode(key, id);
+    sidechain::KeyCodec<COutPoint>::Encode(key, outpoint);
+    return key;
+}
+sidechain::StoreBytes CommitmentKey(const uint256& commitment, uint64_t order, const Txid& id)
+{
+    sidechain::StoreBytes key{BY_COMMITMENT};
+    sidechain::KeyCodec<uint256>::Encode(key, commitment);
+    sidechain::KeyCodec<uint64_t>::Encode(key, order);
+    sidechain::KeyCodec<uint256>::Encode(key, id.ToUint256());
+    return key;
+}
+sidechain::StoreBytes Prefix(uint8_t table, const uint256& head)
+{
+    sidechain::StoreBytes key{table};
+    sidechain::KeyCodec<uint256>::Encode(key, head);
+    return key;
+}
+} // namespace
+
+sidechain::StoreOverlay& State::Writable() const { return *Assert(m_overlay); }
+std::optional<Token> State::GetToken(const COutPoint& outpoint) const { return TOKENS.Get(*m_view, outpoint); }
+std::optional<AssetRecord> State::GetAsset(const AssetId& asset) const { return ASSETS.Get(*m_view, asset); }
+bool State::HasAsset(const AssetId& asset) const { return ASSETS.Contains(*m_view, asset); }
+std::optional<uint256> State::GetReservation(const Txid& id) const { return RESERVATIONS.Get(*m_view, id.ToUint256()); }
+std::optional<Pool> State::GetPool(const uint256& id) const { return POOLS.Get(*m_view, id); }
+std::optional<Auction> State::GetAuction(const Txid& id) const { return AUCTIONS.Get(*m_view, id.ToUint256()); }
+uint32_t State::NextSeq() const { return NEXT_SEQ.Get(*m_view); }
+std::optional<uint64_t> State::OrderOf(const Txid& id) const { return ORDER.Get(*m_view, id.ToUint256()); }
+uint64_t State::NextReservationOrder() const { return NEXT_ORDER.Get(*m_view); }
+std::optional<Pool> State::FindPool(const AssetId& a, const AssetId& b) const { return GetPool(PoolId(a, b)); }
+void State::ForEachToken(const std::function<bool(const COutPoint&, const Token&)>& fn) const { TOKENS.ForEach(*m_view, fn); }
+void State::ForEachAsset(const std::function<bool(const AssetId&, const AssetRecord&)>& fn) const { ASSETS.ForEach(*m_view, fn); }
+void State::ForEachPool(const std::function<bool(const uint256&, const Pool&)>& fn) const { POOLS.ForEach(*m_view, fn); }
+void State::ForEachAuction(const std::function<bool(const Txid&, const Auction&)>& fn) const
+{
+    AUCTIONS.ForEach(*m_view, [&](const uint256& id, const Auction& a) { return fn(Txid::FromUint256(id), a); });
+}
+void State::ForEachReservation(const std::function<bool(const Txid&, const uint256&)>& fn) const
+{
+    RESERVATIONS.ForEach(*m_view, [&](const uint256& id, const uint256& c) { return fn(Txid::FromUint256(id), c); });
+}
+
+void State::SetToken(const COutPoint& outpoint, const std::optional<Token>& token)
+{
+    sidechain::StoreOverlay& out{Writable()};
+    if (const auto old{GetToken(outpoint)}) out.Erase(TokenIdKey(old->id, outpoint));
+    if (token) {
+        TOKENS.Put(out, outpoint, *token);
+        out.Put(TokenIdKey(token->id, outpoint), sidechain::EncodeValue(static_cast<uint8_t>(token->kind)));
+    } else {
+        TOKENS.Erase(out, outpoint);
+    }
+}
+
+void State::SetReservation(const Txid& id, const std::optional<uint256>& commitment)
+{
+    sidechain::StoreOverlay& out{Writable()};
+    const uint64_t order{OrderOf(id).value_or(0)};
+    if (const auto old{GetReservation(id)}) out.Erase(CommitmentKey(*old, order, id));
+    if (commitment) {
+        RESERVATIONS.Put(out, id.ToUint256(), *commitment);
+        out.Put(CommitmentKey(*commitment, order, id), {});
+    } else {
+        RESERVATIONS.Erase(out, id.ToUint256());
+    }
+}
+
+void State::SetOrder(const Txid& id, const std::optional<uint64_t>& order)
+{
+    sidechain::StoreOverlay& out{Writable()};
+    const auto commitment{GetReservation(id)};
+    if (commitment) out.Erase(CommitmentKey(*commitment, OrderOf(id).value_or(0), id));
+    if (order) {
+        ORDER.Put(out, id.ToUint256(), *order);
+    } else {
+        ORDER.Erase(out, id.ToUint256());
+    }
+    if (commitment) out.Put(CommitmentKey(*commitment, order.value_or(0), id), {});
+}
+
+void State::SetPool(const uint256& id, const std::optional<Pool>& pool)
+{
+    sidechain::StoreOverlay& out{Writable()};
+    if (const auto old{GetPool(id)}) {
+        out.Erase(Key2(POOLS_BY_ASSET, old->asset0, id));
+        out.Erase(Key2(POOLS_BY_ASSET, old->asset1, id));
+    }
+    if (pool) {
+        POOLS.Put(out, id, *pool);
+        out.Put(Key2(POOLS_BY_ASSET, pool->asset0, id), {});
+        out.Put(Key2(POOLS_BY_ASSET, pool->asset1, id), {});
+    } else {
+        POOLS.Erase(out, id);
+    }
+}
+
+void State::SetAuction(const Txid& id, const std::optional<Auction>& auction)
+{
+    sidechain::StoreOverlay& out{Writable()};
+    if (const auto old{GetAuction(id)}) {
+        out.Erase(Key2(AUCTIONS_BY_ASSET, old->base, id.ToUint256()));
+        out.Erase(Key2(AUCTIONS_BY_ASSET, old->quote, id.ToUint256()));
+    }
+    if (auction) {
+        AUCTIONS.Put(out, id.ToUint256(), *auction);
+        out.Put(Key2(AUCTIONS_BY_ASSET, auction->base, id.ToUint256()), {});
+        out.Put(Key2(AUCTIONS_BY_ASSET, auction->quote, id.ToUint256()), {});
+    } else {
+        AUCTIONS.Erase(out, id.ToUint256());
+    }
+}
+
+std::optional<COutPoint> State::FirstTokenOf(const uint256& id, Token::Kind kind) const
+{
+    std::optional<COutPoint> found;
+    m_view->ForEach(Prefix(TOKENS_BY_ID, id), [&](const sidechain::StoreBytes& key, const sidechain::StoreBytes& value) {
+        if (static_cast<Token::Kind>(sidechain::DecodeValue<uint8_t>(value)) != kind) return true;
+        std::span<const unsigned char> in{key};
+        in = in.subspan(33);
+        found = sidechain::KeyCodec<COutPoint>::Decode(in);
+        return false;
+    });
+    return found;
+}
+
+std::vector<std::pair<uint256, Pool>> State::PoolsOf(const AssetId& asset) const
+{
+    std::vector<std::pair<uint256, Pool>> pools;
+    m_view->ForEach(Prefix(POOLS_BY_ASSET, asset), [&](const sidechain::StoreBytes& key, const sidechain::StoreBytes&) {
+        std::span<const unsigned char> in{key};
+        in = in.subspan(33);
+        const uint256 id{sidechain::KeyCodec<uint256>::Decode(in)};
+        pools.emplace_back(id, *Assert(GetPool(id)));
+        return true;
+    });
+    return pools;
+}
+
+size_t State::PoolCount() const
+{
+    size_t n{0};
+    ForEachPool([&](const uint256&, const Pool&) { ++n; return true; });
+    return n;
+}
+
 std::vector<std::pair<uint32_t, Token>> State::SpentTokens(const CTransaction& tx) const
 {
     std::vector<std::pair<uint32_t, Token>> spent;
     if (tx.IsCoinBase()) return spent;
     for (uint32_t i{0}; i < tx.vin.size(); ++i) {
-        if (const auto it{m_tokens.find(tx.vin[i].prevout)}; it != m_tokens.end()) spent.emplace_back(i, it->second);
+        if (const auto token{GetToken(tx.vin[i].prevout)}) spent.emplace_back(i, *token);
     }
     return spent;
 }
 
 std::optional<AssetId> State::AssetOfSeq(uint32_t seq) const
 {
-    const auto it{m_seq.find(seq)};
-    if (it == m_seq.end()) return std::nullopt;
-    // A retired asset keeps its number in m_seq; the name may since belong to an asset with another
-    // number. The number names the asset only while that asset has it.
-    const auto record{m_assets.find(it->second)};
-    if (record == m_assets.end() || record->second.seq != seq) return std::nullopt;
-    return it->second;
-}
-
-const Pool* State::FindPool(const AssetId& a, const AssetId& b) const
-{
-    const auto it{m_pools.find(PoolId(a, b))};
-    return it == m_pools.end() ? nullptr : &it->second;
+    const auto asset{SEQ.Get(*m_view, seq)};
+    if (!asset) return std::nullopt;
+    // A retired asset keeps its number; the name may since belong to an asset with another number.
+    // The number names the asset only while that asset has it.
+    const auto record{GetAsset(*asset)};
+    if (!record || record->seq != seq) return std::nullopt;
+    return asset;
 }
 
 bool State::Releasable(const AssetId& asset, std::string* why) const
@@ -556,20 +722,36 @@ bool State::Releasable(const AssetId& asset, std::string* why) const
         if (why) *why = reason;
         return false;
     }};
-    const auto it{m_assets.find(asset)};
-    if (it == m_assets.end()) return no("no such asset");
-    if (!it->second.fixed) return no("its supply is not fixed: its control coin exists");
-    for (const auto& [outpoint, token] : m_tokens) {
-        if (token.id != asset) continue;
-        if (token.kind == Token::Kind::ASSET) return no("someone holds some of it");
-        if (token.kind == Token::Kind::CONTROL) return no("its control coin exists");
-    }
-    for (const auto& [id, auction] : m_auctions) {
-        if (!auction.closed && (auction.base == asset || auction.quote == asset)) return no("an auction of it is not collected");
-    }
-    for (const auto& [id, pool] : m_pools) {
-        if ((pool.asset0 == asset || pool.asset1 == asset) && !amm::Abandoned(pool)) return no("a pool of it has liquidity providers");
-    }
+    const auto record{GetAsset(asset)};
+    if (!record) return no("no such asset");
+    if (!record->fixed) return no("its supply is not fixed: its control coin exists");
+    // What carries it, through the index of outputs by what they carry, in outpoint order.
+    std::optional<const char*> held;
+    m_view->ForEach(Prefix(TOKENS_BY_ID, asset), [&](const sidechain::StoreBytes&, const sidechain::StoreBytes& value) {
+        const auto kind{static_cast<Token::Kind>(sidechain::DecodeValue<uint8_t>(value))};
+        if (kind == Token::Kind::ASSET) held = "someone holds some of it";
+        if (kind == Token::Kind::CONTROL) held = "its control coin exists";
+        return !held;
+    });
+    if (held) return no(*held);
+    bool open_auction{false};
+    m_view->ForEach(Prefix(AUCTIONS_BY_ASSET, asset), [&](const sidechain::StoreBytes& key, const sidechain::StoreBytes&) {
+        std::span<const unsigned char> in{key};
+        in = in.subspan(33);
+        const auto auction{GetAuction(Txid::FromUint256(sidechain::KeyCodec<uint256>::Decode(in)))};
+        open_auction = auction && !auction->closed;
+        return !open_auction;
+    });
+    if (open_auction) return no("an auction of it is not collected");
+    bool provided{false};
+    m_view->ForEach(Prefix(POOLS_BY_ASSET, asset), [&](const sidechain::StoreBytes& key, const sidechain::StoreBytes&) {
+        std::span<const unsigned char> in{key};
+        in = in.subspan(33);
+        const auto pool{GetPool(sidechain::KeyCodec<uint256>::Decode(in))};
+        provided = pool && !amm::Abandoned(*pool);
+        return !provided;
+    });
+    if (provided) return no("a pool of it has liquidity providers");
     return true;
 }
 
@@ -630,21 +812,21 @@ std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, s
         }
     }};
     // Pools and auctions trade CHN and registered assets.
-    const auto tradable{[&](const AssetId& asset) { return asset.IsNull() || m_assets.contains(asset); }};
+    const auto tradable{[&](const AssetId& asset) { return asset.IsNull() || HasAsset(asset); }};
 
     if (const auto* reserve{op ? std::get_if<Reserve>(op) : nullptr}) {
         credit(Token::Kind::RESERVATION, txid.ToUint256(), 1);
         plan.reservation_made = std::make_pair(txid, reserve->commitment);
     } else if (const auto* reg{op ? std::get_if<Register>(op) : nullptr}) {
         // Assets registered before, in this block included, are taken.
-        if (m_assets.contains(reg->name)) return invalid("bad-ba-name-taken");
+        if (HasAsset(reg->name)) return invalid("bad-ba-name-taken");
         const uint256 implied{ReservationCommitment(reg->name, reg->nonce)};
         std::optional<Txid> reservation;
         for (const auto& [n, token] : spent) {
             if (token.kind != Token::Kind::RESERVATION) continue;
-            const auto it{m_reservations.find(Txid::FromUint256(token.id))};
-            if (it != m_reservations.end() && it->second == implied) {
-                reservation = it->first;
+            const auto found{GetReservation(Txid::FromUint256(token.id))};
+            if (found && *found == implied) {
+                reservation = Txid::FromUint256(token.id);
                 break;
             }
         }
@@ -652,13 +834,14 @@ std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, s
         if (height >= audit_height) {
             // Only the oldest reservation of a commitment reveals it: a copy of someone else's, made to
             // register the asset first once they reveal it, is younger.
-            const auto order_of{[&](const Txid& id) {
-                const auto it{m_reservation_order.find(id)};
-                return it == m_reservation_order.end() ? uint64_t{0} : it->second;
-            }};
-            for (const auto& [other, commitment] : m_reservations) {
-                if (commitment != implied || other == *reservation) continue;
-                if (order_of(other) < order_of(*reservation)) return invalid("bad-ba-reservation-not-first");
+            // The index of reservations by commitment has them oldest first: the first one says.
+            const sidechain::StoreBytes prefix{Prefix(BY_COMMITMENT, implied)};
+            if (const auto first{m_view->Next(prefix, prefix)}) {
+                std::span<const unsigned char> in{first->first};
+                in = in.subspan(prefix.size());
+                const uint64_t order{sidechain::KeyCodec<uint64_t>::Decode(in)};
+                const Txid other{Txid::FromUint256(sidechain::KeyCodec<uint256>::Decode(in))};
+                if (other != *reservation && order < OrderOf(*reservation).value_or(0)) return invalid("bad-ba-reservation-not-first");
             }
         }
         debit(Token::Kind::RESERVATION, reservation->ToUint256(), 1);
@@ -666,7 +849,7 @@ std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, s
         credit(Token::Kind::CONTROL, reg->name, 1);
         if (reg->supply > 0) credit(Token::Kind::ASSET, reg->name, reg->supply);
         AssetRecord record;
-        record.seq = m_next_seq;
+        record.seq = NextSeq();
         record.registration = txid;
         record.height = height;
         if (reg->text) record.text = *reg->text;
@@ -679,12 +862,12 @@ std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, s
         record.signing_key.push_back({reg->data.signing_key, txid, height});
         record.info.push_back({reg->data.info, txid, height});
         plan.assets.emplace_back(reg->name, std::move(record));
-        plan.seq = std::make_pair(m_next_seq, reg->name);
+        plan.seq = std::make_pair(NextSeq(), reg->name);
     } else if (const auto* mint{op ? std::get_if<Mint>(op) : nullptr}) {
-        const auto it{m_assets.find(mint->asset)};
-        if (it == m_assets.end()) return invalid("bad-ba-asset-unknown");
+        const auto found{GetAsset(mint->asset)};
+        if (!found) return invalid("bad-ba-asset-unknown");
         if (!spends(Token::Kind::CONTROL, mint->asset)) return invalid("bad-ba-no-control");
-        AssetRecord record{it->second};
+        AssetRecord record{*found};
         const auto supply{Add(record.supply, mint->amount)};
         const auto minted{Add(record.minted, mint->amount)};
         if (!supply || !minted) return invalid("bad-ba-supply");
@@ -693,11 +876,11 @@ std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, s
         credit(Token::Kind::ASSET, mint->asset, mint->amount);
         plan.assets.emplace_back(mint->asset, std::move(record));
     } else if (const auto* update{op ? std::get_if<UpdateAsset>(op) : nullptr}) {
-        const auto it{m_assets.find(update->asset)};
-        if (it == m_assets.end()) return invalid("bad-ba-asset-unknown");
+        const auto found{GetAsset(update->asset)};
+        if (!found) return invalid("bad-ba-asset-unknown");
         // The control coin of this asset, not of any.
         if (!spends(Token::Kind::CONTROL, update->asset)) return invalid("bad-ba-no-control");
-        AssetRecord record{it->second};
+        AssetRecord record{*found};
         ApplyUpdate(record.commitment, update->updates.commitment, txid, height);
         ApplyUpdate(record.ipv4, update->updates.ipv4, txid, height);
         ApplyUpdate(record.ipv6, update->updates.ipv6, txid, height);
@@ -710,15 +893,15 @@ std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, s
         for (const Token& token : burn->tokens) {
             debit(token.kind, token.id, token.amount);
             if (token.kind == Token::Kind::RESERVATION) {
-                if (!m_reservations.contains(Txid::FromUint256(token.id))) return invalid("bad-ba-burn");
+                if (!GetReservation(Txid::FromUint256(token.id))) return invalid("bad-ba-burn");
                 plan.reservations_gone.push_back(Txid::FromUint256(token.id));
                 continue;
             }
             auto it{changed.find(token.id)};
             if (it == changed.end()) {
-                const auto known{m_assets.find(token.id)};
-                if (known == m_assets.end()) return invalid("bad-ba-asset-unknown");
-                it = changed.emplace(token.id, known->second).first;
+                const auto known{GetAsset(token.id)};
+                if (!known) return invalid("bad-ba-asset-unknown");
+                it = changed.emplace(token.id, *known).first;
             }
             if (token.kind == Token::Kind::CONTROL) {
                 it->second.fixed = true;
@@ -732,9 +915,9 @@ std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, s
         }
         for (auto& [id, record] : changed) plan.assets.emplace_back(id, std::move(record));
     } else if (const auto* swap{op ? std::get_if<Swap>(op) : nullptr}) {
-        const auto it{m_pools.find(PoolId(swap->asset_in, swap->asset_out))};
-        if (it == m_pools.end()) return invalid("bad-ba-no-pool");
-        Pool pool{it->second};
+        const auto found{FindPool(swap->asset_in, swap->asset_out)};
+        if (!found) return invalid("bad-ba-no-pool");
+        Pool pool{*found};
         // A pool nobody provides liquidity to is closed: what went in could only buy dust, and stay there.
         if (pool_rules && amm::Abandoned(pool)) return invalid("bad-ba-pool-closed");
         const bool zero_in{pool.asset0 == swap->asset_in};
@@ -751,13 +934,13 @@ std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, s
         ++pool.swaps;
         take(swap->asset_in, swap->amount_in);
         plan.results.push_back({swap->asset_out, out});
-        plan.pool = std::make_pair(it->first, pool);
+        plan.pool = std::make_pair(PoolId(swap->asset_in, swap->asset_out), pool);
     } else if (const auto* add{op ? std::get_if<AddLiquidity>(op) : nullptr}) {
         if (!tradable(add->asset_a) || !tradable(add->asset_b)) return invalid("bad-ba-asset-unknown");
         const uint256 id{PoolId(add->asset_a, add->asset_b)};
         Pool pool;
-        if (const auto it{m_pools.find(id)}; it != m_pools.end()) {
-            pool = it->second;
+        if (const auto found{GetPool(id)}) {
+            pool = *found;
         } else {
             pool.asset0 = std::min(add->asset_a, add->asset_b);
             pool.asset1 = std::max(add->asset_a, add->asset_b);
@@ -790,9 +973,9 @@ std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, s
         plan.pool = std::make_pair(id, pool);
     } else if (const auto* remove{op ? std::get_if<RemoveLiquidity>(op) : nullptr}) {
         const uint256 id{PoolId(remove->asset_a, remove->asset_b)};
-        const auto it{m_pools.find(id)};
-        if (it == m_pools.end()) return invalid("bad-ba-no-pool");
-        Pool pool{it->second};
+        const auto found{GetPool(id)};
+        if (!found) return invalid("bad-ba-no-pool");
+        Pool pool{*found};
         // The shares nobody holds stay.
         if (remove->shares > pool.shares - std::min(pool.shares, MIN_LIQUIDITY)) return invalid("bad-ba-liquidity");
         const auto [out0, out1]{amm::Withdraw(pool, remove->shares)};
@@ -824,9 +1007,9 @@ std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, s
         credit(Token::Kind::RECEIPT, txid.ToUint256(), 1);
         plan.auction = std::make_pair(txid, auction);
     } else if (const auto* bid{op ? std::get_if<Bid>(op) : nullptr}) {
-        const auto it{m_auctions.find(bid->auction)};
-        if (it == m_auctions.end()) return invalid("bad-ba-no-auction");
-        Auction auction{it->second};
+        const auto found{GetAuction(bid->auction)};
+        if (!found) return invalid("bad-ba-no-auction");
+        Auction auction{*found};
         if (!auction.OpenAt(height)) return invalid("bad-ba-auction-closed");
         const uint64_t bought{auction.BuysAt(height, bid->quote_amount)};
         if (bought == 0 || bought > auction.remaining || bought < bid->min_base) return invalid("bad-ba-bid-price");
@@ -839,9 +1022,9 @@ std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, s
         plan.results.push_back({auction.base, bought});
         plan.auction = std::make_pair(bid->auction, auction);
     } else if (const auto* collect{op ? std::get_if<Collect>(op) : nullptr}) {
-        const auto it{m_auctions.find(collect->auction)};
-        if (it == m_auctions.end()) return invalid("bad-ba-no-auction");
-        Auction auction{it->second};
+        const auto found{GetAuction(collect->auction)};
+        if (!found) return invalid("bad-ba-no-auction");
+        Auction auction{*found};
         if (!auction.CollectableAt(height)) return invalid("bad-ba-auction-running");
         debit(Token::Kind::RECEIPT, collect->auction.ToUint256(), 1);
         if (auction.remaining > 0) plan.results.push_back({auction.base, auction.remaining});
@@ -858,8 +1041,16 @@ std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, s
         if (!Releasable(release->asset, &why)) return invalid("bad-ba-release-alive");
         plan.asset_gone = release->asset;
         std::map<AssetId, AssetRecord> others;
-        for (const auto& [id, pool] : m_pools) {
-            if (pool.asset0 != release->asset && pool.asset1 != release->asset) continue;
+        // Its pools, in the order of their ids, through the index of pools by asset.
+        std::vector<std::pair<uint256, Pool>> pools;
+        m_view->ForEach(Prefix(POOLS_BY_ASSET, release->asset), [&](const sidechain::StoreBytes& key, const sidechain::StoreBytes&) {
+            std::span<const unsigned char> in{key};
+            in = in.subspan(33);
+            const uint256 id{sidechain::KeyCodec<uint256>::Decode(in)};
+            pools.emplace_back(id, *Assert(GetPool(id)));
+            return true;
+        });
+        for (const auto& [id, pool] : pools) {
             plan.pools_gone.push_back(id);
             // What the pool holds of the other asset: CHN for mainchain miners, any other asset burned.
             const bool zero_is_it{pool.asset0 == release->asset};
@@ -870,7 +1061,7 @@ std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, s
                 if (!MoneyRange(plan.released)) return invalid("bad-ba-release");
             } else if (left > 0) {
                 auto o{others.find(other)};
-                if (o == others.end()) o = others.emplace(other, m_assets.at(other)).first;
+                if (o == others.end()) o = others.emplace(other, *Assert(GetAsset(other))).first;
                 o->second.supply -= std::min(o->second.supply, left);
                 o->second.burned = Add(o->second.burned, left).value_or(MAX_AMOUNT);
             }
@@ -920,70 +1111,38 @@ bool State::CheckTx(const CTransaction& tx, int height, std::string& reject_reas
     return true;
 }
 
-bool State::ApplyTx(const CTransaction& tx, int height, StateUndo& undo, std::vector<CTxOut>& payouts, std::string& reject_reason, int pool_rules_height, CAmount* released, int release_height, int audit_height)
+bool State::ApplyTx(const CTransaction& tx, int height, std::vector<CTxOut>& payouts, std::string& reject_reason, int pool_rules_height, CAmount* released, int release_height, int audit_height)
 {
     const auto plan{MakePlan(tx, height, reject_reason, pool_rules_height, release_height, audit_height)};
     if (!plan) return false;
-    if (!undo.next_seq) undo.next_seq = m_next_seq;
-    // Every change is noted with the value it replaced; reverting them in reverse order restores the state.
-    const auto set{[](auto& map, auto& changes, const auto& key, const auto& value) {
-        const auto it{map.find(key)};
-        changes.emplace_back(key, it == map.end() ? std::nullopt : std::optional{it->second});
-        if (value) {
-            map.insert_or_assign(key, *value);
-        } else if (it != map.end()) {
-            map.erase(it);
-        }
-    }};
-    for (const COutPoint& outpoint : plan->spent) set(m_tokens, undo.tokens, outpoint, std::optional<Token>{});
-    for (const auto& [outpoint, token] : plan->created) set(m_tokens, undo.tokens, outpoint, std::optional{token});
-    if (plan->reservation_made) set(m_reservations, undo.reservations, plan->reservation_made->first, std::optional{plan->reservation_made->second});
-    for (const Txid& id : plan->reservations_gone) set(m_reservations, undo.reservations, id, std::optional<uint256>{});
+    sidechain::StoreOverlay& out{Writable()};
+    // In the order the rules have always applied a plan in.
+    for (const COutPoint& outpoint : plan->spent) SetToken(outpoint, std::nullopt);
+    for (const auto& [outpoint, token] : plan->created) SetToken(outpoint, token);
+    if (plan->reservation_made) SetReservation(plan->reservation_made->first, plan->reservation_made->second);
+    for (const Txid& id : plan->reservations_gone) SetReservation(id, std::nullopt);
     // The order of reservations, for the rule that the oldest of a commitment reveals it.
     if (plan->reservation_made && height >= audit_height) {
-        if (!undo.next_reservation_order) undo.next_reservation_order = m_next_reservation_order;
-        set(m_reservation_order, undo.reservation_orders, plan->reservation_made->first, std::optional<uint64_t>{m_next_reservation_order++});
+        const uint64_t next{NextReservationOrder()};
+        SetOrder(plan->reservation_made->first, next);
+        NEXT_ORDER.Put(out, next + 1);
     }
     for (const Txid& id : plan->reservations_gone) {
-        if (m_reservation_order.contains(id)) set(m_reservation_order, undo.reservation_orders, id, std::optional<uint64_t>{});
+        if (OrderOf(id)) SetOrder(id, std::nullopt);
     }
-    for (const auto& [id, record] : plan->assets) set(m_assets, undo.assets, id, std::optional{record});
+    for (const auto& [id, record] : plan->assets) ASSETS.Put(out, id, record);
     if (plan->seq) {
-        m_seq.emplace(plan->seq->first, plan->seq->second);
-        ++m_next_seq;
+        SEQ.Put(out, plan->seq->first, plan->seq->second);
+        NEXT_SEQ.Put(out, NextSeq() + 1);
     }
-    if (plan->pool) set(m_pools, undo.pools, plan->pool->first, std::optional{plan->pool->second});
-    for (const uint256& id : plan->pools_gone) set(m_pools, undo.pools, id, std::optional<Pool>{});
+    if (plan->pool) SetPool(plan->pool->first, plan->pool->second);
+    for (const uint256& id : plan->pools_gone) SetPool(id, std::nullopt);
     // The name is free again; its number is not given again (lists skip it).
-    if (plan->asset_gone) set(m_assets, undo.assets, *plan->asset_gone, std::optional<AssetRecord>{});
+    if (plan->asset_gone) ASSETS.Erase(out, *plan->asset_gone);
     if (released) *released = plan->released;
-    if (plan->auction) set(m_auctions, undo.auctions, plan->auction->first, std::optional{plan->auction->second});
+    if (plan->auction) SetAuction(plan->auction->first, plan->auction->second);
     payouts.insert(payouts.end(), plan->payouts.begin(), plan->payouts.end());
     return true;
-}
-
-void State::Revert(const StateUndo& undo)
-{
-    const auto revert{[](auto& map, const auto& changes) {
-        for (auto it{changes.rbegin()}; it != changes.rend(); ++it) {
-            if (it->second) {
-                map.insert_or_assign(it->first, *it->second);
-            } else {
-                map.erase(it->first);
-            }
-        }
-    }};
-    revert(m_tokens, undo.tokens);
-    revert(m_assets, undo.assets);
-    revert(m_reservations, undo.reservations);
-    revert(m_reservation_order, undo.reservation_orders);
-    if (undo.next_reservation_order) m_next_reservation_order = *undo.next_reservation_order;
-    revert(m_pools, undo.pools);
-    revert(m_auctions, undo.auctions);
-    if (undo.next_seq) {
-        m_seq.erase(m_seq.lower_bound(*undo.next_seq), m_seq.end());
-        m_next_seq = *undo.next_seq;
-    }
 }
 
 } // namespace bitassets

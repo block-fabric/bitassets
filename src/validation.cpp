@@ -4991,7 +4991,7 @@ void Chainstate::RemoveStaleDrivechainTxs()
         std::string reject_reason;
         for (const Txid& txid : m_mempool->m_bitassets_txs) {
             const CTransactionRef tx{m_mempool->get(txid)};
-            if (tx && !m_scdb.m_side.BitAssets().CheckTx(*tx, tip->nHeight + 1, reject_reason, nullptr, m_chainman.GetConsensus().sidechain.bitassets_pool_rules_height, m_chainman.GetConsensus().sidechain.bitassets_release_height, m_chainman.GetConsensus().sidechain.bitassets_audit_height)) stale.push_back(tx);
+            if (tx && !SideState().BitAssets().CheckTx(*tx, tip->nHeight + 1, reject_reason, nullptr, m_chainman.GetConsensus().sidechain.bitassets_pool_rules_height, m_chainman.GetConsensus().sidechain.bitassets_release_height, m_chainman.GetConsensus().sidechain.bitassets_audit_height)) stale.push_back(tx);
         }
     }
 
