@@ -394,7 +394,9 @@ bool SidechainDB::ConnectBlock(const CBlock& block, int height, const Consensus:
             const Bundle& bundle{slot.bundles[i]};
             // Blocks left before this one was connected.
             const int blocks_left{BlocksLeft(bundle, height, params) + 1};
-            const bool expired{blocks_left <= 0 ||
+            // Idle: nobody vouches for it (see DrivechainParams::idle_expiry_blocks).
+            const bool idle{height >= params.idle_expiry_height && bundle.score == 0 && Age(bundle.height, height) >= params.idle_expiry_blocks};
+            const bool expired{blocks_left <= 0 || idle ||
                                params.withdrawal_min_score - static_cast<int64_t>(bundle.score) > blocks_left};
             if (!expired) {
                 ++i;
