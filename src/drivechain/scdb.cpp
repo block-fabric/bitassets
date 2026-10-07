@@ -233,6 +233,9 @@ bool SidechainDB::ConnectBlock(const CBlock& block, int height, const Consensus:
 
     undo = BlockUndo{};
     undo.prev_block_hash = m_block_hash;
+    // The undo data is complete at every point of failure as well: a block that fails is taken
+    // back with what it has (see Chainstate::ConnectBlock), not by keeping a copy of the database.
+    undo.last_votes = m_last_votes;
 
     if (block.vtx.empty() || !block.vtx[0]->IsCoinBase()) return invalid("bad-dc-no-coinbase");
     const uint256 block_hash{block.GetHash()};
@@ -286,7 +289,6 @@ bool SidechainDB::ConnectBlock(const CBlock& block, int height, const Consensus:
 
     // Votes refer to the sidechains and bundles as they were before this block.
     const PendingBundles votable{GetPendingBundles()};
-    undo.last_votes = m_last_votes;
 
     //
     // Transactions: deposits (M5), withdrawals (M6) and BMM requests (M8).

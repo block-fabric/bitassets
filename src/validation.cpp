@@ -2723,7 +2723,24 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     }
     drivechain::BlockUndo scdb_undo;
     std::vector<drivechain::Deposit> scdb_deposits;
+    // The caller's database is updated in place: if the block stops anywhere after, it is taken
+    // back by the undo data so far, which is complete at every point of failure.
+    struct ScdbRollback {
+        drivechain::SidechainDB* db{nullptr};
+        const drivechain::BlockUndo* undo{nullptr};
+        uint256 hash;
+        ScdbRollback() = default;
+        ScdbRollback(const ScdbRollback&) = delete;
+        ScdbRollback& operator=(const ScdbRollback&) = delete;
+        ~ScdbRollback()
+        {
+            if (!db) return;
+            db->DisconnectBlock(*undo);
+            db->SetBlockHash(hash);
+        }
+    } scdb_rollback;
     if (state.IsValid()) {
+        const uint256 scdb_hash{scdb->GetBlockHash()};
         // A sidechain database that has not seen a block yet is empty and fits any block.
         if (scdb->GetBlockHash().IsNull()) scdb->SetBlockHash(hashPrevBlock);
         if (scdb->GetBlockHash() != hashPrevBlock) {
@@ -2734,9 +2751,25 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             }
             return FatalError(m_chainman.GetNotifications(), state, _("The sidechain database does not match the block being connected."));
         }
+        // On regtest the block is also applied to a copy, which has to come out the same: what is
+        // applied in place is what a copy would have become.
+        std::optional<drivechain::SidechainDB> scdb_check;
+        if (scdb != &scdb_copy && params.DefaultConsistencyChecks()) scdb_check.emplace(*scdb);
         std::string reject_reason;
+        if (scdb != &scdb_copy) {
+            // Field by field: assigning a temporary would run its destructor, which rolls back.
+            scdb_rollback.undo = &scdb_undo;
+            scdb_rollback.hash = scdb_hash;
+            scdb_rollback.db = scdb;
+        }
         if (!scdb->ConnectBlock(block, pindex->nHeight, params.GetConsensus().drivechain, scdb_undo, &scdb_deposits, reject_reason)) {
             state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, reject_reason);
+        } else if (scdb_check) {
+            drivechain::BlockUndo check_undo;
+            std::vector<drivechain::Deposit> check_deposits;
+            std::string check_reason;
+            assert(scdb_check->ConnectBlock(block, pindex->nHeight, params.GetConsensus().drivechain, check_undo, &check_deposits, check_reason));
+            assert(*scdb_check == *scdb);
         }
     }
 
@@ -2753,6 +2786,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
              Ticks<MillisecondsDouble>(m_chainman.time_verify) / m_chainman.num_blocks_total);
 
     if (fJustCheck) {
+        scdb_rollback.db = nullptr;
         return true;
     }
 
@@ -2794,6 +2828,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         Ticks<std::chrono::nanoseconds>(time_5 - time_start)
     );
 
+    scdb_rollback.db = nullptr;
     return true;
 }
 
@@ -3175,8 +3210,12 @@ bool Chainstate::ConnectTip(
     {
         CoinsViewOverlay& view{*m_coins_views->m_connect_block_view};
         const auto reset_guard{view.StartFetching(*block_to_connect)};
-        drivechain::SidechainDB scdb{m_scdb};
-        bool rv = ConnectBlock(*block_to_connect, state, pindexNew, view, /*fJustCheck=*/false, &scdb);
+        // The sidechain database is updated in place, and taken back if the block fails; a copy
+        // is kept only to check that (regtest).
+        std::optional<drivechain::SidechainDB> scdb_before;
+        if (m_chainman.GetParams().DefaultConsistencyChecks()) scdb_before.emplace(m_scdb);
+        bool rv = ConnectBlock(*block_to_connect, state, pindexNew, view, /*fJustCheck=*/false, &m_scdb);
+        if (!rv && scdb_before) assert(m_scdb == *scdb_before);
         if (m_chainman.m_options.signals) {
             m_chainman.m_options.signals->BlockChecked(block_to_connect, state);
         }
@@ -3194,7 +3233,6 @@ bool Chainstate::ConnectTip(
                  Ticks<SecondsDouble>(m_chainman.time_connect_total),
                  Ticks<MillisecondsDouble>(m_chainman.time_connect_total) / m_chainman.num_blocks_total);
         view.Flush(/*reallocate_cache=*/false); // No need to reallocate since it only has capacity for 1 block
-        m_scdb = std::move(scdb);
     }
     const auto time_4{SteadyClock::now()};
     m_chainman.time_flush += time_4 - time_3;
