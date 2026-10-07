@@ -4,6 +4,7 @@
 
 #include <bitassets/state.h>
 #include <addresstype.h>
+#include <arith_uint256.h>
 #include <script/script.h>
 #include <test/util/setup_common.h>
 
@@ -291,6 +292,48 @@ BOOST_AUTO_TEST_CASE(dead_assets_retire)
     // Undone, it is all back.
     f.state.Revert(f.undo);
     BOOST_CHECK(f.state == before);
+}
+
+BOOST_AUTO_TEST_CASE(swap_math_exact)
+{
+    // The swap math against a 256 bit reference, where amount * 997 * reserve does not fit in 128 bits.
+    const auto reference_out{[](uint64_t rin, uint64_t rout, uint64_t in) {
+        const arith_uint256 fee_in{arith_uint256{in} * 997};
+        return (fee_in * arith_uint256{rout} / (arith_uint256{rin} * 1000 + fee_in)).GetLow64();
+    }};
+    const uint64_t big{MAX_AMOUNT / 2};
+    for (const auto& [rin, rout, in] : std::vector<std::tuple<uint64_t, uint64_t, uint64_t>>{
+             {uint64_t{1} << 62, uint64_t{1} << 62, uint64_t{1} << 61},
+             {big, big, big / 2},
+             {1000, MAX_AMOUNT, MAX_AMOUNT},
+             {MAX_AMOUNT, 1000, 1},
+             {50'000'000, 100'000, 10'000},
+         }) {
+        const uint64_t out{amm::SwapOut(rin, rout, in)};
+        BOOST_CHECK_EQUAL(out, reference_out(rin, rout, in));
+        BOOST_CHECK(out < rout);
+        // The reverse quote pays at least as much as the amount it was asked for.
+        if (out > 0) {
+            const auto needed{amm::SwapIn(rin, rout, out)};
+            if (needed) BOOST_CHECK(amm::SwapOut(rin, rout, *needed) >= out);
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(retired_number_names_nothing)
+{
+    // After an asset is retired and its name registered again, the old number names nothing.
+    Fixture f;
+    const auto [control, coins]{f.Issue("GOLD", 1000)};
+    const uint32_t old_seq{f.state.Assets().at(GOLD).seq};
+    BOOST_CHECK(f.state.AssetOfSeq(old_seq) == GOLD);
+    BOOST_REQUIRE(f.Apply(MakeTx({control, coins}, Burn{{Unit(Token::Kind::CONTROL, GOLD), Asset(GOLD, 1000)}}, {})));
+    BOOST_REQUIRE(f.Apply(MakeTx({}, ReleaseAsset{GOLD}, {})));
+    BOOST_CHECK(!f.state.AssetOfSeq(old_seq));
+    f.Issue("GOLD", 5);
+    BOOST_CHECK(f.state.Assets().at(GOLD).seq != old_seq);
+    BOOST_CHECK(!f.state.AssetOfSeq(old_seq));
+    BOOST_CHECK(f.state.AssetOfSeq(f.state.Assets().at(GOLD).seq) == GOLD);
 }
 
 BOOST_AUTO_TEST_CASE(auction_prices)

@@ -6,6 +6,8 @@
 
 #include <bitassets/state.h>
 
+#include <arith_uint256.h>
+
 #include <crypto/hmac_sha256.h>
 #include <crypto/sha256.h>
 #include <hash.h>
@@ -355,18 +357,20 @@ namespace amm {
 uint64_t SwapOut(uint64_t reserve_in, uint64_t reserve_out, uint64_t amount_in)
 {
     if (reserve_in == 0 || reserve_out == 0 || amount_in == 0) return 0;
-    // Uniswap v2: the fee stays in the pool, the product of the reserves never falls.
-    const unsigned __int128 in_with_fee{static_cast<unsigned __int128>(amount_in) * (1000 - SWAP_FEE_PER_MILLE)};
-    const unsigned __int128 out{in_with_fee * reserve_out / (static_cast<unsigned __int128>(reserve_in) * 1000 + in_with_fee)};
-    return static_cast<uint64_t>(out);
+    // Uniswap v2: the fee stays in the pool, the product of the reserves never falls. In 256 bits:
+    // amount (63 bits) times 997 (10 bits) times a reserve (63 bits) does not fit in 128.
+    const arith_uint256 in_with_fee{arith_uint256{amount_in} * (1000 - SWAP_FEE_PER_MILLE)};
+    const arith_uint256 out{in_with_fee * arith_uint256{reserve_out} / (arith_uint256{reserve_in} * 1000 + in_with_fee)};
+    // Less than reserve_out, so it fits.
+    return out.GetLow64();
 }
 
 std::optional<uint64_t> SwapIn(uint64_t reserve_in, uint64_t reserve_out, uint64_t amount_out)
 {
     if (reserve_in == 0 || amount_out == 0 || amount_out >= reserve_out) return std::nullopt;
-    const unsigned __int128 in{static_cast<unsigned __int128>(reserve_in) * amount_out * 1000 / (static_cast<unsigned __int128>(reserve_out - amount_out) * (1000 - SWAP_FEE_PER_MILLE)) + 1};
-    if (in > MAX_AMOUNT) return std::nullopt;
-    return static_cast<uint64_t>(in);
+    const arith_uint256 in{arith_uint256{reserve_in} * arith_uint256{amount_out} * 1000 / (arith_uint256{reserve_out - amount_out} * (1000 - SWAP_FEE_PER_MILLE)) + 1};
+    if (in > arith_uint256{MAX_AMOUNT}) return std::nullopt;
+    return in.GetLow64();
 }
 
 uint64_t SharesFor(const Pool& pool, uint64_t amount0, uint64_t amount1)
@@ -533,6 +537,10 @@ std::optional<AssetId> State::AssetOfSeq(uint32_t seq) const
 {
     const auto it{m_seq.find(seq)};
     if (it == m_seq.end()) return std::nullopt;
+    // A retired asset keeps its number in m_seq; the name may since belong to an asset with another
+    // number. The number names the asset only while that asset has it.
+    const auto record{m_assets.find(it->second)};
+    if (record == m_assets.end() || record->second.seq != seq) return std::nullopt;
     return it->second;
 }
 
