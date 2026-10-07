@@ -123,6 +123,11 @@ bool State::MainPending(const Mainchain& mainchain, int height, const Consensus:
     return height >= params.single_bundle_height && mainchain.BundlePending(m_main_height);
 }
 
+bool State::MainPendingNext(const Mainchain& mainchain, int height, const Consensus::SidechainParams& params) const
+{
+    return height >= params.single_bundle_height && (mainchain.BundlePending(m_main_height) || mainchain.BundlePending(mainchain.Height()));
+}
+
 std::optional<CMutableTransaction> State::NextBundle(int height, const uint256& prev, const Consensus::SidechainParams& params, std::vector<COutPoint>* withdrawals, bool main_pending) const
 {
     if (m_bundle || m_withdrawals.empty() || main_pending) return std::nullopt;

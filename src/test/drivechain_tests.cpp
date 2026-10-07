@@ -1355,6 +1355,8 @@ BOOST_AUTO_TEST_CASE(duplicate_commitment_survives_reorg)
     sidechain::Mainchain::AssumeCommitted assume{mainchain, 0};
     BOOST_CHECK(mainchain.BmmHeight(side) == 0);
     BOOST_CHECK(!mainchain.CommittedHeight(side));
+}
+
 BOOST_AUTO_TEST_CASE(full_queue_rejects)
 {
     // A full queue makes room only by failing a bundle no more voted for than a new one: when every

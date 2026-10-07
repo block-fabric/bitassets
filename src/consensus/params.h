@@ -201,6 +201,15 @@ struct Params {
     uint32_t max_block_tx_weight{MAX_BLOCK_WEIGHT};
     /** Number of blocks before the outputs of a coinbase can be spent. */
     int coinbase_maturity{COINBASE_MATURITY};
+    /**
+     * Most signature operations (in cost units) in a block from sigops_height on; before, Bitcoin's
+     * MAX_BLOCK_SIGOPS_COST. A chain with larger blocks raises it with them.
+     */
+    int64_t max_block_sigops_cost{MAX_BLOCK_SIGOPS_COST};
+    int sigops_height{0};
+    int64_t MaxBlockSigOpsCost(int height) const { return height >= sigops_height ? max_block_sigops_cost : MAX_BLOCK_SIGOPS_COST; }
+    /** The most any block can have, whatever its height: for checks that do not know the height. */
+    int64_t MaxBlockSigOpsCostEver() const { return std::max<int64_t>(MAX_BLOCK_SIGOPS_COST, max_block_sigops_cost); }
     /** Upper bound for the serialized size of a block; a sanity limit, not a consensus rule. */
     uint32_t MaxBlockSerializedSize() const { return std::max<uint32_t>(MAX_BLOCK_SERIALIZED_SIZE, max_block_weight); }
     std::chrono::seconds PowTargetSpacing() const

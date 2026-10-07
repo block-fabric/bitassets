@@ -185,6 +185,11 @@ public:
      */
     bool MainPending(const Mainchain& mainchain, int height, const Consensus::SidechainParams& params) const;
     /**
+     * The same as the next block will see it: it follows the mainchain up to the last block on record
+     * first. For the mempool, which must not take what that block would refuse.
+     */
+    bool MainPendingNext(const Mainchain& mainchain, int height, const Consensus::SidechainParams& params) const;
+    /**
      * The payouts a block pays: at most MAX_PAYOUTS_PER_BLOCK, of what was owed
      * before it and of what it gave rise to, oldest first. What the mainchain
      * gave rise to (`owed`: deposits) goes before what transactions did
