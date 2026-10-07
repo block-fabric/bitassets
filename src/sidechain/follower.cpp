@@ -302,6 +302,7 @@ void Follower::Act()
         LOCK(m_mutex);
         uncommitted.swap(m_uncommitted);
         committed.swap(m_committed);
+        const Mainchain& record{*chainman.m_mainchain};
         for (const uint256& hash : committed) {
             const auto it{m_candidates.find(hash)};
             if (it == m_candidates.end()) continue;
