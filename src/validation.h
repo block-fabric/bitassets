@@ -812,17 +812,33 @@ public:
     /**
      * Bring m_scdb in line with the chain tip after startup, starting from the
      * snapshot taken at the last flush and using the undo data and blocks on
-     * disk for the difference. False if that fails, or is interrupted
-     * (m_chainman.m_interrupt; what was done is kept for the next start).
+     * disk for the difference. False if that fails, with `error` set, or is
+     * interrupted (m_chainman.m_interrupt; what was done is kept for the next start).
      */
-    bool LoadDrivechainState() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    bool LoadDrivechainState(bilingual_str& error) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /**
      * Apply the blocks after the one `scdb` belongs to, up to `to` (a descendant of it), to `scdb`,
      * from the blocks on disk, and store what each block did; its undo data only for the blocks above
-     * `keep_undo_above`.
+     * `keep_undo_above`. If a block breaks the drivechain rules, `scdb` is left at its parent and
+     * the block is set in `invalid` (if given).
      */
-    bool RollForwardSidechainDB(drivechain::SidechainDB& scdb, const CBlockIndex* from, const CBlockIndex* to, int keep_undo_above) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    bool RollForwardSidechainDB(drivechain::SidechainDB& scdb, const CBlockIndex* from, const CBlockIndex* to, int keep_undo_above,
+                                const CBlockIndex** invalid = nullptr) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /**
+     * Clear the failure flags of every block, so that blocks found invalid under former drivechain
+     * parameters are judged again under the current ones; written to disk at once.
+     */
+    void ResetAllBlockFailureFlags() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /**
+     * At startup: take the chainstate back from the tip to the parent of `invalid`, a block of the
+     * active chain that breaks the drivechain rules, mark it invalid, and make `scdb` (the sidechain
+     * database at that parent) the chainstate's. False, with `error` set, if the blocks cannot be
+     * disconnected.
+     */
+    bool RollBackFromInvalidBlock(CBlockIndex* invalid, drivechain::SidechainDB&& scdb, bilingual_str& error) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /** Name under which the sidechain database of this chainstate is stored. */
     std::string DrivechainStateName() const;

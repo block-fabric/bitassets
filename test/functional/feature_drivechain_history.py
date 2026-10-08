@@ -7,7 +7,9 @@
 - getsidechainevents reports, for every block, the bundles pending after it with their score: the
   same at any later time, after a reorg, a restart and a rebuild of the database.
 - A failed bundle the sidechain database forgot is still "failed", and the miner does not propose it again.
-- A database derived under other drivechain parameters (an activation height that moved) is rebuilt.
+- A database derived under other drivechain parameters (an activation height that moved) is rebuilt,
+  and the blocks are judged again under them: an active block they make invalid is taken back, a
+  block found invalid under the former ones may become valid.
 """
 from test_framework.address import address_to_scriptpubkey
 from test_framework.messages import COIN, CTransaction, CTxOut
@@ -66,6 +68,7 @@ class DrivechainHistoryTest(BitcoinTestFramework):
         self.test_pending()
         self.test_params_change()
         self.test_forgotten_bundle()
+        self.test_rules_change()
 
     def test_pending(self):
         self.log.info("getsidechainevents: the bundles pending after each block, with their score")
@@ -184,6 +187,33 @@ class DrivechainHistoryTest(BitcoinTestFramework):
         assert_equal(events["proposed"], [])
         assert_equal(events["pending"], [])
         assert_equal([e["bundles"] for e in n0.getsidechainevents(SLOT, failed_height)], [[{"hash": bundle, "paid": False}]])
+
+    def test_rules_change(self):
+        self.log.info("Rules that changed with the parameters: an active block they make invalid is taken back at startup")
+        n0, n1 = self.nodes
+        self.sync_all()
+        tip = n0.getbestblockhash()
+        height = n0.getblockcount()
+        state = n0.getdrivechaininfo()["statehash"]
+        self.disconnect_nodes(0, 1)
+        # The sidechain never activates under these: its first deposit breaks the rules.
+        with n0.assert_debug_log(["breaks the drivechain rules: the chainstate goes back to height"]):
+            self.restart_node(0, extra_args=self.extra_args[0] + ["-testdrivechainparam=activation_period@100000"])
+        assert n0.getblockcount() < height
+        invalid = [t for t in n0.getchaintips() if t["hash"] == tip]
+        assert_equal(invalid[0]["status"], "invalid")
+        assert_equal(n0.listactivesidechains(), [])
+        # The node goes on under the new rules (and stays off the invalid branch).
+        self.generate(n0, 1, sync_fun=self.no_op)
+
+        self.log.info("Back under the former parameters, the blocks found invalid are judged again")
+        with n0.assert_debug_log(["blocks found invalid under the former drivechain parameters are judged again"]):
+            self.restart_node(0)
+        # Node 0's own block is lighter than the former chain, which comes back.
+        self.wait_until(lambda: n0.getbestblockhash() == tip)
+        assert_equal(n0.getdrivechaininfo()["statehash"], state)
+        self.connect_nodes(0, 1)
+        self.sync_all()
 
 
 if __name__ == "__main__":

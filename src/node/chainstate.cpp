@@ -123,10 +123,10 @@ static ChainstateLoadResult CompleteChainstateInitialization(
                 return {ChainstateLoadStatus::FAILURE, _("Error initializing block database")};
             }
             assert(chainstate->m_chain.Tip() != nullptr);
-            if (!chainstate->LoadDrivechainState()) {
+            bilingual_str error;
+            if (!chainstate->LoadDrivechainState(error)) {
                 if (chainman.m_interrupt) return {ChainstateLoadStatus::INTERRUPTED, {}};
-                return {ChainstateLoadStatus::FAILURE, _("Error loading the sidechain database: it could not be derived from the blocks on disk (see the log for the block). "
-                                                         "A pruned node no longer has the blocks: rebuild with -reindex.")};
+                return {ChainstateLoadStatus::FAILURE, error.empty() ? _("Error loading the sidechain database (see the log)") : error};
             }
         }
     }
