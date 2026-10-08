@@ -82,6 +82,8 @@ inline constexpr unsigned int MIN_BLOCKS_TO_KEEP = 288;
  * A reorg deeper than this, like one past the blocks a pruned node keeps, cannot be made.
  */
 inline constexpr int DRIVECHAIN_UNDO_DEPTH{2880};
+/** How far the flushed block moves between two sweeps of the drivechain undo data (Chainstate::SweepDrivechainUndo). */
+inline constexpr int DRIVECHAIN_UNDO_SWEEP_INTERVAL{1000};
 static_assert(DRIVECHAIN_UNDO_DEPTH >= static_cast<int>(MIN_BLOCKS_TO_KEEP));
 inline constexpr signed int DEFAULT_CHECKBLOCKS = 6;
 inline constexpr int DEFAULT_CHECKLEVEL{3};
@@ -852,6 +854,14 @@ public:
     void EraseDrivechainUndo() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     //! Height up to which EraseDrivechainUndo erased the undo data of the active chain.
     int m_drivechain_undo_erased_height GUARDED_BY(::cs_main){-1};
+    /**
+     * Erase the drivechain undo data of every block (of any branch) DRIVECHAIN_UNDO_DEPTH or more
+     * below `flushed`, by a pass over the undo records (a few thousand), and the deposit records of
+     * those not in the active chain.
+     */
+    void SweepDrivechainUndo(const CBlockIndex& flushed) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    //! Height of the flushed block of the last SweepDrivechainUndo.
+    int m_drivechain_undo_swept_height GUARDED_BY(::cs_main){-1};
 
     /**
      * Check the format of the drivechain database, and wipe it if it was laid out another way or

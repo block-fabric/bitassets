@@ -262,6 +262,18 @@ void Database::EraseBlockUndo(const std::vector<uint256>& block_hashes)
     m_db.WriteBatch(batch);
 }
 
+std::vector<uint256> Database::ListUndoBlocks() const
+{
+    std::vector<uint256> hashes;
+    const std::unique_ptr<CDBIterator> it{m_db.NewIterator()};
+    for (it->Seek(std::make_pair(DB_UNDO, uint256{})); it->Valid(); it->Next()) {
+        std::pair<uint8_t, uint256> key;
+        if (!it->GetKey(key) || key.first != DB_UNDO) break;
+        hashes.push_back(key.second);
+    }
+    return hashes;
+}
+
 bool Database::ReadBlockEvents(const uint256& block_hash, BlockEvents& events) const
 {
     BlockRecord record;

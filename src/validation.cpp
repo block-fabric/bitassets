@@ -5068,6 +5068,31 @@ void Chainstate::EraseDrivechainUndo()
     }
     if (!hashes.empty()) m_blockman.m_drivechain_db->EraseBlockUndo(hashes);
     m_drivechain_undo_erased_height = std::max(m_drivechain_undo_erased_height, last);
+    // What the above does not reach (the undo data of blocks that left the chain, of blocks a crash
+    // took out of it, of active blocks passed over after a reorg the node stopped in), now and then.
+    if (flushed->nHeight >= m_drivechain_undo_swept_height + DRIVECHAIN_UNDO_SWEEP_INTERVAL) SweepDrivechainUndo(*flushed);
+}
+
+void Chainstate::SweepDrivechainUndo(const CBlockIndex& flushed)
+{
+    AssertLockHeld(::cs_main);
+    m_drivechain_undo_swept_height = flushed.nHeight;
+    const int last{flushed.nHeight - DRIVECHAIN_UNDO_DEPTH};
+    drivechain::Database& db{*m_blockman.m_drivechain_db};
+    std::vector<uint256> erase;
+    std::vector<uint256> stale;
+    for (const uint256& hash : db.ListUndoBlocks()) {
+        const CBlockIndex* pindex{m_blockman.LookupBlockIndex(hash)};
+        // Out of reach of any reorg from the flushed block (reconnected, a block writes its undo data again).
+        if (pindex && pindex->nHeight > last) continue;
+        erase.push_back(hash);
+        // A block out of the active chain does not need its deposit records either (readers skip them).
+        if (!pindex || !m_chain.Contains(*pindex)) stale.push_back(hash);
+    }
+    if (erase.empty()) return;
+    LogDebug(BCLog::COINDB, "Erasing the drivechain undo data of %u blocks out of reach (%u not in the active chain)", erase.size(), stale.size());
+    db.EraseBlockUndo(erase);
+    for (const uint256& hash : stale) db.EraseBlockDeposits(hash);
 }
 
 void Chainstate::ResetAllBlockFailureFlags()
@@ -5199,6 +5224,7 @@ bool Chainstate::LoadDrivechainState(bilingual_str& error)
     if (db.ReadState(DrivechainStateName(), scdb) && scdb.GetBlockHash() == tip->GetBlockHash()) {
         m_scdb = std::move(scdb);
         db.WriteFormatVersion();
+        SweepDrivechainUndo(*tip);
         return true;
     }
 
@@ -5265,6 +5291,7 @@ bool Chainstate::LoadDrivechainState(bilingual_str& error)
     m_scdb = std::move(scdb);
     db.WriteState(DrivechainStateName(), m_scdb);
     db.WriteFormatVersion();
+    SweepDrivechainUndo(*tip);
     return true;
 }
 

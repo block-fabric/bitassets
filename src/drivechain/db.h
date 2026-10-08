@@ -88,6 +88,8 @@ public:
     void EraseBlockUndo(const uint256& block_hash);
     /** The same for several blocks, in one batch. */
     void EraseBlockUndo(const std::vector<uint256>& block_hashes);
+    /** The blocks that have undo data. */
+    std::vector<uint256> ListUndoBlocks() const;
     bool ReadBlockEvents(const uint256& block_hash, BlockEvents& events) const;
     /**
      * Remove the escrow changes of a block from the index. Not needed for correctness (readers skip
