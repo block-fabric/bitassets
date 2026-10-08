@@ -66,7 +66,11 @@ A sidechain has no miners and no coins of its own.
   Without this, the branch would pay them again. The mainchain pays one bundle
   per slot and fails the others pending (its `single_payout_height`), so from
   `audit2_height` a bundle of another branch pending on the mainchain does not
-  hold back a new bundle of this one: only one of them is paid.
+  hold back a new bundle of this one: only one of them is paid. A node whose
+  record shows a mainchain block, followed under those rules, that paid a
+  bundle and left another pending logs a warning: the mainchain's
+  `single_payout_height` must be at or below the block `audit2_height`
+  follows.
 - **Refunds and pending bundles.** A bundle of another branch pending on the
   mainchain may hold a withdrawal that this branch would refund. From
   `audit2_height`, refunds wait while such a bundle has a work score of

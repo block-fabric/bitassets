@@ -29,6 +29,7 @@
 #include <sidechain/mainchain.h>
 #include <sidechain/state.h>
 #include <streams.h>
+#include <test/util/logging.h>
 #include <test/util/setup_common.h>
 #include <uint256.h>
 #include <validation.h>
@@ -1698,6 +1699,25 @@ BOOST_AUTO_TEST_CASE(unproposed_bundle_fails)
             BOOST_CHECK_EQUAL(state.LastFailureHeight(), fails ? 4 : -1);
             if (fails) BOOST_CHECK(state.NextBundle(5, uint256{0xb}, params));
         }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(pending_after_payout_is_said)
+{
+    // From audit2_height the rules take for granted that the mainchain pays one bundle per slot and
+    // fails the others. A record that shows a payout with another bundle left pending is said loudly.
+    Consensus::SidechainParams params;
+    SideStore side;
+    std::string reason;
+    std::vector<CTxOut> payouts;
+    const uint256 a{0xa1}, b{0xb1}, c{0xc1};
+    sidechain::Mainchain mainchain;
+    Extend(mainchain, 1, [&](sidechain::MainBlock& blk) { blk.proposed = {a, b}; blk.pending = {{a, 1}, {b, 1}}; });
+    // A paid, B left pending (C, proposed in the same block after the payout, is no matter).
+    Extend(mainchain, 1, [&](sidechain::MainBlock& blk) { blk.bundles = {{a, true}}; blk.proposed = {c}; blk.pending = {{b, 1}, {c, 1}}; });
+    {
+        ASSERT_DEBUG_LOG("paid a withdrawal bundle of this sidechain and left another one pending");
+        BOOST_REQUIRE_MESSAGE(side.state.ApplyMainEvents(1, mainchain, 1, params, payouts, reason), reason);
     }
 }
 

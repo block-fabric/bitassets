@@ -14,7 +14,9 @@
 #include <util/strencodings.h>
 
 #include <algorithm>
+#include <atomic>
 #include <crypto/sha256.h>
+#include <logging.h>
 #include <util/check.h>
 #include <set>
 
@@ -128,6 +130,21 @@ COutPoint OutpointOf(const StoreBytes& key)
     return KeyCodec<COutPoint>::Decode(rest);
 }
 
+/**
+ * Whether the mainchain block paid a bundle of this slot and left another one pending (one it did not
+ * propose itself): it did not fail the others when it paid one, as the mainchain does from its
+ * drivechain.single_payout_height.
+ */
+bool PendingAfterPayout(const MainBlock& block)
+{
+    if (std::none_of(block.bundles.begin(), block.bundles.end(), [](const MainBundleEvent& event) { return event.paid; })) return false;
+    return std::any_of(block.pending.begin(), block.pending.end(), [&](const MainPendingBundle& pending) {
+        return std::find(block.proposed.begin(), block.proposed.end(), pending.hash) == block.proposed.end();
+    });
+}
+//! The highest mainchain block PendingAfterPayout was said of, so that it is said once.
+std::atomic<int> g_pending_after_payout_logged{-1};
+
 std::vector<CTxOut> ReadQueue(const StoreView& view, const Table<uint64_t, CTxOut>& table, const Cell<QueueEnds>& ends)
 {
     std::vector<CTxOut> out;
@@ -235,6 +252,17 @@ bool State::ApplyMainEvents(int main_height, const Mainchain& mainchain, int hei
                 LAST_FAILURE.Put(Writable(), height);
             }
             SetBundle(std::nullopt);
+        }
+        // The rules from audit2_height take for granted that the mainchain pays one bundle per slot and
+        // fails the others (its single_payout_height at or below the block this height follows): a
+        // bundle of another branch then never pays withdrawals that a bundle of this one pays too. A
+        // record that shows otherwise is said loudly: withdrawals may be paid twice.
+        if (int logged{g_pending_after_payout_logged.load()}; height >= params.audit2_height && h > logged && PendingAfterPayout(*main_block) &&
+                                                               g_pending_after_payout_logged.compare_exchange_strong(logged, h)) {
+            LogWarning("The mainchain block %s at height %d paid a withdrawal bundle of this sidechain and left another one pending: the mainchain does not pay "
+                       "one bundle per slot yet (its single_payout_height is above that block), which the rules of this chain from height %d "
+                       "(SidechainParams::audit2_height) take for granted. A withdrawal may be paid twice; check the parameters of both chains.",
+                       main_block->hash.ToString(), h, params.audit2_height);
         }
         for (const MainDeposit& deposit : main_block->deposits) {
             if (deposit.destination == drivechain::WITHDRAWAL_RETURN_DEST) {
