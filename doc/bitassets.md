@@ -8,10 +8,14 @@ based sidechain, with Bitcoin's keys and transactions, and without the defects o
 ## Assets
 
 - **Creating one takes two steps**, so that nobody can see a name coming and take it first. A
-  *reservation* commits to the name without showing it (HMAC-SHA256 of the name's hash under a
-  nonce only the wallet can make); once it is in a block, the *registration* reveals the nonce and
-  creates the asset: its initial supply (zero is allowed) and its **control coin**. The window
-  ("Assets", in the sidebar) does both steps.
+  *reservation* commits to the name without showing it (HMAC-SHA256, under a nonce only the wallet
+  can make, of the name's hash and of the script of the output that carries the reservation); once
+  it is in a block, the *registration* reveals the nonce and creates the asset: its initial supply
+  (zero is allowed) and its **control coin**. The window ("Assets", in the sidebar) does both steps.
+  Bound to its output's script, a reservation cannot be copied to any use: a copy made by someone
+  else, with an output of their own, commits to nothing they can reveal.
+- **A name may not read as another asset**: not CHN (in any case), not like a number
+  (`1739-0029`, `0001-1739-0029`), not starting with `0x`.
 - **An asset is known by the SHA-256 hash of its name.** The registration publishes the name
   unless asked not to; an asset can be named by its name, `0x` and its hash, or its number
   (`1739-0029` for the first), and CHN by `CHN`.
@@ -42,7 +46,7 @@ spends a token without carrying it on, or outputs one it does not have, is inval
   emptied. Later deposits go in at the pool's price.
 - `swapasset` pays one asset in and takes at least an amount of the other out (the slippage the
   trade accepts); `quoteswap` says what a trade gives now. `removeliquidity` gives shares back for
-  both assets.
+  both assets; a side that rounds to nothing is left out, so that a small provider can always leave.
 
 ## Dutch auctions
 
@@ -52,6 +56,15 @@ spends a token without carrying it on, or outputs one it does not have, is inval
 - The transaction outputs a **receipt**. Its holder collects (`collectauction`) what the auction
   brought in and what is left of what it sold, once it has ended or sold out — or at once, before
   any bid, which cancels it.
+- An auction starts within 52560 blocks (about a year) of the one that makes it.
+
+## Retiring an asset
+
+`releaseasset` retires a dead asset: its supply fixed, nobody holding any, every unit in pools
+nobody provides liquidity to, and no auction of it to collect. An auction that only sells something
+for it, and has taken none of it in, does not count; once the asset is retired (and even if its name
+is registered again, as another asset), that auction takes no more bids, and its seller collects
+what it sells.
 
 ## CHN in pools and auctions
 
@@ -60,6 +73,22 @@ CHN the operation takes in, exactly). CHN that comes out is paid by the coinbase
 deposits are, to the address the transaction names. Asset coins that come out go to the *result*
 outputs the marker lists, in the amount the state gives when the block is connected — never less
 than the transaction asks for.
+
+The least CHN paid out is 1000 satoshis (each payout takes a place in the coinbase's queue, which
+pays a bounded number per block): a swap or a bid that would pay less is refused; less taken out of a
+pool stays in it, for its providers; less from collecting an auction is not paid (it was burned when
+it went in).
+
+## Rules by height
+
+The rules of the second audit (October 2026) apply from `bitassets_audit2_height`: from the start
+on mainnet, signet and regtest; on the test network from the height set when it is deployed.
+Reservations made before it, committing to the name alone, still register after it, under the rule
+of the first audit (only the oldest reservation of a commitment reveals it).
+
+A node stores the assets in a layout of its version (`bitassets::STORE_LAYOUT`); one that finds them
+in an earlier layout derives the sidechain state again from its blocks at startup (a pruned node
+cannot, and has to be resynced).
 
 ## Commands
 
