@@ -194,8 +194,9 @@ chains-cli -regtest listwithdrawalbundles 3
    The slot is the one the mainchain activates your sidechain in. Once it is
    activated, set `main_activation_height` to the height of the mainchain
    block that activated it (`activationheight` in the mainchain's
-   `getsidechain`): a main network release with a slot and no such height
-   refuses to start, a testnet one warns. Set `audit2_height` (at or above the
+   `getsidechain`): a main network release without it refuses to start,
+   whatever the slot (slot 0 too), a testnet or signet one warns; regtest
+   does not ask for it, nor do the template's own networks. Set `audit2_height` (at or above the
    mainchain's `single_payout_height`), `pending_min_score` (a tenth of the
    mainchain's `withdrawal_min_score`: 6480 on main and signet, 30 on testnet)
    and `unproposed_expiry_blocks` (1440 on main and signet, 60 on testnet).
