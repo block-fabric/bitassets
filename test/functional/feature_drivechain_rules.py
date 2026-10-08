@@ -11,7 +11,7 @@ from decimal import Decimal
 
 from test_framework.address import address_to_scriptpubkey
 from test_framework.blocktools import add_witness_commitment, create_block
-from test_framework.messages import COIN, CTransaction, CTxOut
+from test_framework.messages import COIN, COutPoint, CTransaction, CTxIn, CTxOut
 from test_framework.script import CScript, OP_RETURN
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import assert_equal, assert_raises_rpc_error
@@ -55,6 +55,7 @@ class DrivechainRulesTest(BitcoinTestFramework):
         self.test_mempool_bmm()
         self.test_template_fields()
         self.test_template_bmm_requests()
+        self.test_mempool_pinning()
         self.test_reorg_evicts_deposit()
         self.test_reorg_evicts_withdrawal()
 
@@ -184,6 +185,38 @@ class DrivechainRulesTest(BitcoinTestFramework):
         block_hash = self.mine()[0]
         assert request in node.getblock(block_hash)["tx"]
         assert_equal(node.verifybmm(block_hash, SLOT, "33" * 32)["verified"], True)
+        self.sync_all()
+
+    def test_mempool_pinning(self):
+        self.log.info("BMM requests and treasury transactions take no unconfirmed children but small ones of their kind")
+        node = self.nodes[0]
+        escrow_script = node.getsidechain(SLOT)["escrowscript"]
+
+        def spend(txid, vout, value, outputs=None):
+            outputs = outputs or [{node.getnewaddress(): value - Decimal("0.0001")}]
+            raw = node.createrawtransaction([{"txid": txid, "vout": vout}], outputs)
+            return node.signrawtransactionwithwallet(raw)["hex"]
+
+        request = node.createbmmrequest(SLOT, "44" * 32, Decimal("0.001"))
+        change = node.getrawtransaction(request["txid"], True)["vout"][1]
+        assert_raises_rpc_error(-26, "dc-unconfirmed-parent", node.sendrawtransaction, spend(request["txid"], 1, change["value"]))
+
+        deposit = node.createsidechaindeposit(SLOT, "dest", 1)
+        outputs = node.getrawtransaction(deposit["txid"], True)["vout"]
+        escrow = [o for o in outputs if o["scriptPubKey"]["hex"] == escrow_script][0]
+        change = [o for o in outputs if o["scriptPubKey"]["type"] != "nulldata" and o["n"] != escrow["n"]][0]
+        assert_raises_rpc_error(-26, "dc-unconfirmed-parent", node.sendrawtransaction, spend(deposit["txid"], change["n"], change["value"]))
+        # A deposit paid from the change of the one before it (as a wallet that deposits twice makes it) is welcome.
+        chained = CTransaction()
+        chained.vin = [CTxIn(COutPoint(int(deposit["txid"], 16), escrow["n"])), CTxIn(COutPoint(int(deposit["txid"], 16), change["n"]))]
+        chained.vout = [CTxOut(int((escrow["value"] + Decimal("0.5")) * COIN), bytes.fromhex(escrow_script)),
+                        CTxOut(0, CScript([OP_RETURN, b"dest"])),
+                        CTxOut(int((change["value"] - Decimal("0.5") - Decimal("0.0001")) * COIN), address_to_scriptpubkey(node.getnewaddress()))]
+        signed = node.signrawtransactionwithwallet(chained.serialize().hex())["hex"]
+        chained_txid = node.sendrawtransaction(signed)
+        assert chained_txid in node.getrawmempool()
+        block = self.mine()[0]
+        assert chained_txid in node.getblock(block)["tx"]
         self.sync_all()
 
     def test_reorg_evicts_deposit(self):

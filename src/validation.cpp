@@ -963,6 +963,34 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
     // a deposit or withdrawal a block could contain, given those already in the mempool.
     if (!DrivechainChecks(ws)) return false;
 
+    // A BMM request or a treasury transaction (deposit, withdrawal) in the mempool is one others
+    // compete with: the next request of its sidechain replaces it, the next treasury transaction
+    // follows it. Like a TRUC transaction it takes no unconfirmed children that could pin it there,
+    // with their size or their low fee, but small ones of its kind: the next treasury transaction
+    // through the escrow output, and a request or treasury transaction paid from its change (a
+    // wallet that serves several sidechains). Not for transactions a reorg brings back.
+    if (!bypass_limits) {
+        const uint32_t max_sidechains{m_active_chainstate.m_chainman.GetConsensus().drivechain.max_sidechains};
+        const auto is_treasury{[&](const CTransaction& t) {
+            return std::any_of(t.vout.begin(), t.vout.end(), [&](const CTxOut& out) {
+                const auto slot{drivechain::ParseEscrowScript(out.scriptPubKey)};
+                return slot && *slot < max_sidechains;
+            });
+        }};
+        const bool drivechain_tx{drivechain::GetBmmRequest(tx).has_value() || is_treasury(tx)};
+        for (const CTxIn& in : tx.vin) {
+            const CTransactionRef parent{m_pool.get(in.prevout.hash)};
+            if (!parent || in.prevout.n >= parent->vout.size()) continue;
+            // The escrow output: spent only by the next treasury transaction, as the escrow rules have it.
+            if (const auto slot{drivechain::ParseEscrowScript(parent->vout[in.prevout.n].scriptPubKey)}; slot && *slot < max_sidechains) continue;
+            if (!drivechain::GetBmmRequest(*parent) && !is_treasury(*parent)) continue;
+            if (!drivechain_tx || GetVirtualTransactionSize(tx) > TRUC_CHILD_MAX_VSIZE) {
+                return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "dc-unconfirmed-parent",
+                                     strprintf("spends %s, a BMM request or treasury transaction that is not confirmed", parent->GetHash().ToString()));
+            }
+        }
+    }
+
     if (m_pool.m_opts.require_standard) {
         state = ValidateInputsStandardness(tx, m_view);
         if (state.IsInvalid()) {
