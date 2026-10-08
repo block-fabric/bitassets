@@ -10,6 +10,7 @@ feature_drivechain.py goes through the life of a sidechain; this test checks wha
 from decimal import Decimal
 
 from test_framework.address import address_to_scriptpubkey
+from test_framework.blocktools import add_witness_commitment, create_block
 from test_framework.messages import COIN, CTransaction, CTxOut
 from test_framework.script import CScript, OP_RETURN
 from test_framework.test_framework import BitcoinTestFramework
@@ -53,6 +54,7 @@ class DrivechainRulesTest(BitcoinTestFramework):
         self.test_rpc_errors()
         self.test_mempool_bmm()
         self.test_template_fields()
+        self.test_template_bmm_requests()
         self.test_reorg_evicts_deposit()
         self.test_reorg_evicts_withdrawal()
 
@@ -142,6 +144,42 @@ class DrivechainRulesTest(BitcoinTestFramework):
         mined_scripts = [o["scriptPubKey"]["hex"] for o in mined]
         for out in outputs:
             assert out in mined_scripts
+        self.sync_all()
+
+    def test_template_bmm_requests(self):
+        self.log.info("Only templates for mining software that puts the drivechain messages in its coinbase have BMM requests")
+        node = self.nodes[0]
+        request = node.createbmmrequest(SLOT, "33" * 32, Decimal("0.001"))["txid"]
+        assert request in node.getrawmempool()
+
+        def txids(template):
+            return [tx["txid"] for tx in template["transactions"]]
+
+        accept = "6a25d1617368" + "%02x" % SLOT + "33" * 32
+        # Software that knows nothing of drivechains: no request, no accept it would have to add.
+        plain = node.getblocktemplate({"rules": ["segwit"]})
+        assert request not in txids(plain)
+        assert accept not in plain["drivechain_coinbase_outputs"]
+        # A block made from it by such software, with a coinbase of its own, is valid.
+        block = create_block(tmpl=plain, txlist=[tx["data"] for tx in plain["transactions"]])
+        block.vtx[0].vout[0].nValue = plain["coinbasevalue"]
+        add_witness_commitment(block)
+        block.solve()
+        # (Not submitted: it would take the request's block. TestBlockValidity says it is valid.)
+        assert_equal(node.getblocktemplate({"rules": ["segwit"], "mode": "proposal", "data": block.serialize().hex()}), None)
+        # Software that takes the coinbase, or says it puts the messages in, gets the request with its accept.
+        for request_params in ({"rules": ["segwit"], "capabilities": ["coinbasetxn"]},
+                               {"rules": ["segwit"], "capabilities": ["drivechain"]},
+                               {"rules": ["segwit", "drivechain"]}):
+            template = node.getblocktemplate(request_params)
+            assert request in txids(template)
+            assert accept in template["drivechain_coinbase_outputs"]
+        # The two kinds of template are kept apart: the plain one still has no request.
+        assert request not in txids(node.getblocktemplate({"rules": ["segwit"]}))
+        # The node's own blocks take it.
+        block_hash = self.mine()[0]
+        assert request in node.getblock(block_hash)["tx"]
+        assert_equal(node.verifybmm(block_hash, SLOT, "33" * 32)["verified"], True)
         self.sync_all()
 
     def test_reorg_evicts_deposit(self):
