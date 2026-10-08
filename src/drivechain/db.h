@@ -23,6 +23,8 @@ struct BlockEvents {
     std::vector<BlockUndo::Closed> closed;
     //! Bundles the block proposed (M3) that became pending.
     std::vector<std::pair<SidechainId, uint256>> proposed;
+    //! The bundles pending after the block, with their score after it, in vote order, per sidechain that has any.
+    std::vector<std::pair<SidechainId, std::vector<std::pair<uint256, uint32_t>>>> pending;
 };
 
 /**
@@ -42,7 +44,7 @@ public:
     explicit Database(const DBParams& params);
 
     /** Version of the way the data is laid out; a database of another version is wiped and built anew from the blocks. */
-    static constexpr uint32_t FORMAT_VERSION{3};
+    static constexpr uint32_t FORMAT_VERSION{4};
     bool IsCurrentFormat() const;
     void WriteFormatVersion();
     /** Erase everything, a batch at a time. */
@@ -50,9 +52,11 @@ public:
 
     /**
      * Store what a block at `height` did: its undo data, unless `keep_undo` is false, its events,
-     * and the escrow changes it made (`deposits`).
+     * and the escrow changes it made (`deposits`). `after` is the sidechain database the block left,
+     * whose pending bundles go with the events.
      */
-    bool WriteBlock(const uint256& block_hash, int height, const BlockUndo& undo, const std::vector<Deposit>& deposits, bool keep_undo = true);
+    bool WriteBlock(const uint256& block_hash, int height, const BlockUndo& undo, const std::vector<Deposit>& deposits,
+                    const SidechainDB& after, bool keep_undo = true);
     bool ReadBlockUndo(const uint256& block_hash, BlockUndo& undo) const;
     bool HasBlockUndo(const uint256& block_hash) const;
     /** Erase the undo data of a block (not its events), once no reorg can take it back. */

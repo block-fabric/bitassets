@@ -79,7 +79,7 @@ struct BlockRecord {
     //! The index entries the block added.
     std::vector<DepositKey> deposits;
 
-    SERIALIZE_METHODS(BlockRecord, obj) { READWRITE(obj.events.closed, obj.events.proposed, obj.deposits); }
+    SERIALIZE_METHODS(BlockRecord, obj) { READWRITE(obj.events.closed, obj.events.proposed, obj.deposits, obj.events.pending); }
 };
 
 /** The snapshot of a sidechain database, with the version of its format. */
@@ -156,12 +156,18 @@ void Database::Wipe()
     m_db.WriteBatch(batch, /*fSync=*/true);
 }
 
-bool Database::WriteBlock(const uint256& block_hash, int height, const BlockUndo& undo, const std::vector<Deposit>& deposits, bool keep_undo)
+bool Database::WriteBlock(const uint256& block_hash, int height, const BlockUndo& undo, const std::vector<Deposit>& deposits,
+                          const SidechainDB& after, bool keep_undo)
 {
     CDBBatch batch{m_db};
     BlockRecord record;
     record.events.closed = undo.closed;
     record.events.proposed = undo.proposed;
+    for (const auto& [id, slot] : after.GetSlots()) {
+        if (slot.bundles.empty()) continue;
+        auto& bundles{record.events.pending.emplace_back(id, std::vector<std::pair<uint256, uint32_t>>{}).second};
+        for (const Bundle& bundle : slot.bundles) bundles.emplace_back(bundle.hash, bundle.score);
+    }
     for (const Deposit& deposit : deposits) {
         const DepositKey key{deposit.slot, static_cast<uint32_t>(height), deposit.tx_index};
         batch.Write(key, deposit);

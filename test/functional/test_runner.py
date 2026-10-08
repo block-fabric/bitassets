@@ -171,6 +171,7 @@ BASE_SCRIPTS = [
     'feature_drivechain.py',
     'feature_drivechain_rules.py',
     'feature_drivechain_forks.py',
+    'feature_drivechain_history.py',
     'rpc_setgenerate.py',
     'feature_reindex_readonly.py',
     'wallet_labels.py',

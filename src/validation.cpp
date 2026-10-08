@@ -2834,7 +2834,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     if (!m_blockman.WriteBlockUndo(blockundo, state, *pindex)) {
         return false;
     }
-    if (!m_blockman.m_drivechain_db->WriteBlock(block_hash, pindex->nHeight, scdb_undo, scdb_deposits)) {
+    if (!m_blockman.m_drivechain_db->WriteBlock(block_hash, pindex->nHeight, scdb_undo, scdb_deposits, *scdb)) {
         return FatalError(m_chainman.GetNotifications(), state, _("Failed to write drivechain undo data."));
     }
 
@@ -5044,7 +5044,7 @@ bool Chainstate::RollForwardSidechainDB(drivechain::SidechainDB& scdb, const CBl
             LogError("%s: block %s breaks the drivechain rules (%s)", __func__, next->GetBlockHash().ToString(), reject_reason);
             return false;
         }
-        db.WriteBlock(next->GetBlockHash(), height, undo, deposits, /*keep_undo=*/height > keep_undo_above);
+        db.WriteBlock(next->GetBlockHash(), height, undo, deposits, scdb, /*keep_undo=*/height > keep_undo_above);
         if (m_chainman.m_interrupt) return false;
     }
     return true;

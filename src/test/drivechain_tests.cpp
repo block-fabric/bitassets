@@ -1438,7 +1438,7 @@ BOOST_AUTO_TEST_CASE(database_records)
         ++chain.height;
         chain.tip = block.GetHash();
         // The last two keep their undo data; the others only what sidechains follow.
-        BOOST_REQUIRE(db.WriteBlock(block.GetHash(), chain.height, undo, deposits, /*keep_undo=*/i > 3));
+        BOOST_REQUIRE(db.WriteBlock(block.GetHash(), chain.height, undo, deposits, chain.scdb, /*keep_undo=*/i > 3));
         blocks.emplace_back(block.GetHash(), deposits);
         txids.push_back(block.vtx[1]->GetHash().ToUint256());
     }
@@ -1451,6 +1451,28 @@ BOOST_AUTO_TEST_CASE(database_records)
     db.EraseBlockUndo(blocks[4].first);
     BOOST_CHECK(!db.HasBlockUndo(blocks[4].first));
     BOOST_CHECK(db.ReadBlockEvents(blocks[4].first, events));
+    BOOST_CHECK(events.pending.empty());
+
+    // The bundles pending after a block go with its events, with their scores after it.
+    {
+        const uint256 bundle{0xb1};
+        const CBlock block{chain.MakeBlock({BundleScript(1, bundle)})};
+        BlockUndo block_undo;
+        std::vector<Deposit> none;
+        std::string reason;
+        BOOST_REQUIRE(chain.scdb.ConnectBlock(block, chain.height + 1, chain.params, block_undo, &none, reason));
+        ++chain.height;
+        chain.tip = block.GetHash();
+        BOOST_REQUIRE(db.WriteBlock(block.GetHash(), chain.height, block_undo, none, chain.scdb));
+        BlockEvents read_events;
+        BOOST_REQUIRE(db.ReadBlockEvents(block.GetHash(), read_events));
+        BOOST_CHECK_EQUAL(read_events.proposed.size(), 1U);
+        BOOST_REQUIRE_EQUAL(read_events.pending.size(), 1U);
+        BOOST_CHECK_EQUAL(read_events.pending[0].first, 1U);
+        BOOST_REQUIRE_EQUAL(read_events.pending[0].second.size(), 1U);
+        BOOST_CHECK(read_events.pending[0].second[0].first == bundle);
+        BOOST_CHECK_EQUAL(read_events.pending[0].second[0].second, NEW_BUNDLE_SCORE);
+    }
 
     // Deposits after one, found by its txid, a few at a time.
     const auto all{db.ListDeposits(1, std::nullopt, 0)};

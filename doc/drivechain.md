@@ -38,6 +38,28 @@ score in time (`score`, `blocksleft` and `lastupvote` are in `listwithdrawalbund
 `getsidechainevents` tells what each block proposed and closed), or binding a bundle to something
 only the sidechain can produce.
 
+## What sidechain software reads: getsidechainevents
+
+`getsidechainevents <slot> <height> [count]` gives, per block of the active chain, what the block
+did that concerns one sidechain:
+
+* `bmm`: the sidechain block it committed to (blind merged mining), if any;
+* `deposits`: its changes to the escrow, deposits and the change of withdrawals (with what a
+  withdrawal paid);
+* `bundles`: the withdrawal bundles it closed, `{"hash", "paid"}` (paid out, or failed);
+* `proposed`: the bundles it proposed (M3) that became pending;
+* `pending`: the bundles of the sidechain pending after the block, `[{"hash": hex, "score": n}]`, in
+  the order vote messages number them (empty if none).
+
+`pending` is what a sidechain needs to know whether a withdrawal may still be paid (and so must not
+be refunded yet): the bundles proposed and not closed as of that block, with their score after it.
+It is computed when the block is connected and stored with the other events of the block, which are
+kept for good, so it is the same for any height and at any time: after a restart, after the
+database is rebuilt, and on every node. A reorg replaces the records of the blocks it takes out with
+those of the blocks it connects. A sidechain that follows the chain block by block can take the
+`pending` list of the last block it processed as the set of bundles that may still be paid, without
+replaying every proposal and closure since its slot activated.
+
 ## What is kept, and for how long
 
 * The sidechain database itself, in memory, with a snapshot (with a format version: a snapshot in
@@ -45,9 +67,10 @@ only the sidechain can produce.
   chainstate is flushed. The drivechain data on disk has a format version too: a node that finds
   data of an older version wipes it and rebuilds it from the blocks when it starts (a pruned node,
   which no longer has them, has to be started with `-reindex`).
-* Per block, what it did that sidechain software follows (the bundles it closed, paid or failed, and
-  those it proposed, and its escrow changes): for good, for `getsidechainevents` and
-  `listsidechaindeposits`.
+* Per block, what it did that sidechain software follows (the bundles it closed, paid or failed,
+  those it proposed, those pending after it with their scores, and its escrow changes): for good,
+  for `getsidechainevents` and `listsidechaindeposits`. The pending bundles cost about 36 bytes per
+  bundle per block for the sidechains that have any.
 * Per block, the changes it made to the database, to take it back in a reorg: only for the last
   `DRIVECHAIN_UNDO_DEPTH` (2880) blocks of the active chain. A reorg deeper than that derives the
   database from the blocks (slow, and impossible on a pruned node, which cannot reorg that deep in

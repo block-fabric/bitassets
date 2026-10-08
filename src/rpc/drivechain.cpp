@@ -876,7 +876,8 @@ RPCMethod getsidechainevents()
     return RPCMethod{
         "getsidechainevents",
         "Returns everything that blocks of the active chain did that concerns one sidechain: the sidechain block they\n"
-        "committed to (blind merged mining), the changes they made to its escrow, and the withdrawal bundles they closed.\n"
+        "committed to (blind merged mining), the changes they made to its escrow, the withdrawal bundles they proposed\n"
+        "and closed, and the bundles pending after each of them.\n"
         "Sidechain software follows this chain with it, block by block.",
         {
             {"slot", RPCArg::Type::NUM, RPCArg::Optional::NO, "The sidechain slot number"},
@@ -921,6 +922,15 @@ RPCMethod getsidechainevents()
                 {RPCResult::Type::ARR, "proposed", "The withdrawal bundles the block proposed (BIP300 M3): pending from it until a block closes them",
                 {
                     {RPCResult::Type::STR_HEX, "", "The hash of the bundle"},
+                }},
+                {RPCResult::Type::ARR, "pending", "The withdrawal bundles of the sidechain that are pending after the block (proposed, and not closed yet),\n"
+                                                  "in the order vote messages number them. Recorded when the block was connected: the same for any height, at any time",
+                {
+                    {RPCResult::Type::OBJ, "", "",
+                    {
+                        {RPCResult::Type::STR_HEX, "hash", "The hash of the bundle"},
+                        {RPCResult::Type::NUM, "score", "Its work score after the block"},
+                    }},
                 }},
             }},
         }},
@@ -1023,6 +1033,20 @@ RPCMethod getsidechainevents()
             if (slot == id) proposed.push_back(hash.GetHex());
         }
         obj.pushKV("proposed", std::move(proposed));
+
+        // What is pending after the block, as the block left it: a sidechain that saw a block
+        // propose or close a bundle knows from this, at any height, what it may still have to pay.
+        UniValue pending(UniValue::VARR);
+        for (const auto& [slot, bundles] : events.pending) {
+            if (slot != id) continue;
+            for (const auto& [hash, score] : bundles) {
+                UniValue entry(UniValue::VOBJ);
+                entry.pushKV("hash", hash.GetHex());
+                entry.pushKV("score", score);
+                pending.push_back(std::move(entry));
+            }
+        }
+        obj.pushKV("pending", std::move(pending));
         result.push_back(std::move(obj));
     }
     return result;
