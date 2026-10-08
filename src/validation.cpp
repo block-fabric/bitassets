@@ -4890,6 +4890,10 @@ drivechain::SidechainDB Chainstate::GetMempoolSidechainDB(const std::set<drivech
                     // The first deposit spends no escrow output in the mempool; one that does comes
                     // later in the chain, whatever its txid.
                     if (std::any_of(candidate->vin.begin(), candidate->vin.end(), [&](const CTxIn& in) { return txs->second.contains(in.prevout.hash); })) continue;
+                    // Nor one whose inputs are missing: in a reorg, the deposits of the disconnected
+                    // blocks come back one by one, and a later one that stayed in the mempool waits
+                    // for the one before it (which would otherwise be refused, as not following it).
+                    if (std::any_of(candidate->vin.begin(), candidate->vin.end(), [&](const CTxIn& in) { return !m_mempool->exists(in.prevout.hash) && !m_coins_views->m_cacheview->HaveCoin(in.prevout); })) continue;
                     drivechain::SidechainDB probe{scdb};
                     drivechain::SidechainDB::EscrowOutputs probe_outputs{escrow_outputs};
                     drivechain::BlockUndo probe_undo;

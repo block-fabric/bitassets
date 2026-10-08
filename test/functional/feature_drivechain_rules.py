@@ -58,6 +58,7 @@ class DrivechainRulesTest(BitcoinTestFramework):
         self.test_mempool_pinning()
         self.test_reorg_evicts_deposit()
         self.test_reorg_evicts_withdrawal()
+        self.test_reorg_keeps_chained_first_deposits()
 
     def test_rpc_errors(self):
         self.log.info("The drivechain commands refuse what they cannot do, with a message that says why")
@@ -259,6 +260,25 @@ class DrivechainRulesTest(BitcoinTestFramework):
         # (The first block only ties with the old tip: no sync until the second.)
         self.generateblock(node, node.getnewaddress(), [], sync_fun=self.no_op)
         self.generateblock(node, node.getnewaddress(), [])
+        self.sync_all()
+
+    def test_reorg_keeps_chained_first_deposits(self):
+        self.log.info("A reorg brings the first deposit of a sidechain back, and the one chained on it stays")
+        node = self.nodes[0]
+        self.activate(4, "First deposits")
+        first = node.createsidechaindeposit(4, "first", 1)
+        block = self.mine()[0]
+        # Made on the escrow output the first one created.
+        second = node.createsidechaindeposit(4, "second", 1)
+        assert_equal(node.getrawmempool(), [second["txid"]])
+        # Without the block the sidechain has no escrow output: the first deposit makes it again, and
+        # the second, whose input it brings back, waits for it rather than make it look out of turn.
+        node.invalidateblock(block)
+        assert_equal(set(node.getrawmempool()), {first["txid"], second["txid"]})
+        node.reconsiderblock(block)
+        assert_equal(node.getrawmempool(), [second["txid"]])
+        self.mine()
+        assert_equal(node.getsidechain(4)["escrow"]["txid"], second["txid"])
         self.sync_all()
 
 
