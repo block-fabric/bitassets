@@ -1527,6 +1527,93 @@ BOOST_AUTO_TEST_CASE(pending_bundle_holds_refunds_back_only_with_support)
     BOOST_CHECK_EQUAL(reason, "bad-sc-refund-in-bundle");
 }
 
+BOOST_AUTO_TEST_CASE(rising_leader_holds_refunds_back)
+{
+    // From audit2_height: mainchain miners in follow mode upvote whichever bundle leads its slot, so a
+    // bundle of another branch below pending_min_score can still be paid. While it leads with a score
+    // on the rise (PENDING_TREND_MIN_RISE over PENDING_TREND_BLOCKS), refunds wait; a bare proposal
+    // nobody upvotes, one on its way down, one that does not lead, or a tie, do not hold them back.
+    using sidechain::PENDING_TREND_BLOCKS;
+    using sidechain::PENDING_TREND_MIN_RISE;
+    Consensus::SidechainParams params;
+    params.pending_min_score = 1000;
+    SideStore side;
+    sidechain::State& state{side.state};
+    CKey key;
+    key.MakeNewKey(/*fCompressed=*/true);
+    const CScript pay{GetScriptForDestination(WitnessV0KeyHash{key.GetPubKey().GetID()})};
+    const COutPoint withdrawal{MakeWithdrawal(state, key, pay, 1, params)};
+    const auto refund{SignRefund(key, withdrawal)};
+    const uint256 foreign{0xf0}, other{0xf1};
+    // The record after each block, as the scores of the pending bundles; refunds held back after it.
+    const auto check{[&](const std::vector<std::vector<sidechain::MainPendingBundle>>& blocks, bool held, const std::string& what) {
+        sidechain::Mainchain mainchain;
+        for (const auto& pending : blocks) Extend(mainchain, 1, [&](sidechain::MainBlock& b) { b.pending = pending; });
+        const int top{mainchain.Height()};
+        // The state has followed the mainchain up to the last block.
+        SideStore copy;
+        sidechain::State& st{copy.state};
+        MakeWithdrawal(st, key, pay, 1, params);
+        std::vector<CTxOut> payouts;
+        std::string reason;
+        BOOST_REQUIRE_MESSAGE(st.ApplyMainEvents(top, mainchain, 2, params, payouts, reason), reason);
+        BOOST_CHECK_MESSAGE(st.MainPending(mainchain, 2, params) == held, what);
+        BOOST_CHECK_MESSAGE(st.MainPendingNext(mainchain, 3, params) == held, what);
+        BOOST_CHECK_MESSAGE(st.CheckRefund(refund, reason, st.MainPending(mainchain, 2, params)) == !held, what);
+        // Before audit2_height, any pending bundle (by its proposals) held refunds back: none proposed here.
+        params.audit2_height = 1000;
+        BOOST_CHECK(!st.MainPending(mainchain, 2, params));
+        params.audit2_height = 0;
+    }};
+    // Upvoted every block: from the proposal (1) up by PENDING_TREND_MIN_RISE, it holds refunds back.
+    std::vector<std::vector<sidechain::MainPendingBundle>> rising;
+    for (uint32_t score{1}; score <= 1 + PENDING_TREND_MIN_RISE; ++score) rising.push_back({{foreign, score}});
+    check(rising, true, "rising");
+    // One short of the rise: not yet.
+    check({rising.begin(), rising.end() - 1}, false, "one short");
+    // A bare proposal nobody votes on stays at 1 for ever.
+    check(std::vector<std::vector<sidechain::MainPendingBundle>>(2 * PENDING_TREND_BLOCKS, {{foreign, 1}}), false, "bare");
+    // Upvoted to 40, then downvoted: on its way down, below pending_min_score.
+    std::vector<std::vector<sidechain::MainPendingBundle>> down;
+    for (uint32_t score{1}; score <= 40; ++score) down.push_back({{foreign, score}});
+    for (uint32_t score{39}; score >= 30; --score) down.push_back({{foreign, score}});
+    check(down, false, "decaying");
+    // Upvoted in a quarter of the blocks, no downvotes: rising at the least pace that counts.
+    std::vector<std::vector<sidechain::MainPendingBundle>> slow;
+    for (int i{0}; i < 4 * PENDING_TREND_BLOCKS; ++i) slow.push_back({{foreign, static_cast<uint32_t>(1 + i / 4)}});
+    check(slow, true, "slow");
+    // Upvoted in fewer blocks: on its way to failing.
+    std::vector<std::vector<sidechain::MainPendingBundle>> slower;
+    for (int i{0}; i < 5 * PENDING_TREND_BLOCKS; ++i) slower.push_back({{foreign, static_cast<uint32_t>(1 + i / 5)}});
+    check(slower, false, "slower");
+    // Rising, but another bundle leads: follow-mode miners upvote that one.
+    std::vector<std::vector<sidechain::MainPendingBundle>> behind;
+    for (uint32_t score{1}; score <= 10; ++score) behind.push_back({{foreign, score}, {other, 50}});
+    check(behind, false, "behind");
+    // A tie leads nobody.
+    std::vector<std::vector<sidechain::MainPendingBundle>> tie;
+    for (uint32_t score{1}; score <= 10; ++score) tie.push_back({{foreign, score}, {other, score}});
+    check(tie, false, "tie");
+    // The other leads and rises: it holds refunds back, whichever it is.
+    std::vector<std::vector<sidechain::MainPendingBundle>> ahead;
+    for (uint32_t score{1}; score <= 10; ++score) ahead.push_back({{foreign, 1}, {other, score}});
+    check(ahead, true, "ahead");
+
+    // This chain's own bundle, leading and rising, holds back only its own withdrawals.
+    sidechain::Mainchain mainchain;
+    Extend(mainchain, 1);
+    std::vector<CTxOut> payouts;
+    std::string reason;
+    BOOST_REQUIRE_MESSAGE(state.ApplyMainEvents(0, mainchain, 2, params, payouts, reason), reason);
+    const auto ours{state.NextBundle(2, uint256{0xa}, params)};
+    BOOST_REQUIRE(ours);
+    const uint256 ours_hash{ours->GetHash().ToUint256()};
+    BOOST_REQUIRE_MESSAGE(state.StartBundle(ours_hash, 2, uint256{0xa}, params, reason), reason);
+    for (uint32_t score{1}; score <= 10; ++score) Extend(mainchain, 1, [&](sidechain::MainBlock& b) { b.pending = {{ours_hash, score}, {foreign, 1}}; });
+    BOOST_REQUIRE_MESSAGE(state.ApplyMainEvents(mainchain.Height(), mainchain, 3, params, payouts, reason), reason);
+    BOOST_CHECK(!state.MainPending(mainchain, 3, params));
+}
+
 BOOST_AUTO_TEST_CASE(foreign_bundle_paid_while_ours_pending)
 {
     // Both pending, with the same withdrawal: the mainchain pays the other branch's bundle and fails

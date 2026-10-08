@@ -165,6 +165,13 @@ public:
      * as the mainchain said (MainBlock::pending).
      */
     bool SupportedPending(int main_height, uint32_t min_score, const uint256& ours) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /**
+     * Whether, after the block at `main_height` (the last one on record if above it), the bundle
+     * with the highest score -- strictly, a tie leads nobody -- was one other than `ours`, and its
+     * score had risen by `min_rise` or more over the last `window` blocks: from what it was then, or
+     * from the score a proposal starts with (1) for one proposed since. See SidechainParams::pending_min_score.
+     */
+    bool RisingLeader(int main_height, int window, uint32_t min_rise, const uint256& ours) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     /** The sidechain block that the mainchain block at `height` committed to, if any. */
     std::optional<uint256> BmmAt(int height) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 

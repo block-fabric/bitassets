@@ -280,9 +280,13 @@ bool State::MainPending(const Mainchain& mainchain, int height, const Consensus:
 {
     if (height >= params.audit2_height) {
         // Only a bundle with support counts: anyone can propose one (a bare M3), and so would freeze
-        // refunds. This chain's own holds back only its withdrawals (InBundle).
+        // refunds. Support is a score of pending_min_score, or the lead of the slot with a score on
+        // the rise (see SidechainParams::pending_min_score). This chain's own holds back only its
+        // withdrawals (InBundle).
         const auto bundle{Bundle()};
-        return mainchain.SupportedPending(MainHeight(), params.pending_min_score, bundle ? bundle->hash : uint256{});
+        const uint256 ours{bundle ? bundle->hash : uint256{}};
+        return mainchain.SupportedPending(MainHeight(), params.pending_min_score, ours) ||
+               mainchain.RisingLeader(MainHeight(), PENDING_TREND_BLOCKS, PENDING_TREND_MIN_RISE, ours);
     }
     return height >= params.single_bundle_height && mainchain.BundlePending(MainHeight());
 }
@@ -294,7 +298,9 @@ bool State::MainPendingNext(const Mainchain& mainchain, int height, const Consen
         const auto bundle{Bundle()};
         const uint256 ours{bundle ? bundle->hash : uint256{}};
         return mainchain.NeedsBackfill() || mainchain.SupportedPending(MainHeight(), params.pending_min_score, ours) ||
-               mainchain.SupportedPending(mainchain.Height(), params.pending_min_score, ours);
+               mainchain.SupportedPending(mainchain.Height(), params.pending_min_score, ours) ||
+               mainchain.RisingLeader(MainHeight(), PENDING_TREND_BLOCKS, PENDING_TREND_MIN_RISE, ours) ||
+               mainchain.RisingLeader(mainchain.Height(), PENDING_TREND_BLOCKS, PENDING_TREND_MIN_RISE, ours);
     }
     return height >= params.single_bundle_height &&
            (mainchain.NeedsBackfill() || mainchain.BundlePending(MainHeight()) || mainchain.BundlePending(mainchain.Height()));

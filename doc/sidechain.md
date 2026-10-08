@@ -72,10 +72,18 @@ A sidechain has no miners and no coins of its own.
   `audit2_height`, refunds wait while such a bundle has a work score of
   `pending_min_score` or more (`getsidechainevents` reports the bundles pending
   after each block with their scores); below it, anyone could freeze refunds by
-  proposing a bundle. A withdrawal refunded while a bundle that holds it has
-  less than that can still be paid twice if a majority of mainchain miners
-  votes that bundle through over the downvotes of those who vouch for this
-  chain's own: that is the drivechain security model.
+  proposing a bundle. Mainchain miners in follow mode (`LEADING_BY_50`)
+  upvote whichever bundle leads its slot, so refunds also wait while the
+  bundle with the highest score (strictly, and not this chain's own) rose by
+  3 or more over the last 12 mainchain blocks (from 1, what a proposal starts
+  with, if proposed since): net upvotes in a quarter of the blocks, half the
+  pace a payout takes, so on its way to being paid rather than to failing. A
+  bare proposal nobody upvotes never rises, and one that the miners who vouch
+  for this chain downvote goes down: neither holds refunds back, and keeping
+  one rising takes a good share of the hashrate all along. A withdrawal
+  refunded while a bundle that holds it has neither can still be paid twice if a majority of mainchain miners votes
+  that bundle through over the downvotes of those who vouch for this chain's
+  own: that is the drivechain security model.
 - **Bundles nobody proposes.** From `audit2_height`, a bundle the mainchain has
   not proposed `unproposed_expiry_blocks` mainchain blocks after the block that
   committed to it fails, and its withdrawals go in a later one or can be taken

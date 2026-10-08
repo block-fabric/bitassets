@@ -214,6 +214,33 @@ bool Mainchain::SupportedPending(int main_height, uint32_t min_score, const uint
     });
 }
 
+bool Mainchain::RisingLeader(int main_height, int window, uint32_t min_rise, const uint256& ours) const
+{
+    LOCK(m_mutex);
+    if (main_height < 0 || m_blocks.empty()) return false;
+    const int at{std::min(main_height, static_cast<int>(m_blocks.size()) - 1)};
+    const std::vector<MainPendingBundle>& pending{m_blocks[at].pending};
+    // The leader: the one score above all others. A tie leads nobody (as LEADING_BY_50 sees it).
+    const MainPendingBundle* leader{nullptr};
+    bool tie{false};
+    for (const MainPendingBundle& bundle : pending) {
+        if (!leader || bundle.score > leader->score) {
+            leader = &bundle;
+            tie = false;
+        } else if (bundle.score == leader->score) {
+            tie = true;
+        }
+    }
+    if (!leader || tie || leader->hash == ours) return false;
+    // Its score `window` blocks before (or after the first block on record, if fewer); a bundle
+    // proposed since started at NEW_BUNDLE_SCORE (1).
+    uint32_t before{1};
+    for (const MainPendingBundle& bundle : m_blocks[std::max(at - window, 0)].pending) {
+        if (bundle.hash == leader->hash) before = bundle.score;
+    }
+    return leader->score >= before + min_rise;
+}
+
 std::optional<uint256> Mainchain::BmmAt(int height) const
 {
     LOCK(m_mutex);
