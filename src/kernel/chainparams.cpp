@@ -344,12 +344,12 @@ public:
         consensus.sidechain.bitassets_pool_rules_height = 660;
         consensus.sidechain.bitassets_release_height = 720;
         consensus.sidechain.bitassets_audit_height = 3100;
-        consensus.sidechain.bitassets_audit2_height = 999999999; // AUDIT2_TESTNET: set at deploy
+        consensus.sidechain.bitassets_audit2_height = 2574; // audit 2 rules on the test network, 300 blocks after the deploy
         // The test network ran without it until then; see SidechainParams.
         consensus.sidechain.single_bundle_height = 3100;
         // The height of the mainchain block that activated the slot; nothing is left out at 0.
         consensus.sidechain.main_activation_height = 2208;
-        consensus.sidechain.audit2_height = 999999999; // AUDIT2_TESTNET: set at deploy
+        consensus.sidechain.audit2_height = 2574; // audit 2 rules on the test network, 300 blocks after the deploy
         consensus.coinbase_maturity = 0; // what a block pays (deposits, fees) can be spent in the next
     }
 };
