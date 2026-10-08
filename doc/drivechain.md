@@ -84,4 +84,11 @@ replaying every proposal and closure since its slot activated.
   again, as a new bundle that needs all its votes again. By then the sidechain has had a whole
   withdrawal period to refund its withdrawals, and paying it out again would take the same majority
   of the hashrate, upvoting for as long, as paying out any bundle nobody vouches for.
-  `getwithdrawalbundle` then answers "unknown"; `getsidechainevents` keeps saying it failed.
+  `getwithdrawalbundle` keeps answering "failed" (from the index of the blocks that closed each
+  bundle, kept for good), and `getsidechainevents` keeps saying it failed.
+* The miner of a node keeps, with each bundle a sidechain node handed it (`drivechain_miner.dat`),
+  whether the chain proposed it and the height of the block that closed it. A bundle the chain
+  closed once is never proposed or upvoted again by this node, even once the chain forgot that it
+  failed (the index of closures tells, whenever the node builds a block); it is dropped
+  `PRUNE_DEPTH` (6) blocks after it closed. A handed bundle no block proposed is dropped after
+  1008 blocks, unless it is the one the sidechain node vouches for.

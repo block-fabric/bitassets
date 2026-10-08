@@ -26,6 +26,8 @@ constexpr uint8_t DB_DEPOSIT{'D'};
 //! Where an escrow change is (DepositKey), by sidechain and txid.
 constexpr uint8_t DB_DEPOSIT_TXID{'T'};
 constexpr uint8_t DB_FORMAT_VERSION{'v'};
+//! The blocks that closed a bundle (std::vector<Closure>), by slot and bundle hash.
+constexpr uint8_t DB_CLOSURE{'C'};
 
 //! Version of the snapshot of the sidechain database; a snapshot of another one is not read.
 constexpr uint32_t STATE_VERSION{4};
@@ -70,6 +72,20 @@ struct DepositTxidKey {
         ser_writedata8(s, DB_DEPOSIT_TXID);
         ser_writedata32be(s, slot);
         s << txid;
+    }
+};
+
+/** Key of the closures of a bundle. */
+struct ClosureKey {
+    SidechainId slot{0};
+    uint256 hash;
+
+    template <typename Stream>
+    void Serialize(Stream& s) const
+    {
+        ser_writedata8(s, DB_CLOSURE);
+        ser_writedata32be(s, slot);
+        s << hash;
     }
 };
 
@@ -190,6 +206,15 @@ bool Database::WriteBlock(const uint256& block_hash, int height, const BlockUndo
         record.deposits.push_back(key);
     }
     batch.Write(std::make_pair(DB_EVENTS, block_hash), record);
+    // A block closes a bundle once at most: its record replaces one left by the same block.
+    for (const BlockUndo::Closed& closed : undo.closed) {
+        const ClosureKey key{closed.id, closed.hash};
+        std::vector<Closure> closures;
+        m_db.Read(key, closures);
+        std::erase_if(closures, [&](const Closure& c) { return c.block_hash == block_hash; });
+        closures.push_back({block_hash, height, closed.paid});
+        batch.Write(key, closures);
+    }
     if (keep_undo) {
         batch.Write(std::make_pair(DB_UNDO, block_hash), undo);
     } else {
@@ -240,6 +265,17 @@ bool Database::EraseBlockDeposits(const uint256& block_hash)
     }
     m_db.WriteBatch(batch);
     return true;
+}
+
+std::optional<Closure> Database::FindClosure(SidechainId slot, const uint256& bundle_hash, const std::function<bool(const uint256&)>& in_active_chain) const
+{
+    std::vector<Closure> closures;
+    if (!m_db.Read(ClosureKey{slot, bundle_hash}, closures)) return std::nullopt;
+    std::optional<Closure> last;
+    for (const Closure& closure : closures) {
+        if ((!last || closure.height > last->height) && in_active_chain(closure.block_hash)) last = closure;
+    }
+    return last;
 }
 
 bool Database::WriteState(const std::string& chainstate, const SidechainDB& scdb)

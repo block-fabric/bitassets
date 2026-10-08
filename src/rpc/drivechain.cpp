@@ -637,8 +637,9 @@ RPCMethod getwithdrawalbundle()
         },
         RPCResult{RPCResult::Type::OBJ, "", "",
         {
-            {RPCResult::Type::STR, "status", "\"pending\" while miners vote on the bundle, \"paid\" once it was paid out, \"failed\" if it did not get the votes in time, \"unknown\" if no block proposed it\n"
-                                          "(or it failed more than a withdrawal period ago: getsidechainevents tells what became of every bundle for good)"},
+            {RPCResult::Type::STR, "status", "\"pending\" while miners vote on the bundle, \"paid\" once it was paid out, \"failed\" if it did not get the votes in time\n"
+                                          "(also once the sidechain database forgot it, a withdrawal period later: the blocks that closed it are kept for good),\n"
+                                          "\"unknown\" if no block of the active chain proposed it. A bundle proposed again after it was forgotten is \"pending\" again"},
             {RPCResult::Type::NUM, "score", /*optional=*/true, "The work score of a pending bundle"},
             {RPCResult::Type::NUM, "lastupvote", /*optional=*/true, "Height of the last block that upvoted a pending bundle, or of the block that proposed it"},
             {RPCResult::Type::NUM, "blocksleft", /*optional=*/true, "Number of blocks a pending bundle has left to reach the minimum work score"},
@@ -674,6 +675,16 @@ RPCMethod getwithdrawalbundle()
             PushBundlePayouts(result, chainman.m_drivechain_miner.GetBundle(id, hash));
             return result;
         }
+    }
+    // Forgotten by the sidechain database: the record of the block of the active chain that closed it.
+    const auto closure{chainman.m_blockman.m_drivechain_db->FindClosure(id, hash, [&](const uint256& block_hash) {
+        AssertLockHeld(::cs_main);
+        const CBlockIndex* index{chainman.m_blockman.LookupBlockIndex(block_hash)};
+        return index && chainman.ActiveChain().Contains(*index);
+    })};
+    if (closure) {
+        result.pushKV("status", closure->paid ? "paid" : "failed");
+        return result;
     }
     result.pushKV("status", "unknown");
     return result;

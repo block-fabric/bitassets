@@ -1395,6 +1395,83 @@ BOOST_AUTO_TEST_CASE(failed_bundles_are_forgotten)
     }
 }
 
+BOOST_AUTO_TEST_CASE(miner_never_reproposes_a_closed_bundle)
+{
+    // A bundle the chain closed once is not proposed or upvoted again by the miner, even after the
+    // sidechain database forgot that it failed and it looks new (a node that did not build blocks
+    // meanwhile, so whose miner never saw it closed, included).
+    TestChain chain;
+    chain.params.audit2_height = 0;
+    chain.params.upvote_expiry_blocks = 3;
+    chain.Activate(MakeSidechain(1));
+    BOOST_REQUIRE(chain.Connect({}, {chain.DepositTx(1, 10 * COIN)}));
+    MinerState miner;
+    std::string error;
+    const auto hash{miner.AddBundle(1, TestChain::BlindBundle(COIN, 1000), error)};
+    BOOST_REQUIRE(hash);
+    miner.Prune(chain.scdb, chain.height + 1);
+    BOOST_REQUIRE(chain.Connect(Scripts(miner.CreateBlockAdditions(chain.scdb, chain.params, chain.tip, {}))));
+    BOOST_REQUIRE_EQUAL(chain.scdb.GetSlot(1)->bundles.size(), 1U);
+    // Other miners downvote it until it fails; this node builds no block meanwhile.
+    std::optional<int> closed_at;
+    while (!closed_at) {
+        BOOST_REQUIRE(chain.Connect({Votes({VOTE_DOWNVOTE})}));
+        if (chain.scdb.WasPaid(1, *hash) == std::optional<bool>{false}) closed_at = chain.height;
+    }
+    while (chain.scdb.IsClosed(1, *hash)) BOOST_REQUIRE(chain.Connect());
+    // Forgotten. What the chain's history says of it, as the index of closures would.
+    const MinerState::ClosureLookup history{[&](SidechainId slot, const uint256& h) -> std::optional<int> {
+        if (slot == 1 && h == *hash) return closed_at;
+        return std::nullopt;
+    }};
+    // Without the history it looks new, and would be proposed again.
+    {
+        MinerState blind_miner;
+        BOOST_REQUIRE(blind_miner.AddBundle(1, TestChain::BlindBundle(COIN, 1000), error));
+        blind_miner.Prune(chain.scdb, chain.height + 1);
+        BOOST_CHECK(Contains(Scripts(blind_miner.CreateBlockAdditions(chain.scdb, chain.params, chain.tip, {})), BundleScript(1, *hash)));
+    }
+    miner.Prune(chain.scdb, chain.height + 1, history);
+    BOOST_CHECK(!Contains(Scripts(miner.CreateBlockAdditions(chain.scdb, chain.params, chain.tip, {})), BundleScript(1, *hash)));
+    // Closed long enough ago: dropped.
+    BOOST_CHECK(!miner.GetBundle(1, *hash));
+
+    // Proposed again by someone else, it is not upvoted, by a miner that was just handed it either.
+    BOOST_REQUIRE(chain.Connect({BundleScript(1, *hash)}));
+    MinerState handed_again;
+    BOOST_REQUIRE(handed_again.AddBundle(1, TestChain::BlindBundle(COIN, 1000), error));
+    BOOST_CHECK(handed_again.ResolveVote(1, chain.scdb.GetSlot(1)->bundles).type == Vote::Type::UPVOTE);
+    handed_again.Prune(chain.scdb, chain.height + 1, history);
+    BOOST_CHECK(handed_again.ResolveVote(1, chain.scdb.GetSlot(1)->bundles).type != Vote::Type::UPVOTE);
+    BOOST_CHECK(!Contains(Scripts(handed_again.CreateBlockAdditions(chain.scdb, chain.params, chain.tip, {})), Votes({0})));
+}
+
+BOOST_AUTO_TEST_CASE(miner_drops_bundles_never_proposed)
+{
+    // A handed bundle no block proposed goes after UNPROPOSED_EXPIRY blocks, unless it is the one the
+    // sidechain node vouches for; when it was handed is kept across restarts.
+    TestChain chain;
+    chain.Activate(MakeSidechain(1));
+    const fs::path path{m_path_root / "drivechain_miner.dat"};
+    std::string error;
+    std::optional<uint256> old_bundle, new_bundle;
+    {
+        MinerState miner;
+        BOOST_REQUIRE(miner.Load(path));
+        old_bundle = miner.AddBundle(1, TestChain::BlindBundle(COIN, 1000, 1), error);
+        new_bundle = miner.AddBundle(1, TestChain::BlindBundle(COIN, 1000, 2), error);
+        BOOST_REQUIRE(old_bundle && new_bundle);
+        miner.Prune(chain.scdb, 100);
+    }
+    MinerState miner;
+    BOOST_REQUIRE(miner.Load(path));
+    miner.Prune(chain.scdb, 100 + MinerState::UNPROPOSED_EXPIRY - 1);
+    BOOST_CHECK(miner.GetBundle(1, *old_bundle));
+    miner.Prune(chain.scdb, 100 + MinerState::UNPROPOSED_EXPIRY);
+    BOOST_CHECK(!miner.GetBundle(1, *old_bundle));
+    BOOST_CHECK(miner.GetBundle(1, *new_bundle));
+}
+
 BOOST_AUTO_TEST_CASE(state_snapshot_and_index)
 {
     // The failed bundles by height are rebuilt when a snapshot is read: what is forgotten next is the same.
@@ -1472,6 +1549,23 @@ BOOST_AUTO_TEST_CASE(database_records)
         BOOST_REQUIRE_EQUAL(read_events.pending[0].second.size(), 1U);
         BOOST_CHECK(read_events.pending[0].second[0].first == bundle);
         BOOST_CHECK_EQUAL(read_events.pending[0].second[0].second, NEW_BUNDLE_SCORE);
+    }
+
+    // The blocks that closed a bundle, for good; only those the caller takes for the active chain count.
+    {
+        BlockUndo closing;
+        closing.closed.push_back({1, uint256{0xc1}, false});
+        const uint256 a{0xa1}, b{0xa2};
+        BOOST_REQUIRE(db.WriteBlock(a, 50, closing, {}, chain.scdb));
+        BOOST_REQUIRE(db.WriteBlock(b, 60, closing, {}, chain.scdb));
+        BOOST_REQUIRE(db.WriteBlock(b, 60, closing, {}, chain.scdb));
+        const auto all{[](const uint256&) { return true; }};
+        BOOST_CHECK_EQUAL(db.FindClosure(1, uint256{0xc1}, all)->height, 60);
+        BOOST_CHECK(db.FindClosure(1, uint256{0xc1}, all)->block_hash == b);
+        BOOST_CHECK(!db.FindClosure(1, uint256{0xc1}, all)->paid);
+        BOOST_CHECK_EQUAL(db.FindClosure(1, uint256{0xc1}, [&](const uint256& h) { return h == a; })->height, 50);
+        BOOST_CHECK(!db.FindClosure(1, uint256{0xc1}, [](const uint256&) { return false; }));
+        BOOST_CHECK(!db.FindClosure(2, uint256{0xc1}, all));
     }
 
     // Deposits after one, found by its txid, a few at a time.

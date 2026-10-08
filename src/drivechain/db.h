@@ -11,6 +11,7 @@
 #include <uint256.h>
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -27,6 +28,15 @@ struct BlockEvents {
     std::vector<std::pair<SidechainId, std::vector<std::pair<uint256, uint32_t>>>> pending;
 };
 
+/** A block that closed a bundle. */
+struct Closure {
+    uint256 block_hash;
+    int32_t height{0};
+    bool paid{false};
+
+    SERIALIZE_METHODS(Closure, obj) { READWRITE(obj.block_hash, obj.height, obj.paid); }
+};
+
 /**
  * Storage for drivechain data that is not kept in memory:
  *
@@ -36,7 +46,9 @@ struct BlockEvents {
  *  - a snapshot of the sidechain database of each chainstate, taken whenever
  *    the chainstate is flushed,
  *  - an index of the escrow changes of each sidechain, which sidechain
- *    software reads to credit deposits.
+ *    software reads to credit deposits,
+ *  - an index of the blocks that closed each bundle, for good: a bundle the sidechain database
+ *    forgot (see SidechainDB::ForgetFailedBundles) is still known to have failed.
  */
 class Database
 {
@@ -48,7 +60,7 @@ public:
     Database(const DBParams& params, const uint256& params_fingerprint);
 
     /** Version of the way the data is laid out; a database of another version is wiped and built anew from the blocks. */
-    static constexpr uint32_t FORMAT_VERSION{5};
+    static constexpr uint32_t FORMAT_VERSION{6};
     enum class Format {
         CURRENT,
         //! Laid out another way (by an older version of this software), or not marked at all.
@@ -77,6 +89,12 @@ public:
     bool ReadBlockEvents(const uint256& block_hash, BlockEvents& events) const;
     /** Remove the escrow changes of a block that is no longer in the active chain from the index. */
     bool EraseBlockDeposits(const uint256& block_hash);
+
+    /**
+     * The last closure of a bundle by a block that `in_active_chain` accepts (the blocks of the active
+     * chain); nullopt if there is none. Records of blocks that left the chain are kept, and skipped here.
+     */
+    std::optional<Closure> FindClosure(SidechainId slot, const uint256& bundle_hash, const std::function<bool(const uint256&)>& in_active_chain) const;
 
     /** Store the sidechain database of the chainstate named `chainstate`. */
     bool WriteState(const std::string& chainstate, const SidechainDB& scdb);

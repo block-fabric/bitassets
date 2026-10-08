@@ -6,6 +6,7 @@
 
 - getsidechainevents reports, for every block, the bundles pending after it with their score: the
   same at any later time, after a reorg, a restart and a rebuild of the database.
+- A failed bundle the sidechain database forgot is still "failed", and the miner does not propose it again.
 - A database derived under other drivechain parameters (an activation height that moved) is rebuilt.
 """
 from test_framework.address import address_to_scriptpubkey
@@ -17,6 +18,8 @@ from test_framework.util import assert_equal
 # Regtest drivechain parameters, see CRegTestParams.
 ACTIVATION_PERIOD = 20
 WITHDRAWAL_MIN_SCORE = 30
+WITHDRAWAL_PERIOD = 60
+UPVOTE_EXPIRY_BLOCKS = 20
 SLOT = 1
 
 
@@ -62,6 +65,7 @@ class DrivechainHistoryTest(BitcoinTestFramework):
         self.expected = {}
         self.test_pending()
         self.test_params_change()
+        self.test_forgotten_bundle()
 
     def test_pending(self):
         self.log.info("getsidechainevents: the bundles pending after each block, with their score")
@@ -150,6 +154,36 @@ class DrivechainHistoryTest(BitcoinTestFramework):
         assert_equal(n0.getdrivechaininfo()["statehash"], state)
         self.connect_nodes(0, 1)
         self.sync_all()
+
+    def test_forgotten_bundle(self):
+        self.log.info("A failed bundle the sidechain database forgot stays failed, and is not proposed again")
+        n0, n1 = self.nodes
+        bundle = n0.receivewithdrawalbundle(SLOT, self.blind_bundle(n0, COIN // 4))["hash"]
+        self.generate(n0, 1)
+        assert_equal(n1.getwithdrawalbundle(SLOT, bundle)["status"], "pending")
+        # Node 0 builds no block until the bundle failed and was forgotten: its miner never sees it closed.
+        n1.setwithdrawalvote(SLOT, "downvote")
+        for _ in range(UPVOTE_EXPIRY_BLOCKS + 5):
+            self.generate(n1, 1)
+            if n1.getwithdrawalbundle(SLOT, bundle)["status"] == "failed":
+                break
+        assert_equal(n1.getwithdrawalbundle(SLOT, bundle), {"status": "failed"})
+        failed_height = n1.getblockcount()
+        self.generate(n1, WITHDRAWAL_PERIOD)
+        n1.setwithdrawalvote(SLOT, "default")
+        # Forgotten by the sidechain database (it could be proposed again), still failed by the record.
+        assert all(b["hash"] != bundle for b in n1.listwithdrawalbundles(SLOT))
+        for n in self.nodes:
+            assert_equal(n.getwithdrawalbundle(SLOT, bundle), {"status": "failed"})
+        self.restart_node(0)
+        self.connect_nodes(0, 1)
+        assert_equal(n0.getwithdrawalbundle(SLOT, bundle), {"status": "failed"})
+        # Node 0's miner still has the bundle, and knows from the record not to propose it.
+        self.generate(n0, 1)
+        events = n0.getsidechainevents(SLOT, n0.getblockcount())[0]
+        assert_equal(events["proposed"], [])
+        assert_equal(events["pending"], [])
+        assert_equal([e["bundles"] for e in n0.getsidechainevents(SLOT, failed_height)], [[{"hash": bundle, "paid": False}]])
 
 
 if __name__ == "__main__":

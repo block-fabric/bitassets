@@ -234,6 +234,12 @@ public:
         const auto it{m_closed.find({id, bundle_hash})};
         return it == m_closed.end() ? std::nullopt : std::optional<bool>{it->second.paid};
     }
+    /** What became of a bundle, if it is remembered as closed. */
+    std::optional<ClosedBundle> GetClosed(SidechainId id, const uint256& bundle_hash) const
+    {
+        const auto it{m_closed.find({id, bundle_hash})};
+        return it == m_closed.end() ? std::nullopt : std::optional<ClosedBundle>{it->second};
+    }
     /** Number of bundles remembered as paid out or failed. */
     size_t ClosedCount() const { return m_closed.size(); }
 
