@@ -1556,6 +1556,9 @@ void CWallet::transactionRemovedFromMempool(const CTransactionRef& tx, MemPoolRe
     // A drivechain transaction the mempool dropped can never be good again: a BMM request is for one
     // block only (or another bid replaced it), a deposit lost its treasury input to another. Left as
     // it is, it would keep its coins from the wallet; it is abandoned, which gives them back.
+    // Looked up again: SyncTransaction above may have inserted into mapWallet (a rehash
+    // invalidates its iterators).
+    it = mapWallet.find(tx->GetHash());
     if ((reason == MemPoolRemovalReason::CONFLICT || reason == MemPoolRemovalReason::REPLACED) && it != mapWallet.end() &&
         (drivechain::GetBmmRequest(*tx) || std::any_of(tx->vout.begin(), tx->vout.end(), [](const CTxOut& out) { return drivechain::ParseEscrowScript(out.scriptPubKey).has_value(); }))) {
         if (!it->second.isAbandoned() && GetTxDepthInMainChain(it->second) == 0 && !it->second.InMempool()) {
