@@ -1614,6 +1614,55 @@ BOOST_AUTO_TEST_CASE(unproposed_bundle_fails)
     }
 }
 
+BOOST_AUTO_TEST_CASE(bundle_proposed_before_its_commitment)
+{
+    // The hash of a bundle can be worked out before the block that commits to it (public withdrawals,
+    // and the block before). A mainchain miner who proposes it ahead -- the mainchain then refuses a
+    // second proposal of it -- does not make it fail as unproposed. A proposal that the mainchain
+    // closed before the commitment does not count.
+    for (const bool closed_before : {false, true}) {
+        Consensus::SidechainParams params;
+        params.unproposed_expiry_blocks = 3;
+        params.bundle_retry_delay = 0;
+        SideStore side;
+        sidechain::State& state{side.state};
+        CKey key;
+        key.MakeNewKey(/*fCompressed=*/true);
+        const CScript pay{GetScriptForDestination(WitnessV0KeyHash{key.GetPubKey().GetID()})};
+        MakeWithdrawal(state, key, pay, 1, params);
+        std::string reason;
+        std::vector<CTxOut> payouts;
+        // Worked out ahead of the sidechain block at height 2, on top of block 0xa.
+        const auto bundle{state.NextBundle(2, uint256{0xa}, params)};
+        BOOST_REQUIRE(bundle);
+        const uint256 hash{bundle->GetHash().ToUint256()};
+        sidechain::Mainchain mainchain;
+        Extend(mainchain, 1);
+        // Mainchain block 1 proposes it; block 2 closes it, or not.
+        Extend(mainchain, 1, [&](sidechain::MainBlock& b) {
+            b.proposed.push_back(hash);
+            b.pending.push_back({hash, 1});
+        });
+        Extend(mainchain, 1, [&](sidechain::MainBlock& b) {
+            if (closed_before) {
+                b.bundles.push_back({hash, false});
+            } else {
+                b.pending.push_back({hash, 2});
+            }
+        });
+        // The sidechain block, committed in mainchain block 3, commits to the bundle.
+        BOOST_REQUIRE_MESSAGE(state.ApplyMainEvents(2, mainchain, 2, params, payouts, reason), reason);
+        BOOST_REQUIRE_MESSAGE(state.StartBundle(hash, 2, uint256{0xa}, params, reason), reason);
+        BOOST_CHECK_EQUAL(state.BundleMainHeight(), 3);
+        BOOST_CHECK(mainchain.ProposedSince(hash, 3, 10) == !closed_before);
+        // Nothing proposes it after the commitment, well past unproposed_expiry_blocks.
+        Extend(mainchain, 6);
+        BOOST_REQUIRE_MESSAGE(state.ApplyMainEvents(8, mainchain, 3, params, payouts, reason), reason);
+        BOOST_CHECK_EQUAL(state.Bundle().has_value(), !closed_before);
+        BOOST_CHECK_EQUAL(state.LastFailureHeight(), closed_before ? 3 : -1);
+    }
+}
+
 BOOST_AUTO_TEST_CASE(every_proposal_and_close_counts)
 {
     // A bundle closed, forgotten by the mainchain and proposed again is pending again; closes and

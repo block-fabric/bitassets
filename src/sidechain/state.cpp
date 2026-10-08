@@ -260,11 +260,13 @@ bool State::ApplyMainEvents(int main_height, const Mainchain& mainchain, int hei
         }
         // A bundle the mainchain has not proposed unproposed_expiry_blocks after the block that
         // committed to it fails: nobody may ever propose it, and its withdrawals, which no refund can
-        // take back while it is pending, would wait for ever.
+        // take back while it is pending, would wait for ever. A proposal made before the commitment,
+        // by someone who worked the hash out ahead, counts if the bundle is still pending then: the
+        // mainchain would refuse it a second proposal, and the bundle would fail although pending.
         if (height >= params.audit2_height) {
             const int32_t committed{BUNDLE_MAIN_HEIGHT.Get(*m_view)};
             if (const auto bundle{Bundle()}; bundle && committed >= 0 && int64_t{h} - committed >= params.unproposed_expiry_blocks &&
-                                             !mainchain.ProposedBetween(bundle->hash, committed, h)) {
+                                             !mainchain.ProposedSince(bundle->hash, committed, h)) {
                 LAST_FAILURE.Put(Writable(), height);
                 SetBundle(std::nullopt);
             }
@@ -457,7 +459,9 @@ bool State::ConnectBlock(const CBlock& block, int height, const Consensus::Sidec
         commitment = hash;
     }
     if (commitment) {
-        // A bundle the mainchain closed already, before this block was committed, would stay pending for ever.
+        // A bundle the mainchain closed already, before this block was committed, would stay pending for
+        // ever. One proposed ahead and still pending is taken (refusing it would let whoever works the
+        // hash out keep this chain from ever committing to a bundle): its proposal counts (ApplyMainEvents).
         if (const auto closed{mainchain.ClosedHeight(*commitment)}; closed && *closed < *bmm_height) {
             reject_reason = "bad-sc-bundle-closed";
             return false;

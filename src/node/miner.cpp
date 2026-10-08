@@ -257,7 +257,9 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
         std::optional<uint256> bundle_hash;
         std::vector<COutPoint> bundled;
         const auto bundle{side.NextBundle(nHeight, pindexPrev->GetBlockHash(), side_params, &bundled, main_pending)};
-        // Not a bundle the mainchain has closed already: the block would be invalid.
+        // Not a bundle the mainchain has closed already: the block would be invalid. One proposed ahead
+        // and still pending is fine, as in State::ConnectBlock (all closes on record are before the
+        // next mainchain block, which commits to this one).
         if (bundle && !mainchain.ClosedHeight(bundle->GetHash().ToUint256())) {
             // A bundle takes its withdrawals out of reach of refunds. Someone who just made a
             // withdrawal can still take it back: while every withdrawal of the bundle is recent, the

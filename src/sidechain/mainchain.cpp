@@ -132,6 +132,17 @@ bool Mainchain::ProposedBetween(const uint256& hash, int from, int to) const
     return at != it->second.end() && *at <= to;
 }
 
+bool Mainchain::ProposedSince(const uint256& hash, int committed, int to) const
+{
+    LOCK(m_mutex);
+    // Pending after the block before the commitment: proposed before it, and not closed since.
+    if (PendingAfter(hash, committed - 1)) return true;
+    const auto it{m_proposed.find(hash)};
+    if (it == m_proposed.end()) return false;
+    const auto at{it->second.lower_bound(committed)};
+    return at != it->second.end() && *at <= to;
+}
+
 void Mainchain::IndexEvents(const MainBlock& block, int height, bool add)
 {
     AssertLockHeld(m_mutex);
