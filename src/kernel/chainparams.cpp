@@ -240,6 +240,9 @@ public:
         // Set when the slot activates on the mainchain: the height of the block that activated it.
         consensus.sidechain.main_activation_height = 0;
         consensus.sidechain.audit2_height = 0;
+        // A tenth of the mainchain's withdrawal_min_score (64800); proposals within a day.
+        consensus.sidechain.pending_min_score = 6480;
+        consensus.sidechain.unproposed_expiry_blocks = 1440;
         consensus.coinbase_maturity = 0; // what a block pays (deposits, fees) can be spent in the next
     }
 };
@@ -346,6 +349,9 @@ public:
         // The height of the mainchain block that activated the slot; nothing is left out at 0.
         consensus.sidechain.main_activation_height = 0;
         consensus.sidechain.audit2_height = 999999999; // AUDIT2_TESTNET: set at deploy
+        // A tenth of the testnet mainchain's withdrawal_min_score (300); proposals within an hour.
+        consensus.sidechain.pending_min_score = 30;
+        consensus.sidechain.unproposed_expiry_blocks = 60;
         consensus.coinbase_maturity = 0; // what a block pays (deposits, fees) can be spent in the next
     }
 };
@@ -456,6 +462,9 @@ public:
                        .message_start = {0x5c, 0x1d, 0xec, 0x03}, .default_port = 39655, .bech32_hrp = "tsc"});
         consensus.sidechain.main_activation_height = 0;
         consensus.sidechain.audit2_height = 0;
+        // The Chains signet has the rules of its main network.
+        consensus.sidechain.pending_min_score = 6480;
+        consensus.sidechain.unproposed_expiry_blocks = 1440;
         consensus.coinbase_maturity = 0; // what a block pays (deposits, fees) can be spent in the next
     }
 };
@@ -517,6 +526,9 @@ public:
             consensus.sidechain.slot = *opts.sidechain_slot;
             consensus.sidechain.bundle_retry_delay = 5;
             consensus.sidechain.audit2_height = 0;
+            // A tenth of the regtest mainchain's withdrawal_min_score (30).
+            consensus.sidechain.pending_min_score = 3;
+            consensus.sidechain.unproposed_expiry_blocks = 20;
             // A sidechain has no sidechains of its own.
             consensus.drivechain.max_sidechains = 0;
             consensus.coinbase_maturity = 0;
