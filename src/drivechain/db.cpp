@@ -30,6 +30,9 @@ constexpr uint8_t DB_FORMAT_VERSION{'v'};
 //! Version of the snapshot of the sidechain database; a snapshot of another one is not read.
 constexpr uint32_t STATE_VERSION{3};
 
+//! Size of the batches Wipe erases with.
+constexpr size_t WIPE_BATCH_BYTES{1 << 20};
+
 /** Key of an escrow change; big endian so that the database orders the changes of a sidechain by position in the chain. */
 struct DepositKey {
     SidechainId slot{0};
@@ -135,22 +138,22 @@ void Database::WriteFormatVersion()
 
 void Database::Wipe()
 {
-    // In batches: a database that grew for long would not fit in memory as one.
-    while (true) {
-        std::vector<RawKey> keys;
-        {
-            const std::unique_ptr<CDBIterator> it{m_db.NewIterator()};
-            for (it->SeekToFirst(); it->Valid() && keys.size() < 10'000; it->Next()) {
-                RawKey key;
-                if (!it->GetKey(key)) break;
-                keys.push_back(std::move(key));
-            }
+    // One pass of one iterator, which reads the database as it was when it was made, erasing in
+    // batches as it goes: a database that grew for long would not fit in memory as one batch, and
+    // starting over from the first key after each batch would step over the tombstones of all the
+    // keys erased before it, every time.
+    const std::unique_ptr<CDBIterator> it{m_db.NewIterator()};
+    CDBBatch batch{m_db};
+    for (it->SeekToFirst(); it->Valid(); it->Next()) {
+        RawKey key;
+        if (!it->GetKey(key)) break;
+        batch.Erase(key);
+        if (batch.ApproximateSize() >= WIPE_BATCH_BYTES) {
+            m_db.WriteBatch(batch);
+            batch.Clear();
         }
-        if (keys.empty()) break;
-        CDBBatch batch{m_db};
-        for (const RawKey& key : keys) batch.Erase(key);
-        m_db.WriteBatch(batch);
     }
+    m_db.WriteBatch(batch, /*fSync=*/true);
 }
 
 bool Database::WriteBlock(const uint256& block_hash, int height, const BlockUndo& undo, const std::vector<Deposit>& deposits, bool keep_undo)
