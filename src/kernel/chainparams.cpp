@@ -234,7 +234,7 @@ public:
         consensus.drivechain.single_payout_height = 7500;
         consensus.drivechain.idle_expiry_height = 7500;
         consensus.drivechain.idle_expiry_blocks = 30;
-        consensus.drivechain.audit2_height = 9437; // audit 2 rules on the test network: moved out while the third audit's fixes are made
+        consensus.drivechain.audit2_height = 7955; // audits 2 and 3 on the test network, 300 blocks after the deploy
         consensus.drivechain.upvote_expiry_blocks = 30;
         consensus.drivechain.unvoted_forget_blocks = 60;
         consensus.fPowAllowMinDifficultyBlocks = true;
