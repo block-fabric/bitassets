@@ -917,7 +917,8 @@ RPCMethod getsidechainevents()
     {
         LOCK(::cs_main);
         const CChain& chain{chainman.ActiveChain()};
-        for (int height{first}; height < first + count && height <= chain.Height(); ++height) {
+        // Counted from `first`, which may be near the largest int: first + count would overflow.
+        for (int height{first}; height <= chain.Height() && height - first < count; ++height) {
             wanted.emplace_back(chain[height], chain[height]->GetBlockPos());
         }
     }

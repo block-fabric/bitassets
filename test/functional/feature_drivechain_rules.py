@@ -82,6 +82,8 @@ class DrivechainRulesTest(BitcoinTestFramework):
         assert_raises_rpc_error(-8, "count must not be negative", node.listsidechaindeposits, SLOT, None, -1)
         assert_raises_rpc_error(-8, "The height must not be negative", node.getsidechainevents, SLOT, -1)
         assert_raises_rpc_error(-8, "The count must be between 1 and 2000", node.getsidechainevents, SLOT, 1, 0)
+        # Heights past the tip are left out, up to the largest one (first + count does not overflow).
+        assert_equal(node.getsidechainevents(SLOT, 2**31 - 1, 2000), [])
         assert_raises_rpc_error(-8, "The number of blocks must be between 1 and 1000", node.getaveragefee, 0)
         assert node.getaveragefee() is not None
         # A block that is not in the active chain.
