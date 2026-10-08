@@ -332,7 +332,7 @@ RPCMethod reserveasset()
     if (!pwallet) return UniValue::VNULL;
     const std::string name{request.params[0].get_str()};
     if (!bitassets::IsAssetName(name)) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("A name is 1 to %u printable characters, without a space at either end", bitassets::MAX_NAME_TEXT_SIZE));
-    if (ToUpper(name) == "CHN") throw JSONRPCError(RPC_INVALID_PARAMETER, "CHN is the coin of the chain");
+    if (bitassets::ReadsAsAnotherAsset(name)) throw JSONRPCError(RPC_INVALID_PARAMETER, "The name reads as another asset (CHN, a number such as 1739-0029, or \"0x\" and a hash)");
     const AssetId asset{bitassets::HashName(name)};
     if (pwallet->chain().getBitAsset(asset)) throw JSONRPCError(RPC_INVALID_PARAMETER, "An asset of this name is registered");
     const CTxDestination dest{NewDestination(*pwallet, ReservationLabel(name))};
@@ -377,6 +377,7 @@ RPCMethod registerasset()
     const std::string name{request.params[0].get_str()};
     const AssetId asset{bitassets::HashName(name)};
     if (pwallet->chain().getBitAsset(asset)) throw JSONRPCError(RPC_INVALID_PARAMETER, "An asset of this name is registered");
+    if (bitassets::ReadsAsAnotherAsset(name) && pwallet->chain().getBitAssetsAudit2()) throw JSONRPCError(RPC_INVALID_PARAMETER, "The name reads as another asset (CHN, a number such as 1739-0029, or \"0x\" and a hash)");
     const int decimals{request.params[2].isNull() ? 0 : request.params[2].getInt<int>()};
     if (decimals < 0 || decimals > bitassets::MAX_DECIMALS) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("The decimals are from 0 to %u", bitassets::MAX_DECIMALS));
     const uint64_t supply{bitassets::ParseUnits(request.params[1], decimals, /*allow_zero=*/true)};
@@ -457,6 +458,8 @@ RPCMethod listmyassets()
                 {RPCResult::Type::STR_HEX, "pool", "The pool"},
                 {RPCResult::Type::STR, "asset_a", ""},
                 {RPCResult::Type::STR, "asset_b", ""},
+                {RPCResult::Type::STR_HEX, "asset_a_id", "The hash of the first asset (null for CHN)"},
+                {RPCResult::Type::STR_HEX, "asset_b_id", "The hash of the second"},
                 {RPCResult::Type::NUM, "shares", "The shares held"},
                 {RPCResult::Type::NUM, "percent", "Of the pool"},
                 {RPCResult::Type::NUM, "value_a", "What they would take out of the first asset"},
@@ -558,6 +561,8 @@ RPCMethod listmyassets()
         obj.pushKV("pool", id.GetHex());
         obj.pushKV("asset_a", LabelOfAsset(*pwallet, flip ? pool->asset1 : pool->asset0));
         obj.pushKV("asset_b", LabelOfAsset(*pwallet, flip ? pool->asset0 : pool->asset1));
+        obj.pushKV("asset_a_id", (flip ? pool->asset1 : pool->asset0).GetHex());
+        obj.pushKV("asset_b_id", (flip ? pool->asset0 : pool->asset1).GetHex());
         obj.pushKV("shares", held);
         UniValue percent;
         percent.setNumStr(strprintf("%.4f", pool->shares ? 100.0 * held / pool->shares : 0.0));

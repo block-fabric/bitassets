@@ -77,6 +77,9 @@ class BitAssetsTest(SidechainTest):
         assert_equal(side.getbitassetsinfo()["assets"], 1)
         # Taken.
         assert_raises_rpc_error(-8, "is registered", other.reserveasset, "GOLD")
+        # Names that read as another asset: CHN, a number, a hash.
+        for name in ["CHN", "chn", gold["seq"], "1739-0029", "0x" + gold["asset"][:16], "0xGOLD"]:
+            assert_raises_rpc_error(-8, "reads as another asset", other.reserveasset, name)
 
         self.log.info("An asset without supply yet, and a private one")
         side.reserveasset("SILVER")

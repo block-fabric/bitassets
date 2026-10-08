@@ -24,6 +24,7 @@
 #include <QListWidget>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QRegularExpressionValidator>
 #include <QScrollArea>
 #include <QSettings>
@@ -203,17 +204,37 @@ QHBoxLayout* Row(std::initializer_list<QWidget*> widgets, std::initializer_list<
 /** The names this page reserved and will register, per wallet: a JSON object each. */
 QString PendingKey(const QString& wallet) { return QStringLiteral("BitAssets/pending/%1").arg(wallet); }
 
-/** Whether a name can be an asset's: 1 to 64 printable characters, no space at either end, not CHN. */
+/**
+ * Whether a name can be an asset's: 1 to 64 printable characters, no space at either end, and not one
+ * that reads as another asset (CHN, a number such as 1739-0029, "0x" and a hash): as the rules say.
+ */
 bool GoodName(const QString& name)
 {
     if (name.isEmpty() || name.size() > 64 || name.front() == QLatin1Char(' ') || name.back() == QLatin1Char(' ')) return false;
     if (name.compare(QStringLiteral("CHN"), Qt::CaseInsensitive) == 0) return false;
+    if (name.startsWith(QStringLiteral("0x"), Qt::CaseInsensitive)) return false;
+    static const QRegularExpression number{QStringLiteral("^[0-9]{4}-[0-9]{4}(-[0-9]{4})?$")};
+    if (number.match(name).hasMatch()) return false;
     return std::all_of(name.begin(), name.end(), [](QChar c) { return c.unicode() >= 0x20 && c.unicode() <= 0x7E; });
 }
 
-void SelectText(QComboBox* combo, const QString& text)
+/**
+ * How the page names an asset to the commands: "CHN", or "0x" and its hash; never by its label, which
+ * an asset registered under a name like "CHN" or like a number of another shares.
+ */
+QString AssetArg(const UniValue& hex)
 {
-    const int index{combo->findText(text)};
+    const std::string id{hex.get_str()};
+    if (id.find_first_not_of('0') == std::string::npos) return QStringLiteral("CHN");
+    return QStringLiteral("0x") + QString::fromStdString(id);
+}
+
+/** The asset picked in a list of assets: its AssetArg (the label is what is shown). */
+QString ArgOf(const QComboBox* combo) { return combo->currentData().toString(); }
+
+void SelectAsset(QComboBox* combo, const QString& arg)
+{
+    const int index{combo->findData(arg)};
     if (index >= 0) combo->setCurrentIndex(index);
 }
 } // namespace
@@ -344,28 +365,31 @@ void BitAssetsPage::refreshAssetChoices()
 {
     const auto assets{call("listassets", Args({1000, 0}), false, true)};
     if (!assets) return;
-    QStringList labels{QStringLiteral("CHN")};
+    // Each asset by its id: labels may look alike, the ids never do.
+    QStringList labels{QStringLiteral("CHN")}, args{QStringLiteral("CHN")};
     std::map<QString, int> decimals{{QStringLiteral("CHN"), 8}};
     for (const UniValue& a : assets->getValues()) {
-        const QString label{Text(a["label"])};
-        labels << label;
-        decimals[label] = a["decimals"].getInt<int>();
+        const QString arg{AssetArg(a["asset"])};
+        labels << Text(a["label"]);
+        args << arg;
+        decimals[arg] = a["decimals"].getInt<int>();
     }
-    if (labels == m_asset_labels) return;
+    if (labels == m_asset_labels && args == m_asset_args) return;
     m_asset_labels = labels;
+    m_asset_args = args;
     m_decimals = decimals;
     for (QComboBox* combo : {m_pay_asset, m_get_asset, m_lq_a, m_lq_b, m_sell_asset, m_sell_for}) {
-        const QString current{combo->currentText()};
+        const QString current{ArgOf(combo)};
         const QSignalBlocker blocker{combo};
         combo->clear();
-        combo->addItems(labels);
-        if (!current.isEmpty()) SelectText(combo, current);
+        for (int i{0}; i < labels.size(); ++i) combo->addItem(labels[i], args[i]);
+        if (!current.isEmpty()) SelectAsset(combo, current);
     }
     // Sensible starting pairs: CHN for the first asset.
     if (labels.size() > 1) {
-        if (m_get_asset->currentText() == m_pay_asset->currentText()) m_get_asset->setCurrentIndex(1);
-        if (m_lq_a->currentText() == m_lq_b->currentText()) m_lq_a->setCurrentIndex(1);
-        if (m_sell_asset->currentText() == m_sell_for->currentText()) m_sell_asset->setCurrentIndex(1);
+        if (ArgOf(m_get_asset) == ArgOf(m_pay_asset)) m_get_asset->setCurrentIndex(1);
+        if (ArgOf(m_lq_a) == ArgOf(m_lq_b)) m_lq_a->setCurrentIndex(1);
+        if (ArgOf(m_sell_asset) == ArgOf(m_sell_for)) m_sell_asset->setCurrentIndex(1);
     }
 }
 
@@ -595,8 +619,8 @@ void BitAssetsPage::showTransferPanel()
     if (m_holdings.isObject()) {
         for (const UniValue& a : m_holdings["assets"].getValues()) {
             if (a["balance"].get_real() <= 0) continue;
-            asset->addItem(Text(a["label"]), QString{QStringLiteral("0x") + Text(a["asset"])});
-            balances[Text(a["label"])] = Text(a["balance"]);
+            asset->addItem(Text(a["label"]), AssetArg(a["asset"]));
+            balances[AssetArg(a["asset"])] = Text(a["balance"]);
         }
     }
     auto* held{Dim(QString{}, panel)};
@@ -620,18 +644,18 @@ void BitAssetsPage::showTransferPanel()
     layout->addWidget(Dim(tr("CHN itself is sent from the Send page of the wallet."), panel));
     layout->addStretch();
     const auto show_held{[asset, held, balances] {
-        if (const auto it{balances.find(asset->currentText())}; it != balances.end()) held->setText(QObject::tr("You hold %1 %2").arg(Grouped(it->second), it->first));
+        if (const auto it{balances.find(ArgOf(asset))}; it != balances.end()) held->setText(QObject::tr("You hold %1 %2").arg(Grouped(it->second), asset->currentText()));
     }};
     show_held();
     connect(asset, &QComboBox::currentTextChanged, held, show_held);
     connect(all, &QPushButton::clicked, amount, [asset, amount, balances] {
-        if (const auto it{balances.find(asset->currentText())}; it != balances.end()) amount->setText(it->second);
+        if (const auto it{balances.find(ArgOf(asset))}; it != balances.end()) amount->setText(it->second);
     });
     connect(send, &QPushButton::clicked, this, [this, asset, to, amount] {
         const QString label{asset->currentText()};
         if (to->text().trimmed().isEmpty() || amount->text().isEmpty()) return say(tr("Give an address and an amount."), true);
         if (!confirm(tr("Send %1").arg(label), tr("Send %1 %2 to %3?").arg(amount->text(), label, to->text().trimmed()))) return;
-        if (call("sendasset", Args({to->text().trimmed().toStdString(), asset->currentData().toString().toStdString(), amount->text().toStdString()}), true)) {
+        if (call("sendasset", Args({to->text().trimmed().toStdString(), ArgOf(asset).toStdString(), amount->text().toStdString()}), true)) {
             say(tr("Sent %1 %2: it arrives with the next block.").arg(amount->text(), label));
             amount->clear();
             to->clear();
@@ -696,7 +720,7 @@ void BitAssetsPage::showCreatePanel()
         if (text.isEmpty()) return availability->clear();
         if (!GoodName(text)) {
             colour(RED);
-            return availability->setText(tr("A name is 1 to 64 plain characters, without a space at either end, and not CHN"));
+            return availability->setText(tr("A name is 1 to 64 plain characters, without a space at either end, and does not read as another asset (CHN, a number like 1739-0029, \"0x\")"));
         }
         if (call("getasset", Args({text.toStdString()}), false, true)) {
             colour(RED);
@@ -819,16 +843,16 @@ void BitAssetsPage::showAssetPanel(const UniValue& holding)
         auto* trade{new QPushButton(tr("Trade"), panel)};
         market->addWidget(trade);
         layout->addLayout(market);
-        connect(trade, &QPushButton::clicked, this, [this, label] { tradeAsset(label); });
+        connect(trade, &QPushButton::clicked, this, [this, id] { tradeAsset(id); });
     } else {
         auto* market{new QHBoxLayout};
         market->addWidget(Dim(tr("No pool trades it for CHN yet."), panel), 1);
         auto* pool_button{new QPushButton(tr("Make a pool"), panel)};
         market->addWidget(pool_button);
         layout->addLayout(market);
-        connect(pool_button, &QPushButton::clicked, this, [this, label] {
-            SelectText(m_lq_a, label);
-            SelectText(m_lq_b, QStringLiteral("CHN"));
+        connect(pool_button, &QPushButton::clicked, this, [this, id] {
+            SelectAsset(m_lq_a, id);
+            SelectAsset(m_lq_b, QStringLiteral("CHN"));
             m_tabs->setCurrentIndex(1);
             m_lq_amount_a->setFocus();
         });
@@ -983,6 +1007,7 @@ void BitAssetsPage::showReservationPanel(const UniValue& reservation)
 void BitAssetsPage::showLiquidityPanel(const UniValue& position)
 {
     const QString a{Text(position["asset_a"])}, b{Text(position["asset_b"])};
+    const QString a_arg{AssetArg(position["asset_a_id"])}, b_arg{AssetArg(position["asset_b_id"])};
     auto* panel{new QWidget};
     auto* layout{new QVBoxLayout(panel)};
     auto* title{new QLabel(tr("%1 / %2 pool").arg(a, b), panel)};
@@ -1006,15 +1031,15 @@ void BitAssetsPage::showLiquidityPanel(const UniValue& position)
     layout->addLayout(row);
     layout->addWidget(Dim(tr("CHN taken out is paid by the next block's coinbase; assets come as coins of the transaction."), panel));
     layout->addStretch();
-    connect(remove, &QPushButton::clicked, this, [this, percent, a, b] {
+    connect(remove, &QPushButton::clicked, this, [this, percent, a, b, a_arg, b_arg] {
         if (!confirm(tr("Take liquidity out"), tr("Take %1% of your shares of the %2 / %3 pool out?").arg(percent->value()).arg(a, b))) return;
-        if (const auto r{call("removeliquidity", Args({a.toStdString(), b.toStdString(), percent->value()}), true)}) {
+        if (const auto r{call("removeliquidity", Args({a_arg.toStdString(), b_arg.toStdString(), percent->value()}), true)}) {
             say(tr("Taking out about %1 %2 and %3 %4, with the next block.").arg(Num((*r)["amount_a"]), a, Num((*r)["amount_b"]), b));
         }
     });
-    connect(add, &QPushButton::clicked, this, [this, a, b] {
-        SelectText(m_lq_a, a);
-        SelectText(m_lq_b, b);
+    connect(add, &QPushButton::clicked, this, [this, a_arg, b_arg] {
+        SelectAsset(m_lq_a, a_arg);
+        SelectAsset(m_lq_b, b_arg);
         m_tabs->setCurrentIndex(1);
         m_lq_amount_a->setFocus();
     });
@@ -1140,17 +1165,18 @@ QWidget* BitAssetsPage::createTradeTab()
     connect(m_pay_amount, &QLineEdit::textChanged, m_quote_timer, qOverload<>(&QTimer::start));
     connect(m_slippage, &QDoubleSpinBox::valueChanged, m_quote_timer, qOverload<>(&QTimer::start));
     connect(flip, &QPushButton::clicked, this, [this] {
-        const QString pay{m_pay_asset->currentText()}, get{m_get_asset->currentText()};
-        SelectText(m_pay_asset, get);
-        SelectText(m_get_asset, pay);
+        const QString pay{ArgOf(m_pay_asset)}, get{ArgOf(m_get_asset)};
+        SelectAsset(m_pay_asset, get);
+        SelectAsset(m_get_asset, pay);
     });
     connect(m_swap, &QPushButton::clicked, this, [this] {
         const QString pay{m_pay_asset->currentText()}, get{m_get_asset->currentText()}, amount{m_pay_amount->text()};
+        const QString pay_arg{ArgOf(m_pay_asset)}, get_arg{ArgOf(m_get_asset)};
         if (amount.isEmpty()) return;
         // A noticeable price impact is asked about, with the numbers.
         if (m_last_impact > 2 && !confirm(tr("Price impact"), tr("This trade moves the pool's price: you pay %1% more than its current price for %2 (%3 for %4 %5). Swap anyway?")
                                                                   .arg(QString::number(m_last_impact, 'f', 2), get, m_get_amount->text(), amount, pay), true)) return;
-        if (const auto r{call("swapasset", Args({pay.toStdString(), amount.toStdString(), get.toStdString(), m_slippage->value()}), true)}) {
+        if (const auto r{call("swapasset", Args({pay_arg.toStdString(), amount.toStdString(), get_arg.toStdString(), m_slippage->value()}), true)}) {
             say(tr("Swapping %1 %2 for about %3 %4 (at least %5) with the next block.").arg(amount, pay, Num((*r)["quote"]), get, Num((*r)["min_out"])));
             m_pay_amount->clear();
         }
@@ -1165,10 +1191,11 @@ QWidget* BitAssetsPage::createTradeTab()
     connect(m_lq_amount_b, &QLineEdit::textEdited, m_lq_timer, qOverload<>(&QTimer::start));
     connect(add, &QPushButton::clicked, this, [this] {
         const QString a{m_lq_a->currentText()}, b{m_lq_b->currentText()};
-        if (a == b || m_lq_amount_a->text().isEmpty()) return say(tr("Pick two different assets and an amount."), true);
-        UniValue args{Args({a.toStdString(), m_lq_amount_a->text().toStdString(), b.toStdString()})};
+        const QString a_arg{ArgOf(m_lq_a)}, b_arg{ArgOf(m_lq_b)};
+        if (a_arg == b_arg || m_lq_amount_a->text().isEmpty()) return say(tr("Pick two different assets and an amount."), true);
+        UniValue args{Args({a_arg.toStdString(), m_lq_amount_a->text().toStdString(), b_arg.toStdString()})};
         // Into a pool there is, the wallet works the second amount out at the pool's price.
-        const bool exists{call("getpool", Args({a.toStdString(), b.toStdString()}), false, true).has_value()};
+        const bool exists{call("getpool", Args({a_arg.toStdString(), b_arg.toStdString()}), false, true).has_value()};
         if (!exists) {
             if (m_lq_amount_b->text().isEmpty()) return say(tr("A new pool: give both amounts, which set its price."), true);
             args.push_back(m_lq_amount_b->text().toStdString());
@@ -1184,18 +1211,18 @@ QWidget* BitAssetsPage::createTradeTab()
     connect(m_pools, &QTableWidget::cellClicked, this, [this](int row) {
         const QStringList pair{m_pools->item(row, 0)->data(Qt::UserRole).toStringList()};
         if (pair.size() != 2) return;
-        SelectText(m_pay_asset, pair[1]);
-        SelectText(m_get_asset, pair[0]);
-        SelectText(m_lq_a, pair[0]);
-        SelectText(m_lq_b, pair[1]);
+        SelectAsset(m_pay_asset, pair[1]);
+        SelectAsset(m_get_asset, pair[0]);
+        SelectAsset(m_lq_a, pair[0]);
+        SelectAsset(m_lq_b, pair[1]);
     });
     return tab;
 }
 
-void BitAssetsPage::tradeAsset(const QString& label)
+void BitAssetsPage::tradeAsset(const QString& asset)
 {
-    SelectText(m_pay_asset, QStringLiteral("CHN"));
-    SelectText(m_get_asset, label);
+    SelectAsset(m_pay_asset, QStringLiteral("CHN"));
+    SelectAsset(m_get_asset, asset);
     m_tabs->setCurrentIndex(1);
     m_pay_amount->setFocus();
 }
@@ -1204,11 +1231,12 @@ void BitAssetsPage::updateQuote()
 {
     if (!m_client_model) return;
     const QString pay{m_pay_asset->currentText()}, get{m_get_asset->currentText()}, amount{m_pay_amount->text()};
+    const QString pay_arg{ArgOf(m_pay_asset)}, get_arg{ArgOf(m_get_asset)};
     m_swap->setEnabled(false);
     m_get_amount->setText(QStringLiteral("—"));
-    if (pay.isEmpty() || get.isEmpty()) return m_quote_line->clear();
-    if (pay == get) return m_quote_line->setText(tr("Pick two different assets."));
-    const auto pool{call("getpool", Args({get.toStdString(), pay.toStdString()}), false, true)};
+    if (pay_arg.isEmpty() || get_arg.isEmpty()) return m_quote_line->clear();
+    if (pay_arg == get_arg) return m_quote_line->setText(tr("Pick two different assets."));
+    const auto pool{call("getpool", Args({get_arg.toStdString(), pay_arg.toStdString()}), false, true)};
     if (!pool) {
         m_quote_line->setText(tr("<span style='color:%1'>No pool trades %2 for %3 yet.</span> Make one with Add liquidity.").arg(QLatin1String(ORANGE), pay, get));
         return;
@@ -1223,11 +1251,11 @@ void BitAssetsPage::updateQuote()
     const QString spot{tr("1 %1 = %2 %3").arg(get, Text((*pool)["price"]), pay)};
     if (amount.isEmpty() || amount.toDouble() == 0) return m_quote_line->setText(spot);
     QString error;
-    const auto quote{NodeRpc::Call(m_client_model, "quoteswap", Args({pay.toStdString(), amount.toStdString(), get.toStdString()}), error)};
+    const auto quote{NodeRpc::Call(m_client_model, "quoteswap", Args({pay_arg.toStdString(), amount.toStdString(), get_arg.toStdString()}), error)};
     if (!quote) return m_quote_line->setText(QStringLiteral("<span style='color:%1'>%2</span>").arg(QLatin1String(RED), error.toHtmlEscaped()));
     m_get_amount->setText(Num((*quote)["amount_out"]));
     const double impact{(*quote)["price_impact"].get_real()};
-    const int decimals{m_decimals.contains(get) ? m_decimals.at(get) : 0};
+    const int decimals{m_decimals.contains(get_arg) ? m_decimals.at(get_arg) : 0};
     const double least{QString::fromStdString((*quote)["amount_out"].getValStr()).toDouble() * (1 - m_slippage->value() / 100)};
     m_last_impact = impact;
     m_quote_line->setText(tr("%1 · price impact <span style='color:%2'>%3%</span> · at least %4 %5 · pool fee %6 %7")
@@ -1246,8 +1274,9 @@ void BitAssetsPage::updateLiquidityQuote()
 {
     if (!m_client_model) return;
     const QString a{m_lq_a->currentText()}, b{m_lq_b->currentText()};
-    if (a.isEmpty() || b.isEmpty() || a == b) return m_lq_line->setText(tr("Pick two different assets."));
-    const auto pool{call("getpool", Args({a.toStdString(), b.toStdString()}), false, true)};
+    const QString a_arg{ArgOf(m_lq_a)}, b_arg{ArgOf(m_lq_b)};
+    if (a_arg.isEmpty() || b_arg.isEmpty() || a_arg == b_arg) return m_lq_line->setText(tr("Pick two different assets."));
+    const auto pool{call("getpool", Args({a_arg.toStdString(), b_arg.toStdString()}), false, true)};
     if (!pool) {
         m_lq_amount_b->setReadOnly(false);
         m_lq_amount_b->setPlaceholderText(tr("Amount"));
@@ -1260,7 +1289,7 @@ void BitAssetsPage::updateLiquidityQuote()
     m_lq_amount_b->setPlaceholderText(tr("Worked out from the pool's price"));
     const double price{(*pool)["price"].get_real()};
     const double qa{m_lq_amount_a->text().toDouble()};
-    const int decimals{m_decimals.contains(b) ? m_decimals.at(b) : 0};
+    const int decimals{m_decimals.contains(b_arg) ? m_decimals.at(b_arg) : 0};
     m_lq_amount_b->setText(qa > 0 ? QString::number(qa * price, 'f', decimals) : QString{});
     m_lq_line->setText(tr("1 %1 = %2 %3 · the pool holds %4 %1 and %5 %3").arg(a, Text((*pool)["price"]), b, Num((*pool)["reserve_a"]), Num((*pool)["reserve_b"])));
 }
@@ -1278,7 +1307,7 @@ void BitAssetsPage::refreshTrade()
         m_pools->insertRow(row);
         const QString a{Text(p["asset_a"])}, b{Text(p["asset_b"])};
         auto* pair{Item(QStringLiteral("%1 / %2").arg(a, b))};
-        pair->setData(Qt::UserRole, QStringList{a, b});
+        pair->setData(Qt::UserRole, QStringList{AssetArg(p["asset_a_id"]), AssetArg(p["asset_b_id"])});
         m_pools->setItem(row, 0, pair);
         if (p["abandoned"].isTrue()) {
             auto* empty{Item(tr("no liquidity: %1 %2 · %3 %4 kept for good").arg(Num(p["reserve_a"]), a, Num(p["reserve_b"]), b))};
@@ -1368,13 +1397,14 @@ QWidget* BitAssetsPage::createAuctionsTab()
     });
     connect(sell, &QPushButton::clicked, this, [this] {
         const QString base{m_sell_asset->currentText()}, quote{m_sell_for->currentText()};
-        if (base == quote) return say(tr("An auction sells one asset for another."), true);
+        const QString base_arg{ArgOf(m_sell_asset)}, quote_arg{ArgOf(m_sell_for)};
+        if (base_arg == quote_arg) return say(tr("An auction sells one asset for another."), true);
         if (m_sell_amount->text().isEmpty() || m_sell_start->text().isEmpty() || m_sell_end->text().isEmpty()) return say(tr("Give the amount and both prices."), true);
         if (m_sell_end->text().toDouble() > m_sell_start->text().toDouble()) return say(tr("The price falls: the end price is at most the start price."), true);
         if (!confirm(tr("Start an auction"), tr("Sell %1 %2 for %3, from %4 down to %5 %3 for all of it, over %6 blocks?")
                                                   .arg(m_sell_amount->text(), base, quote, m_sell_start->text(), m_sell_end->text())
                                                   .arg(m_sell_duration->value()))) return;
-        if (call("createauction", Args({base.toStdString(), m_sell_amount->text().toStdString(), quote.toStdString(), m_sell_start->text().toStdString(),
+        if (call("createauction", Args({base_arg.toStdString(), m_sell_amount->text().toStdString(), quote_arg.toStdString(), m_sell_start->text().toStdString(),
                                         m_sell_end->text().toStdString(), m_sell_duration->value(), m_sell_start_in->value()}), true)) {
             say(tr("The auction starts after the next block. Its receipt, in My assets, collects what it brings in."));
             m_sell_amount->clear();
@@ -1605,10 +1635,10 @@ void BitAssetsPage::showExploreDetail(const QString& asset_id)
             auto* trade{new QPushButton(tr("Trade"), panel)};
             row->addWidget(trade);
             layout->addLayout(row);
-            const QString other{Text(p["asset_b"])};
-            connect(trade, &QPushButton::clicked, this, [this, label, other] {
-                SelectText(m_pay_asset, other);
-                SelectText(m_get_asset, label);
+            const QString other{AssetArg(p["asset_b_id"])};
+            connect(trade, &QPushButton::clicked, this, [this, asset_id, other] {
+                SelectAsset(m_pay_asset, other);
+                SelectAsset(m_get_asset, asset_id);
                 m_tabs->setCurrentIndex(1);
                 m_pay_amount->setFocus();
             });

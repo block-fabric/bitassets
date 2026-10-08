@@ -266,7 +266,38 @@ bool IsAssetName(const std::string& name)
     return std::all_of(name.begin(), name.end(), [](char c) { return c >= 0x20 && c <= 0x7E; });
 }
 
+bool ReadsAsAnotherAsset(const std::string& name)
+{
+    const auto lower{[](char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c; }};
+    if (name.size() == 3 && lower(name[0]) == 'c' && lower(name[1]) == 'h' && lower(name[2]) == 'n') return true;
+    if (name.size() >= 2 && name[0] == '0' && lower(name[1]) == 'x') return true;
+    // Groups of four digits, two or three of them.
+    if (name.size() != 9 && name.size() != 14) return false;
+    for (size_t i{0}; i < name.size(); ++i) {
+        const bool dash{i % 5 == 4};
+        if (dash ? name[i] != '-' : (name[i] < '0' || name[i] > '9')) return false;
+    }
+    return true;
+}
+
 namespace {
+/** Whether an asset is CHN by name, in any case. */
+bool IsChnName(const AssetId& asset)
+{
+    static const std::set<AssetId> chn{[] {
+        std::set<AssetId> names;
+        for (int mask{0}; mask < 8; ++mask) {
+            std::string name{"chn"};
+            for (int i{0}; i < 3; ++i) {
+                if (mask & (1 << i)) name[i] = static_cast<char>(name[i] - 'a' + 'A');
+            }
+            names.insert(HashName(name));
+        }
+        return names;
+    }()};
+    return chn.contains(asset);
+}
+
 constexpr uint32_t SEQ_DISPLAY_OFFSET{23071990};
 constexpr uint32_t SEQ_LOW{100000000};
 } // namespace
@@ -884,6 +915,8 @@ std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, s
     } else if (const auto* reg{op ? std::get_if<Register>(op) : nullptr}) {
         // Assets registered before, in this block included, are taken.
         if (HasAsset(reg->name)) return invalid("bad-ba-name-taken");
+        // A name that reads as another asset (CHN, a number, "0x...") would be mistaken for it.
+        if (audit2 && ((reg->text && ReadsAsAnotherAsset(*reg->text)) || IsChnName(reg->name))) return invalid("bad-ba-name-reserved");
         const uint256 implied{ReservationCommitment(reg->name, reg->nonce)};
         std::optional<Txid> reservation;
         // Under the second audit's rules, a reservation bound to the script of its output: nobody but

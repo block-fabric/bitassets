@@ -387,6 +387,12 @@ uint256 ReservationCommitment(const AssetId& name, const uint256& nonce, const C
 uint256 PoolId(const AssetId& a, const AssetId& b);
 /** Whether a name can be published: 1 to MAX_NAME_TEXT_SIZE printable ASCII characters, no space at either end. */
 bool IsAssetName(const std::string& name);
+/**
+ * Whether a name reads as another asset where assets are named (rpcutil's ParseAssetArg): CHN in any
+ * case, a number ("1739-0029", "0001-1739-0029") or "0x" and anything. Under the second audit's rules
+ * no asset is registered under one (a private name is checked as far as it can be: CHN).
+ */
+bool ReadsAsAnotherAsset(const std::string& name);
 
 /** The number of an asset in the order of registration, shown as BitNames shows its numbers. */
 std::string FormatSeq(uint32_t seq);

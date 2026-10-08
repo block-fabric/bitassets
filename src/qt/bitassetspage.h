@@ -89,8 +89,8 @@ private:
 
     void updateQuote();
     void updateLiquidityQuote();
-    /** Go to Trade with this asset to buy or sell for CHN. */
-    void tradeAsset(const QString& label);
+    /** Go to Trade with this asset ("0x" and its hash) to buy or sell for CHN. */
+    void tradeAsset(const QString& asset);
 
     NodeRpc::WalletNameFn m_wallet_name;
     ClientModel* m_client_model{nullptr};
@@ -152,8 +152,10 @@ private:
     QTableWidget* m_activity{nullptr};
     std::string m_activity_listed;
 
-    //! The labels of the assets there are, "CHN" first, and their decimals.
+    //! The assets there are, "CHN" first: their labels, how the commands name them ("0x" and the
+    //! hash), and their decimals by that (labels can look alike: "CHN", or a number of another).
     QStringList m_asset_labels;
+    QStringList m_asset_args;
     std::map<QString, int> m_decimals;
 };
 
