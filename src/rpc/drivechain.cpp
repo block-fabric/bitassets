@@ -971,10 +971,19 @@ RPCMethod getsidechainevents()
             wanted.emplace_back(chain[height], chain[height]->GetBlockPos());
         }
     }
-    std::vector<CBlock> blocks(wanted.size());
+    // One block at a time: only the sidechain block its coinbase committed to is kept.
+    std::vector<std::optional<uint256>> bmm(wanted.size());
     for (size_t i{0}; i < wanted.size(); ++i) {
-        if (!chainman.m_blockman.ReadBlock(blocks[i], wanted[i].second, wanted[i].first->GetBlockHash())) {
+        CBlock block;
+        if (!chainman.m_blockman.ReadBlock(block, wanted[i].second, wanted[i].first->GetBlockHash())) {
             throw JSONRPCError(RPC_MISC_ERROR, strprintf("Block %d is not available (pruned?)", first + static_cast<int>(i)));
+        }
+        for (const CTxOut& out : block.vtx[0]->vout) {
+            const auto accept{drivechain::ParseBmmAcceptScript(out.scriptPubKey)};
+            if (accept && accept->first == id) {
+                bmm[i] = accept->second;
+                break;
+            }
         }
     }
     LOCK(::cs_main);
@@ -991,14 +1000,7 @@ RPCMethod getsidechainevents()
         obj.pushKV("time", pindex->GetBlockTime());
         obj.pushKV("mediantime", pindex->GetMedianTimePast());
 
-        const CBlock& block{blocks[height - first]};
-        for (const CTxOut& out : block.vtx[0]->vout) {
-            const auto accept{drivechain::ParseBmmAcceptScript(out.scriptPubKey)};
-            if (accept && accept->first == id) {
-                obj.pushKV("bmm", accept->second.GetHex());
-                break;
-            }
-        }
+        if (const auto& accepted{bmm[height - first]}) obj.pushKV("bmm", accepted->GetHex());
 
         UniValue deposits(UniValue::VARR);
         for (const drivechain::Deposit& deposit : chainman.m_blockman.m_drivechain_db->ListBlockDeposits(id, height)) {
