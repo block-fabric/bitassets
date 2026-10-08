@@ -12,6 +12,7 @@
 #include <core_io.h>
 #include <interfaces/mining.h>
 #include <logging.h>
+#include <net_processing.h>
 #include <node/context.h>
 #include <node/warnings.h>
 #include <pow.h>
@@ -161,9 +162,10 @@ bool Follower::UpdateRecord(bool may_drop)
     }};
 
     bool changed{false};
-    // Before the record changes, the slot is checked to hold the sidechain this node follows: once
-    // per update, after the mainchain node answered, so that what it answered is no newer than what
-    // the check sees.
+    // Before blocks on record are dropped, which cannot be taken back, the slot is checked to hold the
+    // sidechain this node follows (after the mainchain node answered, so that what it answered is no
+    // newer than what the check sees). Blocks added are checked after (Sync), before anything acts on
+    // them: a node that finds another sidechain stops, and asking first would hold up every new block.
     bool slot_checked{false};
     const auto before_change{[&] {
         if (slot_checked) return;
@@ -289,7 +291,6 @@ bool Follower::UpdateRecord(bool may_drop)
         // All of the answer is read first: one that cannot be read changes nothing.
         std::vector<MainBlock> blocks;
         for (size_t i{first_new}; i < events.size(); ++i) blocks.push_back(ParseMainBlock(events[i]));
-        before_change();
         for (size_t i{first_new}; i < events.size(); ++i) {
             const MainBlock& block{blocks[i - first_new]};
             if (!record.Append(block)) {
@@ -334,15 +335,15 @@ bool Follower::Sync(std::string& error)
     AssertLockNotHeld(::cs_main);
     bool failed{false};
     try {
-        // The first time: whatever the record holds is checked against the slot. Later, UpdateRecord
-        // checks it before it changes the record.
-        CheckSlot(/*record_changed=*/false);
+        bool changed;
         {
             LOCK(m_sync_mutex);
-            UpdateRecord();
+            changed = UpdateRecord();
         }
         // Stopping cut the update short: the record may be partial, nothing to act on.
         if (m_stop) return false;
+        // Blocks added: checked before anything acts on them (UpdateRecord checks before it drops any).
+        CheckSlot(changed);
         {
             // One at a time: two callers acting on the same changes could otherwise invalidate a
             // block after the other found it committed again.
@@ -442,7 +443,13 @@ void Follower::Act()
         // A candidate can only be committed to by the block after the one it was built on.
         std::erase_if(m_candidates, [&](const auto& entry) { return entry.second.main_prev_height < record.Height(); });
     }
-    if (uncommitted.empty() && committed.empty()) return;
+    // Headers that came before the commitment to them was on record (see below).
+    const auto waiting_ready{[&] {
+        LOCK(::cs_main);
+        const Mainchain& record{*chainman.m_mainchain};
+        return std::any_of(chainman.m_bmm_waiting.begin(), chainman.m_bmm_waiting.end(), [&](const auto& entry) { return record.CommittedHeight(entry.first).has_value(); });
+    }};
+    if (uncommitted.empty() && committed.empty() && !waiting_ready()) return;
 
     // A block that lost its commitment is no longer valid, and neither is what was built on it.
     // That includes a block whose commitment moved to another mainchain block in the same update:
@@ -466,20 +473,36 @@ void Follower::Act()
             }
         }
     }
-    // Headers that came before the commitment to them was on record. With the
-    // header accepted, the block is fetched from the peers that announced it.
-    for (const uint256& hash : committed) {
-        std::optional<CBlockHeader> header;
-        {
-            LOCK(::cs_main);
-            if (const auto it{chainman.m_bmm_waiting.find(hash)}; it != chainman.m_bmm_waiting.end()) {
-                header = it->second.header;
-                chainman.m_bmm_waiting.erase(it);
+    // Headers that came before the commitment to them was on record. With the header accepted, the
+    // block is fetched from the peers that announced it. Every one whose commitment is on record now,
+    // not only those of the blocks just added: a header that came while the record was being updated
+    // would otherwise wait for ever.
+    // In the order of their commitments, which is that of the chain: each header follows the one before.
+    std::map<int, std::pair<CBlockHeader, int64_t>> headers;
+    {
+        LOCK(::cs_main);
+        const Mainchain& record{*chainman.m_mainchain};
+        for (auto it{chainman.m_bmm_waiting.begin()}; it != chainman.m_bmm_waiting.end();) {
+            if (const auto height{record.CommittedHeight(it->first)}) {
+                headers.emplace(*height, std::make_pair(it->second.header, it->second.peer));
+                it = chainman.m_bmm_waiting.erase(it);
+            } else {
+                ++it;
             }
         }
-        if (!header) continue;
+    }
+    for (const auto& [_, entry] : headers) {
+        const auto& [header, peer]{entry};
         BlockValidationState state;
-        chainman.ProcessNewBlockHeaders({{*header}}, /*min_pow_checked=*/true, state);
+        const CBlockIndex* pindex{nullptr};
+        if (!chainman.ProcessNewBlockHeaders({{header}}, /*min_pow_checked=*/true, state, &pindex) || !pindex || peer < 0 || !m_node.peerman) continue;
+        // The block, from the peer that announced it: a header with less work than what the peer
+        // announced before (blocks the record made invalid) would not be fetched otherwise.
+        if (!WITH_LOCK(::cs_main, return pindex->nStatus & BLOCK_HAVE_DATA)) {
+            if (const auto fetched{m_node.peerman->FetchBlock(peer, *pindex)}; !fetched) {
+                LogDebug(BCLog::NET, "Block %s, now committed to, not fetched from peer=%d: %s", header.GetHash().ToString(), peer, fetched.error());
+            }
+        }
     }
     for (const auto& block : to_submit) {
         bool new_block{false};
