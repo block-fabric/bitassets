@@ -79,23 +79,35 @@ uint256 SidechainDB::GetHash() const
     return (HashWriter{} << *this).GetHash();
 }
 
-void SidechainDB::SaveSlot(SidechainId id, BlockUndo& undo) const
+BlockUndo::SlotUndo& SidechainDB::SaveSlot(SidechainId id, BlockUndo& undo) const
 {
-    for (const BlockUndo::SlotUndo& saved : undo.slots) {
-        if (saved.id == id) return;
+    for (BlockUndo::SlotUndo& saved : undo.slots) {
+        if (saved.id == id) return saved;
     }
-    BlockUndo::SlotUndo saved;
+    BlockUndo::SlotUndo& saved{undo.slots.emplace_back()};
     saved.id = id;
     if (const Slot* slot{GetSlot(id)}) {
         saved.existed = true;
-        saved.slot = *slot;
+        saved.activation_height = slot->activation_height;
+        saved.has_ctip = slot->has_ctip;
+        saved.ctip = slot->ctip;
     }
-    undo.slots.push_back(std::move(saved));
+    return saved;
+}
+
+void SidechainDB::EraseBundle(Slot& slot, SidechainId id, size_t index, BlockUndo& undo)
+{
+    BlockUndo::BundleChange& change{undo.bundle_changes.emplace_back()};
+    change.type = BlockUndo::BundleChange::Type::ERASE;
+    change.id = id;
+    change.index = static_cast<uint32_t>(index);
+    change.bundle = slot.bundles[index];
+    slot.bundles.erase(slot.bundles.begin() + index);
 }
 
 void SidechainDB::CloseBundle(SidechainId id, const uint256& hash, bool paid, BlockUndo& undo)
 {
-    if (m_closed.emplace(std::pair{id, hash}, paid).second) undo.closed.emplace_back(id, hash);
+    if (m_closed.emplace(std::pair{id, hash}, paid).second) undo.closed.push_back({id, hash, paid});
 }
 
 void SidechainDB::RemoveProposal(size_t index, BlockUndo& undo)
@@ -192,12 +204,12 @@ bool SidechainDB::ConnectTx(const CTransaction& tx, const Consensus::DrivechainP
         if (bundle == slot.bundles.end()) return invalid("bad-dc-withdrawal-unknown");
         if (bundle->score < static_cast<uint32_t>(params.withdrawal_min_score)) return invalid("bad-dc-withdrawal-score");
 
-        slot.bundles.erase(bundle);
+        EraseBundle(slot, id, bundle - slot.bundles.begin(), undo);
         CloseBundle(id, *blind_hash, /*paid=*/true, undo);
         if (height >= params.single_payout_height) {
             // The other bundles of the sidechain are copies holding the same withdrawals: they fail.
             for (const Bundle& other : slot.bundles) CloseBundle(id, other.hash, /*paid=*/false, undo);
-            slot.bundles.clear();
+            for (size_t i{slot.bundles.size()}; i-- > 0;) EraseBundle(slot, id, i, undo);
         }
         destination = WITHDRAWAL_RETURN_DEST;
         paid_bundle = *blind_hash;
@@ -368,14 +380,16 @@ bool SidechainDB::ConnectBlock(const CBlock& block, int height, const Consensus:
             ++i;
             continue;
         }
-        SaveSlot(id, undo);
+        BlockUndo::SlotUndo& saved{SaveSlot(id, undo)};
         Slot& slot{m_slots[id]};
+        // Only the first activation in the block replaces the sidechain the slot had before it.
+        if (saved.existed && !saved.sidechain) saved.sidechain = slot.sidechain;
         // A sidechain that replaces another one takes over its escrow, but not its pending
         // withdrawals: they fail, so that the software of the old sidechain gives them back.
         for (const Bundle& bundle : slot.bundles) CloseBundle(id, bundle.hash, /*paid=*/false, undo);
+        for (size_t b{slot.bundles.size()}; b-- > 0;) EraseBundle(slot, id, b, undo);
         slot.sidechain = m_proposals[i].sidechain;
         slot.activation_height = height;
-        slot.bundles.clear();
         RemoveProposal(i, undo);
     }
 
@@ -395,10 +409,8 @@ bool SidechainDB::ConnectBlock(const CBlock& block, int height, const Consensus:
                 ++i;
                 continue;
             }
-            SaveSlot(id, undo);
-            const uint256 hash{bundle.hash};
-            slot.bundles.erase(slot.bundles.begin() + i);
-            CloseBundle(id, hash, /*paid=*/false, undo);
+            CloseBundle(id, bundle.hash, /*paid=*/false, undo);
+            EraseBundle(slot, id, i, undo);
         }
     }
 
@@ -466,12 +478,19 @@ bool SidechainDB::ConnectBlock(const CBlock& block, int height, const Consensus:
         } else if (vote.type != Vote::Type::DOWNVOTE) {
             continue;
         }
-        SaveSlot(id, undo);
-        for (Bundle& bundle : slot.bundles) {
+        BlockUndo::BundleChange& change{undo.bundle_changes.emplace_back()};
+        change.type = BlockUndo::BundleChange::Type::VOTE;
+        change.id = id;
+        for (size_t i{0}; i < slot.bundles.size(); ++i) {
+            Bundle& bundle{slot.bundles[i]};
             if (vote.type == Vote::Type::UPVOTE && bundle.hash == vote.bundle) {
-                if (bundle.score < std::numeric_limits<uint32_t>::max()) ++bundle.score;
+                change.upvoted = static_cast<uint32_t>(i);
+                change.saturated = bundle.score == std::numeric_limits<uint32_t>::max();
+                if (!change.saturated) ++bundle.score;
             } else if (bundle.score > 0) {
                 --bundle.score;
+            } else {
+                change.at_zero.push_back(static_cast<uint32_t>(i));
             }
         }
         m_last_votes[id] = vote;
@@ -483,7 +502,6 @@ bool SidechainDB::ConnectBlock(const CBlock& block, int height, const Consensus:
         Slot& slot{it->second};
         if (std::any_of(slot.bundles.begin(), slot.bundles.end(), [&](const Bundle& b) { return b.hash == hash; })) return invalid("bad-dc-bundle-known");
         if (IsClosed(id, hash)) return invalid("bad-dc-bundle-closed");
-        SaveSlot(id, undo);
         if (slot.bundles.size() >= params.max_pending_bundles) {
             // A full queue makes room by failing its weakest bundle, if that one has no more than the
             // vote a new bundle starts with: otherwise a miner with a few blocks could fill it with
@@ -491,15 +509,18 @@ bool SidechainDB::ConnectBlock(const CBlock& block, int height, const Consensus:
             // honest bundle out. A bundle the miners vote for is never pushed out.
             const auto weakest{WeakestBundle(slot.bundles)};
             if (weakest == slot.bundles.end() || weakest->score > NEW_BUNDLE_SCORE) return invalid("bad-dc-too-many-bundles");
-            const uint256 failed{weakest->hash};
-            slot.bundles.erase(weakest);
-            CloseBundle(id, failed, /*paid=*/false, undo);
+            CloseBundle(id, weakest->hash, /*paid=*/false, undo);
+            EraseBundle(slot, id, weakest - slot.bundles.begin(), undo);
         }
         Bundle bundle;
         bundle.hash = hash;
         bundle.height = height;
         bundle.score = NEW_BUNDLE_SCORE;
         slot.bundles.push_back(bundle);
+        BlockUndo::BundleChange& change{undo.bundle_changes.emplace_back()};
+        change.type = BlockUndo::BundleChange::Type::APPEND;
+        change.id = id;
+        undo.proposed.emplace_back(id, hash);
     }
 
     m_block_hash = block_hash;
@@ -508,15 +529,46 @@ bool SidechainDB::ConnectBlock(const CBlock& block, int height, const Consensus:
 
 void SidechainDB::DisconnectBlock(const BlockUndo& undo)
 {
-    for (const BlockUndo::SlotUndo& saved : undo.slots) {
-        if (saved.existed) {
-            m_slots[saved.id] = saved.slot;
-        } else {
-            m_slots.erase(saved.id);
+    // The bundles, from the last change back; the slots they belong to still exist.
+    for (auto it{undo.bundle_changes.rbegin()}; it != undo.bundle_changes.rend(); ++it) {
+        const BlockUndo::BundleChange& change{*it};
+        std::vector<Bundle>& bundles{m_slots.at(change.id).bundles};
+        switch (change.type) {
+        case BlockUndo::BundleChange::Type::ERASE:
+            bundles.insert(bundles.begin() + change.index, change.bundle);
+            break;
+        case BlockUndo::BundleChange::Type::APPEND:
+            bundles.pop_back();
+            break;
+        case BlockUndo::BundleChange::Type::VOTE: {
+            auto zero{change.at_zero.begin()};
+            for (size_t i{0}; i < bundles.size(); ++i) {
+                Bundle& bundle{bundles[i]};
+                if (i == change.upvoted) {
+                    if (!change.saturated) --bundle.score;
+                } else if (zero != change.at_zero.end() && *zero == i) {
+                    ++zero;
+                } else {
+                    ++bundle.score;
+                }
+            }
+            break;
+        }
         }
     }
-    for (const auto& closed : undo.closed) {
-        m_closed.erase(closed);
+    for (const BlockUndo::SlotUndo& saved : undo.slots) {
+        if (!saved.existed) {
+            m_slots.erase(saved.id);
+            continue;
+        }
+        Slot& slot{m_slots.at(saved.id)};
+        slot.activation_height = saved.activation_height;
+        slot.has_ctip = saved.has_ctip;
+        slot.ctip = saved.ctip;
+        if (saved.sidechain) slot.sidechain = *saved.sidechain;
+    }
+    for (const BlockUndo::Closed& closed : undo.closed) {
+        m_closed.erase({closed.id, closed.hash});
     }
     for (auto it{undo.removed.rbegin()}; it != undo.removed.rend(); ++it) {
         m_proposals.insert(m_proposals.begin() + it->first, it->second);

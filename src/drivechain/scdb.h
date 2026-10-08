@@ -15,26 +15,109 @@
 #include <map>
 #include <optional>
 #include <set>
+#include <ios>
 #include <string>
 #include <utility>
 #include <vector>
 
 namespace drivechain {
 
-/** What a block changed in the sidechain database, in the form needed to revert it. */
+/**
+ * What a block changed in the sidechain database, in the form needed to revert it: the changes
+ * themselves rather than copies of what they changed, so that it stays small however many bundles
+ * are pending.
+ */
 struct BlockUndo {
+    /** What a slot was before the block, apart from its bundles; saved before its first change. */
     struct SlotUndo {
         SidechainId id{0};
         //! Whether the slot held a sidechain before the block.
         bool existed{false};
-        Slot slot;
+        int32_t activation_height{0};
+        bool has_ctip{false};
+        Ctip ctip;
+        //! The sidechain the slot held, if the block replaced it with another.
+        std::optional<Sidechain> sidechain;
 
-        SERIALIZE_METHODS(SlotUndo, obj) { READWRITE(obj.id, obj.existed, obj.slot); }
+        template <typename Stream>
+        void Serialize(Stream& s) const
+        {
+            s << id << existed << activation_height << has_ctip << ctip << sidechain.has_value();
+            if (sidechain) s << *sidechain;
+        }
+        template <typename Stream>
+        void Unserialize(Stream& s)
+        {
+            bool has_sidechain;
+            s >> id >> existed >> activation_height >> has_ctip >> ctip >> has_sidechain;
+            sidechain.reset();
+            if (has_sidechain) s >> sidechain.emplace();
+        }
+    };
+
+    /** A change of the pending bundles of a slot. They are taken back in reverse order. */
+    struct BundleChange {
+        enum class Type : uint8_t {
+            //! The bundle at `index` was removed: `bundle`.
+            ERASE = 0,
+            //! A bundle was added at the end.
+            APPEND = 1,
+            //! A vote: the bundle at `upvoted` went up (none for a downvote), the others down, except those at `at_zero`.
+            VOTE = 2,
+        };
+        static constexpr uint32_t NO_INDEX{std::numeric_limits<uint32_t>::max()};
+
+        Type type{Type::APPEND};
+        SidechainId id{0};
+        //! ERASE: the position and the bundle.
+        uint32_t index{0};
+        Bundle bundle;
+        //! VOTE: the position of the bundle upvoted, or NO_INDEX.
+        uint32_t upvoted{NO_INDEX};
+        //! VOTE: whether the score of that bundle could go no higher.
+        bool saturated{false};
+        //! VOTE: the positions, in order, of the bundles a downvote left at a score of zero.
+        std::vector<uint32_t> at_zero;
+
+        template <typename Stream>
+        void Serialize(Stream& s) const
+        {
+            s << static_cast<uint8_t>(type) << id;
+            switch (type) {
+            case Type::ERASE: s << index << bundle; break;
+            case Type::APPEND: break;
+            case Type::VOTE: s << upvoted << saturated << at_zero; break;
+            }
+        }
+        template <typename Stream>
+        void Unserialize(Stream& s)
+        {
+            uint8_t value;
+            s >> value >> id;
+            if (value > static_cast<uint8_t>(Type::VOTE)) throw std::ios_base::failure("unknown bundle change");
+            type = static_cast<Type>(value);
+            switch (type) {
+            case Type::ERASE: s >> index >> bundle; break;
+            case Type::APPEND: break;
+            case Type::VOTE: s >> upvoted >> saturated >> at_zero; break;
+            }
+        }
+    };
+
+    /** A bundle the block closed. */
+    struct Closed {
+        SidechainId id{0};
+        uint256 hash;
+        bool paid{false};
+
+        SERIALIZE_METHODS(Closed, obj) { READWRITE(obj.id, obj.hash, obj.paid); }
     };
 
     uint256 prev_block_hash;
-    //! The value each changed slot had before the block.
+    //! The slots the block changed, as they were before.
     std::vector<SlotUndo> slots;
+    //! The changes of pending bundles, in the order they were made.
+    std::vector<BundleChange> bundle_changes;
     //! Number of proposals the block added, at the end of the list.
     uint32_t proposals_added{0};
     //! Slots and hashes of the proposals whose ack count the block incremented.
@@ -42,11 +125,13 @@ struct BlockUndo {
     //! Proposals the block removed, with the position each had when it was removed, in order of removal.
     std::vector<std::pair<uint32_t, Proposal>> removed;
     //! Bundles the block closed, by being paid out or by failing.
-    std::vector<std::pair<SidechainId, uint256>> closed;
+    std::vector<Closed> closed;
+    //! Bundles the block proposed (M3) and that became pending.
+    std::vector<std::pair<SidechainId, uint256>> proposed;
     //! The votes of the previous block, which this block replaced.
     std::map<SidechainId, Vote> last_votes;
 
-    SERIALIZE_METHODS(BlockUndo, obj) { READWRITE(obj.prev_block_hash, obj.slots, obj.proposals_added, obj.acked, obj.removed, obj.closed, obj.last_votes); }
+    SERIALIZE_METHODS(BlockUndo, obj) { READWRITE(obj.prev_block_hash, obj.slots, obj.bundle_changes, obj.proposals_added, obj.acked, obj.removed, obj.closed, obj.proposed, obj.last_votes); }
 };
 
 /**
@@ -153,7 +238,8 @@ public:
 
 private:
     /** Remember the value of a slot before its first change in a block. */
-    void SaveSlot(SidechainId id, BlockUndo& undo) const;
+    BlockUndo::SlotUndo& SaveSlot(SidechainId id, BlockUndo& undo) const;
+    void EraseBundle(Slot& slot, SidechainId id, size_t index, BlockUndo& undo);
     void CloseBundle(SidechainId id, const uint256& hash, bool paid, BlockUndo& undo);
     void RemoveProposal(size_t index, BlockUndo& undo);
 

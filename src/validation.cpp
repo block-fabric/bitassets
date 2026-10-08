@@ -2330,12 +2330,26 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
 
     if (scdb && !scdb->GetBlockHash().IsNull()) {
         drivechain::BlockUndo scdb_undo;
-        if (scdb->GetBlockHash() != pindex->GetBlockHash() ||
-            !m_blockman.m_drivechain_db->ReadBlockUndo(pindex->GetBlockHash(), scdb_undo)) {
-            LogError("DisconnectBlock(): failure reading drivechain undo data\n");
+        if (scdb->GetBlockHash() != pindex->GetBlockHash()) {
+            LogError("DisconnectBlock(): the sidechain database does not belong to the block\n");
             return DISCONNECT_FAILED;
         }
-        scdb->DisconnectBlock(scdb_undo);
+        if (m_blockman.m_drivechain_db->ReadBlockUndo(pindex->GetBlockHash(), scdb_undo)) {
+            scdb->DisconnectBlock(scdb_undo);
+        } else {
+            // A block deeper than DRIVECHAIN_UNDO_DEPTH no longer has its undo data: the database
+            // before it is derived from the blocks, which also brings back the undo data of the
+            // DRIVECHAIN_UNDO_DEPTH blocks below it, for the rest of a deep reorg.
+            LogWarning("No drivechain undo data for block %s at height %d: deriving the sidechain database from the blocks", pindex->GetBlockHash().ToString(), pindex->nHeight);
+            drivechain::SidechainDB rebuilt;
+            const CBlockIndex* genesis{pindex->GetAncestor(0)};
+            rebuilt.SetBlockHash(genesis->GetBlockHash());
+            if (!RollForwardSidechainDB(rebuilt, genesis, pindex->pprev, pindex->pprev->nHeight - DRIVECHAIN_UNDO_DEPTH)) {
+                LogError("DisconnectBlock(): failure deriving the sidechain database\n");
+                return DISCONNECT_FAILED;
+            }
+            *scdb = std::move(rebuilt);
+        }
     }
 
     // move best block pointer to prevout block
@@ -3224,6 +3238,10 @@ bool Chainstate::ConnectTip(
                 InvalidBlockFound(pindexNew, state);
             LogError("%s: ConnectBlock %s failed, %s\n", __func__, pindexNew->GetBlockHash().ToString(), state.ToString());
             return false;
+        }
+        // The block now at DRIVECHAIN_UNDO_DEPTH no reorg takes back: its sidechain undo data goes.
+        if (pindexNew->nHeight >= DRIVECHAIN_UNDO_DEPTH) {
+            m_blockman.m_drivechain_db->EraseBlockUndo(pindexNew->GetAncestor(pindexNew->nHeight - DRIVECHAIN_UNDO_DEPTH)->GetBlockHash());
         }
         time_3 = SteadyClock::now();
         m_chainman.time_connect_total += time_3 - time_2;
@@ -4911,9 +4929,17 @@ bool Chainstate::LoadDrivechainState()
     if (!tip) return true;
 
     drivechain::Database& db{*m_blockman.m_drivechain_db};
+    if (!db.IsCurrentFormat()) {
+        // Laid out another way (by an older version): built anew from the blocks below.
+        LogInfo("The sidechain database is in an older format; it is rebuilt from the blocks");
+        db.Wipe();
+    }
+
     drivechain::SidechainDB scdb;
+    // On failure ReadState leaves `scdb` empty: nothing half read is used.
     if (db.ReadState(DrivechainStateName(), scdb) && scdb.GetBlockHash() == tip->GetBlockHash()) {
         m_scdb = std::move(scdb);
+        db.WriteFormatVersion();
         return true;
     }
 
@@ -4923,10 +4949,27 @@ bool Chainstate::LoadDrivechainState()
         LogWarning("No sidechain database for the chainstate loaded from a UTXO snapshot; starting with an empty one.");
         m_scdb = drivechain::SidechainDB{};
         m_scdb.SetBlockHash(tip->GetBlockHash());
+        db.WriteFormatVersion();
         return true;
     }
 
     const CBlockIndex* pindex{scdb.GetBlockHash().IsNull() ? nullptr : m_blockman.LookupBlockIndex(scdb.GetBlockHash())};
+    if (pindex) {
+        // Rewind to the last block the snapshot has in common with the chain. The blocks on the way
+        // are not in the active chain, so their undo data was kept (only blocks deep in the active
+        // chain lose theirs); if it is missing all the same, everything is derived from the blocks.
+        while (tip->GetAncestor(pindex->nHeight) != pindex) {
+            drivechain::BlockUndo undo;
+            if (!db.ReadBlockUndo(pindex->GetBlockHash(), undo)) {
+                LogWarning("No drivechain undo data for block %s; the sidechain database is rebuilt from the blocks", pindex->GetBlockHash().ToString());
+                pindex = nullptr;
+                break;
+            }
+            scdb.DisconnectBlock(undo);
+            db.EraseBlockDeposits(pindex->GetBlockHash());
+            pindex = pindex->pprev;
+        }
+    }
     if (!pindex) {
         // No usable snapshot: derive everything from the blocks.
         scdb = drivechain::SidechainDB{};
@@ -4935,22 +4978,22 @@ bool Chainstate::LoadDrivechainState()
     }
     LogInfo("Bringing the sidechain database from height %d to the chain tip at height %d", pindex->nHeight, tip->nHeight);
 
-    // Rewind to the last block the snapshot has in common with the chain.
-    while (tip->GetAncestor(pindex->nHeight) != pindex) {
-        drivechain::BlockUndo undo;
-        if (!db.ReadBlockUndo(pindex->GetBlockHash(), undo)) {
-            LogError("%s: no drivechain undo data for block %s", __func__, pindex->GetBlockHash().ToString());
-            return false;
-        }
-        scdb.DisconnectBlock(undo);
-        db.EraseBlockDeposits(pindex->GetBlockHash());
-        pindex = pindex->pprev;
-    }
+    // Roll forward along the chain, with undo data for the blocks a reorg can still take back.
+    if (!RollForwardSidechainDB(scdb, pindex, tip, tip->nHeight - DRIVECHAIN_UNDO_DEPTH)) return false;
 
-    // Roll forward along the chain.
+    m_scdb = std::move(scdb);
+    db.WriteState(DrivechainStateName(), m_scdb);
+    db.WriteFormatVersion();
+    return true;
+}
+
+bool Chainstate::RollForwardSidechainDB(drivechain::SidechainDB& scdb, const CBlockIndex* from, const CBlockIndex* to, int keep_undo_above)
+{
+    AssertLockHeld(::cs_main);
+    drivechain::Database& db{*m_blockman.m_drivechain_db};
     const Consensus::DrivechainParams& params{m_chainman.GetConsensus().drivechain};
-    for (int height{pindex->nHeight + 1}; height <= tip->nHeight; ++height) {
-        const CBlockIndex* next{tip->GetAncestor(height)};
+    for (int height{from->nHeight + 1}; height <= to->nHeight; ++height) {
+        const CBlockIndex* next{to->GetAncestor(height)};
         CBlock block;
         if (!m_blockman.ReadBlock(block, *next)) {
             LogError("%s: failed to read block %s", __func__, next->GetBlockHash().ToString());
@@ -4963,12 +5006,9 @@ bool Chainstate::LoadDrivechainState()
             LogError("%s: block %s breaks the drivechain rules (%s)", __func__, next->GetBlockHash().ToString(), reject_reason);
             return false;
         }
-        db.WriteBlock(next->GetBlockHash(), height, undo, deposits);
+        db.WriteBlock(next->GetBlockHash(), height, undo, deposits, /*keep_undo=*/height > keep_undo_above);
         if (m_chainman.m_interrupt) return false;
     }
-
-    m_scdb = std::move(scdb);
-    db.WriteState(DrivechainStateName(), m_scdb);
     return true;
 }
 
@@ -5019,6 +5059,12 @@ VerifyDBResult CVerifyDB::VerifyDB(
             // back as far as we have data.
             LogInfo("Block verification stopping at height %d (no data). This could be due to pruning or use of an assumeutxo snapshot.", pindex->nHeight);
             skipped_no_block_data = true;
+            break;
+        }
+        if (nCheckLevel >= 3 && !scdb.GetBlockHash().IsNull() && !chainstate.m_blockman.m_drivechain_db->HasBlockUndo(pindex->GetBlockHash())) {
+            // Blocks deep in the chain no longer have the data to take back their drivechain changes:
+            // as deep as a reorg can go is as deep as the check goes.
+            LogInfo("Block verification stopping at height %d (drivechain undo data is kept for the last %d blocks).", pindex->nHeight, DRIVECHAIN_UNDO_DEPTH);
             break;
         }
         CBlock block;

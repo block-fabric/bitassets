@@ -80,6 +80,8 @@ class DrivechainRulesTest(BitcoinTestFramework):
         node.setwithdrawalvote(SLOT, "abstain")
         node.setwithdrawalvote(SLOT, "default")
         assert_raises_rpc_error(-8, "count must not be negative", node.listsidechaindeposits, SLOT, None, -1)
+        # The main lock is held while they are listed: a thousand at most, and more by asking again.
+        assert_raises_rpc_error(-8, "count must be at most 1000", node.listsidechaindeposits, SLOT, None, 1001)
         assert_raises_rpc_error(-8, "The height must not be negative", node.getsidechainevents, SLOT, -1)
         assert_raises_rpc_error(-8, "The count must be between 1 and 2000", node.getsidechainevents, SLOT, 1, 0)
         # Heights past the tip are left out, up to the largest one (first + count does not overflow).

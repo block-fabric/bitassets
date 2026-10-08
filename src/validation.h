@@ -76,6 +76,13 @@ class SignalInterrupt;
 
 /** Block files containing a block-height within MIN_BLOCKS_TO_KEEP of ActiveChain().Tip() will not be pruned. */
 inline constexpr unsigned int MIN_BLOCKS_TO_KEEP = 288;
+/**
+ * Blocks of the active chain at this depth or more lose the data that takes their changes to the
+ * sidechain database back (what they did that sidechains follow stays): no reorg can take them back.
+ * A reorg deeper than this, like one past the blocks a pruned node keeps, cannot be made.
+ */
+inline constexpr int DRIVECHAIN_UNDO_DEPTH{2880};
+static_assert(DRIVECHAIN_UNDO_DEPTH >= static_cast<int>(MIN_BLOCKS_TO_KEEP));
 inline constexpr signed int DEFAULT_CHECKBLOCKS = 6;
 inline constexpr int DEFAULT_CHECKLEVEL{3};
 // Require that user allocate at least 550 MiB for block & undo files (blk???.dat and rev???.dat)
@@ -808,6 +815,13 @@ public:
      * disk for the difference.
      */
     bool LoadDrivechainState() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /**
+     * Apply the blocks after the one `scdb` belongs to, up to `to` (a descendant of it), to `scdb`,
+     * from the blocks on disk, and store what each block did; its undo data only for the blocks above
+     * `keep_undo_above`.
+     */
+    bool RollForwardSidechainDB(drivechain::SidechainDB& scdb, const CBlockIndex* from, const CBlockIndex* to, int keep_undo_above) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /** Name under which the sidechain database of this chainstate is stored. */
     std::string DrivechainStateName() const;

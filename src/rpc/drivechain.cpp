@@ -782,6 +782,9 @@ RPCMethod setdefaultwithdrawalvote()
     };
 }
 
+//! Most escrow changes listsidechaindeposits returns at a time.
+static constexpr unsigned int MAX_DEPOSITS_LISTED{1000};
+
 RPCMethod listsidechaindeposits()
 {
     return RPCMethod{
@@ -791,7 +794,7 @@ RPCMethod listsidechaindeposits()
         {
             {"slot", RPCArg::Type::NUM, RPCArg::Optional::NO, "The sidechain slot number"},
             {"after", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Only list the changes after the transaction with this id"},
-            {"count", RPCArg::Type::NUM, RPCArg::Default{0}, "The maximum number of changes to return; 0 for no limit"},
+            {"count", RPCArg::Type::NUM, RPCArg::Default{MAX_DEPOSITS_LISTED}, strprintf("The maximum number of changes to return, at most %u; 0 for that many. To list more, ask again with the last one in 'after'", MAX_DEPOSITS_LISTED)},
         },
         RPCResult{RPCResult::Type::ARR, "", "",
         {
@@ -816,8 +819,11 @@ RPCMethod listsidechaindeposits()
     const SidechainId id{ParseSlot(request.params[0], chainman)};
     std::optional<uint256> after;
     if (!request.params[1].isNull()) after = ParseHashV(request.params[1], "after");
-    const int64_t count{request.params[2].isNull() ? 0 : request.params[2].getInt<int64_t>()};
+    int64_t count{request.params[2].isNull() ? 0 : request.params[2].getInt<int64_t>()};
     if (count < 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "count must not be negative");
+    if (count > MAX_DEPOSITS_LISTED) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("count must be at most %u", MAX_DEPOSITS_LISTED));
+    // Bounded, since the main lock is held throughout.
+    if (count == 0) count = MAX_DEPOSITS_LISTED;
 
     LOCK(::cs_main);
     const auto deposits{chainman.m_blockman.m_drivechain_db->ListDeposits(id, after, static_cast<size_t>(count))};
@@ -933,7 +939,6 @@ RPCMethod getsidechainevents()
     for (size_t i{0}; i < wanted.size(); ++i) {
         if (chain[first + static_cast<int>(i)] != wanted[i].first) throw JSONRPCError(RPC_MISC_ERROR, "The chain changed meanwhile; ask again");
     }
-    const SidechainDB& scdb{chainman.ActiveChainstate().m_scdb};
     for (int height{first}; height < first + static_cast<int>(wanted.size()); ++height) {
         const CBlockIndex* pindex{chain[height]};
         UniValue obj(UniValue::VOBJ);
@@ -980,30 +985,24 @@ RPCMethod getsidechainevents()
         obj.pushKV("deposits", std::move(deposits));
 
         UniValue bundles(UniValue::VARR);
-        drivechain::BlockUndo undo;
+        drivechain::BlockEvents events;
         // What a block closed and proposed is what sidechains act on: missing, it must not look like nothing.
-        const bool have_undo{chainman.m_blockman.m_drivechain_db->ReadBlockUndo(pindex->GetBlockHash(), undo)};
-        if (!have_undo && height > 0) throw JSONRPCError(RPC_MISC_ERROR, strprintf("The drivechain data of block %d is not available", height));
-        if (have_undo) {
-            for (const auto& [slot, hash] : undo.closed) {
-                if (slot != id) continue;
-                UniValue entry(UniValue::VOBJ);
-                entry.pushKV("hash", hash.GetHex());
-                entry.pushKV("paid", scdb.WasPaid(slot, hash).value_or(false));
-                bundles.push_back(std::move(entry));
-            }
+        const bool have_events{chainman.m_blockman.m_drivechain_db->ReadBlockEvents(pindex->GetBlockHash(), events)};
+        if (!have_events && height > 0) throw JSONRPCError(RPC_MISC_ERROR, strprintf("The drivechain data of block %d is not available", height));
+        for (const drivechain::BlockUndo::Closed& closed : events.closed) {
+            if (closed.id != id) continue;
+            UniValue entry(UniValue::VOBJ);
+            entry.pushKV("hash", closed.hash.GetHex());
+            entry.pushKV("paid", closed.paid);
+            bundles.push_back(std::move(entry));
         }
         obj.pushKV("bundles", std::move(bundles));
 
-        // A proposal counts if the block took it: then it changed the slot (a proposal for a slot
-        // without a sidechain is ignored, and changes nothing).
+        // The proposals the block made that became pending (a proposal for a slot without a
+        // sidechain is ignored, and changes nothing).
         UniValue proposed(UniValue::VARR);
-        const bool slot_changed{std::any_of(undo.slots.begin(), undo.slots.end(), [&](const drivechain::BlockUndo::SlotUndo& saved) { return saved.id == id; })};
-        if (slot_changed) {
-            for (const CTxOut& out : block.vtx[0]->vout) {
-                const auto bundle{drivechain::ParseBundleScript(out.scriptPubKey)};
-                if (bundle && bundle->first == id) proposed.push_back(bundle->second.GetHex());
-            }
+        for (const auto& [slot, hash] : events.proposed) {
+            if (slot == id) proposed.push_back(hash.GetHex());
         }
         obj.pushKV("proposed", std::move(proposed));
         result.push_back(std::move(obj));
