@@ -794,10 +794,10 @@ public:
 
     // Block (dis)connection on a given view:
     //
-    // Like the coins, the sidechain database is passed in as a working copy.
+    // Like the coins, the sidechain database is passed in to be updated.
     // DisconnectBlock leaves it alone if scdb is null. ConnectBlock always
-    // checks the drivechain rules; if scdb is null it does so against a
-    // temporary copy of m_scdb.
+    // checks the drivechain rules; if scdb is null it does so against m_scdb,
+    // which it gives back as it was, whatever the block is.
     DisconnectResult DisconnectBlock(const CBlock& block, const CBlockIndex* pindex, CCoinsViewCache& view,
                                      drivechain::SidechainDB* scdb = nullptr)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);

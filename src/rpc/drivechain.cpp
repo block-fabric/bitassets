@@ -107,13 +107,6 @@ std::vector<RPCResult> SlotResults()
     return results;
 }
 
-/** Copy of the sidechain database of the active chain, with the height it belongs to. */
-std::pair<SidechainDB, int> ActiveSidechainDB(ChainstateManager& chainman)
-{
-    LOCK(::cs_main);
-    return {chainman.ActiveChainstate().m_scdb, chainman.ActiveHeight()};
-}
-
 RPCMethod getdrivechaininfo()
 {
     return RPCMethod{
@@ -142,7 +135,10 @@ RPCMethod getdrivechaininfo()
 {
     ChainstateManager& chainman{EnsureAnyChainman(request.context)};
     const Consensus::DrivechainParams& params{chainman.GetConsensus().drivechain};
-    const auto [scdb, height]{ActiveSidechainDB(chainman)};
+    // Read in place, under the lock: a copy would cost as much as the database is large.
+    LOCK(::cs_main);
+    const SidechainDB& scdb{chainman.ActiveChainstate().m_scdb};
+    const int height{chainman.ActiveHeight()};
 
     size_t bundles{0};
     CAmount escrow{0};
@@ -185,7 +181,9 @@ RPCMethod listactivesidechains()
         [&](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
 {
     ChainstateManager& chainman{EnsureAnyChainman(request.context)};
-    const auto [scdb, height]{ActiveSidechainDB(chainman)};
+    // Read in place, under the lock: a copy would cost as much as the database is large.
+    LOCK(::cs_main);
+    const SidechainDB& scdb{chainman.ActiveChainstate().m_scdb};
     UniValue result(UniValue::VARR);
     for (const auto& [id, slot] : scdb.GetSlots()) result.push_back(SlotToJSON(slot));
     return result;
@@ -207,7 +205,9 @@ RPCMethod getsidechain()
 {
     ChainstateManager& chainman{EnsureAnyChainman(request.context)};
     const SidechainId id{ParseSlot(request.params[0], chainman)};
-    const auto [scdb, height]{ActiveSidechainDB(chainman)};
+    // Read in place, under the lock: a copy would cost as much as the database is large.
+    LOCK(::cs_main);
+    const SidechainDB& scdb{chainman.ActiveChainstate().m_scdb};
     const Slot* slot{scdb.GetSlot(id)};
     if (!slot) throw JSONRPCError(RPC_INVALID_PARAMETER, "No active sidechain in this slot");
     return SlotToJSON(*slot);
@@ -245,7 +245,10 @@ RPCMethod listsidechainproposals()
 {
     ChainstateManager& chainman{EnsureAnyChainman(request.context)};
     const Consensus::DrivechainParams& params{chainman.GetConsensus().drivechain};
-    const auto [scdb, height]{ActiveSidechainDB(chainman)};
+    // Read in place, under the lock: a copy would cost as much as the database is large.
+    LOCK(::cs_main);
+    const SidechainDB& scdb{chainman.ActiveChainstate().m_scdb};
+    const int height{chainman.ActiveHeight()};
 
     UniValue pending(UniValue::VARR);
     for (const Proposal& proposal : scdb.GetProposals()) {
@@ -364,8 +367,8 @@ RPCMethod acksidechain()
         if (slot < 0 || slot >= static_cast<int>(drivechain::MAX_SLOTS)) throw JSONRPCError(RPC_INVALID_PARAMETER, "slot out of range");
         slots.insert(static_cast<SidechainId>(slot));
     } else {
-        const auto [scdb, height]{ActiveSidechainDB(chainman)};
-        for (const Proposal& proposal : scdb.GetProposals()) {
+        LOCK(::cs_main);
+        for (const Proposal& proposal : chainman.ActiveChainstate().m_scdb.GetProposals()) {
             if (proposal.hash == hash) slots.insert(proposal.sidechain.slot);
         }
         for (const Sidechain& sidechain : chainman.m_drivechain_miner.GetProposals()) {
@@ -578,7 +581,10 @@ RPCMethod listwithdrawalbundles()
     const Consensus::DrivechainParams& params{chainman.GetConsensus().drivechain};
     std::optional<SidechainId> only;
     if (!request.params[0].isNull()) only = ParseSlot(request.params[0], chainman);
-    const auto [scdb, height]{ActiveSidechainDB(chainman)};
+    // Read in place, under the lock: a copy would cost as much as the database is large.
+    LOCK(::cs_main);
+    const SidechainDB& scdb{chainman.ActiveChainstate().m_scdb};
+    const int height{chainman.ActiveHeight()};
 
     UniValue result(UniValue::VARR);
     for (const auto& [id, slot] : scdb.GetSlots()) {
@@ -638,7 +644,10 @@ RPCMethod getwithdrawalbundle()
     ChainstateManager& chainman{EnsureAnyChainman(request.context)};
     const SidechainId id{ParseSlot(request.params[0], chainman)};
     const uint256 hash{ParseHashV(request.params[1], "hash")};
-    const auto [scdb, height]{ActiveSidechainDB(chainman)};
+    // Read in place, under the lock: a copy would cost as much as the database is large.
+    LOCK(::cs_main);
+    const SidechainDB& scdb{chainman.ActiveChainstate().m_scdb};
+    const int height{chainman.ActiveHeight()};
     const auto& params{chainman.GetConsensus().drivechain};
 
     UniValue result(UniValue::VOBJ);

@@ -2730,11 +2730,11 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     }
 
     // Drivechain rules: sidechain proposals, deposits, withdrawals and blind merged mining.
-    drivechain::SidechainDB scdb_copy;
-    if (!scdb) {
-        scdb_copy = m_scdb;
-        scdb = &scdb_copy;
-    }
+    // Without a database of the caller's, the block is checked against the chainstate's, which is
+    // given back as it was however the block turns out (rather than checked against a copy, which
+    // would cost as much as the database is large).
+    const bool scdb_temporary{!scdb};
+    if (!scdb) scdb = &m_scdb;
     drivechain::BlockUndo scdb_undo;
     std::vector<drivechain::Deposit> scdb_deposits;
     // The caller's database is updated in place: if the block stops anywhere after, it is taken
@@ -2768,14 +2768,12 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         // On regtest the block is also applied to a copy, which has to come out the same: what is
         // applied in place is what a copy would have become.
         std::optional<drivechain::SidechainDB> scdb_check;
-        if (scdb != &scdb_copy && params.DefaultConsistencyChecks()) scdb_check.emplace(*scdb);
+        if (params.DefaultConsistencyChecks()) scdb_check.emplace(*scdb);
         std::string reject_reason;
-        if (scdb != &scdb_copy) {
-            // Field by field: assigning a temporary would run its destructor, which rolls back.
-            scdb_rollback.undo = &scdb_undo;
-            scdb_rollback.hash = scdb_hash;
-            scdb_rollback.db = scdb;
-        }
+        // Field by field: assigning a temporary would run its destructor, which rolls back.
+        scdb_rollback.undo = &scdb_undo;
+        scdb_rollback.hash = scdb_hash;
+        scdb_rollback.db = scdb;
         if (!scdb->ConnectBlock(block, pindex->nHeight, params.GetConsensus().drivechain, scdb_undo, &scdb_deposits, reject_reason)) {
             state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, reject_reason);
         } else if (scdb_check) {
@@ -2800,7 +2798,8 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
              Ticks<MillisecondsDouble>(m_chainman.time_verify) / m_chainman.num_blocks_total);
 
     if (fJustCheck) {
-        scdb_rollback.db = nullptr;
+        // The rollback gives a temporary database back.
+        if (!scdb_temporary) scdb_rollback.db = nullptr;
         return true;
     }
 
@@ -2842,7 +2841,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         Ticks<std::chrono::nanoseconds>(time_5 - time_start)
     );
 
-    scdb_rollback.db = nullptr;
+    if (!scdb_temporary) scdb_rollback.db = nullptr;
     return true;
 }
 
@@ -3133,13 +3132,20 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
     {
         CCoinsViewCache view(&CoinsTip());
         assert(view.GetBestBlock() == pindexDelete->GetBlockHash());
-        drivechain::SidechainDB scdb{m_scdb};
-        if (DisconnectBlock(block, pindexDelete, view, &scdb) != DISCONNECT_OK) {
+        // The sidechain database is taken back in place (it is the last thing DisconnectBlock does);
+        // if the coins turn out unclean after all, the block is applied to it again.
+        if (DisconnectBlock(block, pindexDelete, view, &m_scdb) != DISCONNECT_OK) {
             LogError("DisconnectTip(): DisconnectBlock %s failed\n", pindexDelete->GetBlockHash().ToString());
+            if (m_scdb.GetBlockHash() == pindexDelete->pprev->GetBlockHash()) {
+                drivechain::BlockUndo undo;
+                std::string reject_reason;
+                if (!m_scdb.ConnectBlock(block, pindexDelete->nHeight, m_chainman.GetConsensus().drivechain, undo, nullptr, reject_reason)) {
+                    LogError("DisconnectTip(): the sidechain database cannot be brought back to %s (%s)\n", pindexDelete->GetBlockHash().ToString(), reject_reason);
+                }
+            }
             return false;
         }
         view.Flush(/*reallocate_cache=*/false); // local CCoinsViewCache goes out of scope
-        m_scdb = std::move(scdb);
         m_blockman.m_drivechain_db->EraseBlockDeposits(pindexDelete->GetBlockHash());
     }
     LogDebug(BCLog::BENCH, "- Disconnect block: %.2fms\n",
