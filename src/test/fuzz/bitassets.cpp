@@ -5,8 +5,9 @@
 // The assets under fuzzing, on the store of the sidechain state: blocks of fuzzed reservations,
 // registrations, mints, burns, pools, swaps, auctions and releases. After every block: undone, the
 // store is exactly what it was (through serialization of the undo data too); a transaction that breaks
-// a rule changes nothing; every index is exactly what the tables imply; and every asset's supply is
-// what its coins, pools and auctions hold.
+// a rule changes nothing; every index is exactly what the tables imply; every asset's counts of the
+// auctions that hold it and of its pools with providers are what the tables say; and every asset's
+// supply is what its coins, pools and auctions hold.
 
 #include <bitassets/state.h>
 #include <primitives/transaction.h>
@@ -152,6 +153,24 @@ void CheckIndexes(const sidechain::StoreView& view)
         assert(held[id] == record.supply);
         return true;
     });
+
+    // The counts in each record (AssetRecord::holding_auctions, provided_pools), from the tables: the
+    // auctions made with this asset (not one retired since) that hold some of it, its pools with providers.
+    state.ForEachAsset([&](const AssetId& id, const AssetRecord& record) {
+        uint32_t auctions{0}, pools{0};
+        state.ForEachAuction([&](const Txid&, const Auction& auction) {
+            const bool same{(auction.base == id && auction.base_registration == record.registration) || (auction.quote == id && auction.quote_registration == record.registration)};
+            if (same && auction.Holds(id)) ++auctions;
+            return true;
+        });
+        state.ForEachPool([&](const uint256&, const Pool& pool) {
+            if ((pool.asset0 == id || pool.asset1 == id) && !amm::Abandoned(pool)) ++pools;
+            return true;
+        });
+        assert(record.holding_auctions == auctions);
+        assert(record.provided_pools == pools);
+        return true;
+    });
 }
 } // namespace
 
@@ -162,6 +181,7 @@ FUZZ_TARGET(bitassets_state, .init = initialize_bitassets)
     const int release_height{fdp.ConsumeIntegralInRange<int>(0, 10)};
     const int audit_height{fdp.ConsumeIntegralInRange<int>(0, 10)};
     const int audit2_height{fdp.ConsumeIntegralInRange<int>(0, 20)};
+    const int reveal_depth{fdp.ConsumeIntegralInRange<int>(0, 3)};
     const std::vector<AssetId> names{HashName("GOLD"), HashName("SILVER"), HashName("LEAD")};
 
     sidechain::EmptyStore empty;
@@ -253,7 +273,7 @@ FUZZ_TARGET(bitassets_state, .init = initialize_bitassets)
             std::vector<CTxOut> payouts;
             std::string reason;
             CAmount released{0};
-            if (!state.ApplyTx(tx, height, payouts, reason, pool_rules_height, &released, release_height, audit_height, audit2_height)) {
+            if (!state.ApplyTx(tx, height, payouts, reason, pool_rules_height, &released, release_height, audit_height, audit2_height, reveal_depth)) {
                 assert(!reason.empty());
                 assert(sidechain::StoreHash(block) == before_tx);
             }
