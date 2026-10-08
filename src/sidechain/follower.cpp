@@ -259,6 +259,20 @@ bool Follower::UpdateRecord(bool may_drop)
                 if (info["initialblockdownload"].isTrue()) {
                     throw std::runtime_error("The mainchain node is still syncing; waiting for it to catch up before following it");
                 }
+                // No block at the height of the record: a mainchain node behind it (restarted after
+                // losing its last blocks, or another node) is on the same chain if its own tip is the
+                // record's block at that height. It has dropped nothing; it catches up.
+                if (events.empty()) {
+                    const int node_height{m_client.Call("getblockcount", UniValue{UniValue::VARR}).getInt<int>()};
+                    if (node_height >= 0 && node_height < height) {
+                        const UniValue tip{fetch(node_height, 1)};
+                        const auto on_record{record.GetBlock(node_height)};
+                        if (!tip.empty() && on_record && Hash256(tip[0]["hash"]) == on_record->hash) {
+                            throw std::runtime_error(strprintf("The mainchain node is behind the record (at height %d, the record at %d); waiting for it to catch up",
+                                                               node_height, height));
+                        }
+                    }
+                }
                 // The mainchain dropped blocks on record: go back to the last one it still has, a
                 // batch of blocks at a time.
                 int common{height - 1};
