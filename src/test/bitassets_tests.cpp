@@ -65,6 +65,14 @@ public:
         m_store->TakeUndo();
     }
     bitassets::State View() const { return bitassets::State{*m_store}; }
+    const sidechain::StoreView& Store() const { return *m_store; }
+    /** How many entries there are under a prefix. */
+    size_t Count(const sidechain::StoreBytes& prefix) const
+    {
+        size_t n{0};
+        m_store->ForEach(prefix, [&](const sidechain::StoreBytes&, const sidechain::StoreBytes&) { ++n; return true; });
+        return n;
+    }
     bool Releasable(const AssetId& asset, std::string* why = nullptr) const { return View().Releasable(asset, why); }
     std::optional<AssetId> AssetOfSeq(uint32_t seq) const { return View().AssetOfSeq(seq); }
     uint32_t NextSeq() const { return View().NextSeq(); }
@@ -509,6 +517,92 @@ BOOST_AUTO_TEST_CASE(auctions)
     BOOST_REQUIRE_EQUAL(f.payouts.size(), 1u);
     BOOST_CHECK_EQUAL(f.payouts[0].nValue, 1'100);
     BOOST_CHECK(f.state.Auctions().at(id).closed);
+}
+
+BOOST_AUTO_TEST_CASE(history_apart)
+{
+    // The history of an asset's data is kept apart from its record: a change writes one entry per
+    // field it changes, and the record keeps a fixed size however many changes there were.
+    Fixture f;
+    const auto [control, coins]{f.Issue("GOLD", 1000)};
+    const size_t record_size{sidechain::EncodeValue(f.state.Assets().at(GOLD)).size()};
+    COutPoint at{control};
+    std::vector<std::string> infos;
+    for (int i{0}; i < 20; ++i) {
+        f.height = 101 + i;
+        const std::string info{strprintf("Version %d", i)};
+        AssetUpdates updates{.info = {UpdateKind::SET, info}};
+        // Every fifth, the commitment goes too.
+        if (i % 5 == 4) updates.commitment = {UpdateKind::DELETE, std::nullopt};
+        const CTransaction update{MakeTx({at}, UpdateAsset{GOLD, updates}, {Unit(Token::Kind::CONTROL, GOLD)})};
+        BOOST_REQUIRE(f.Apply(update));
+        at = COutPoint{update.GetHash(), 0};
+        infos.push_back(info);
+    }
+    const AssetRecord record{f.state.Assets().at(GOLD)};
+    // Only what the data is now is in it: a few bytes more for the info set, none per change.
+    BOOST_CHECK_LE(sidechain::EncodeValue(record).size(), record_size + 1 + 10);
+    BOOST_CHECK(record.Current().info == "Version 19");
+    BOOST_CHECK_EQUAL(record.changes[static_cast<size_t>(DataField::INFO)], 21u);
+    BOOST_CHECK_EQUAL(record.changes[static_cast<size_t>(DataField::COMMITMENT)], 5u);
+    BOOST_CHECK_EQUAL(record.changes[static_cast<size_t>(DataField::IPV4)], 1u);
+    const AssetHistory history{f.state.View().GetHistory(GOLD)};
+    BOOST_REQUIRE_EQUAL(history.info.size(), 21u);
+    BOOST_CHECK(!history.info[0].value);
+    for (size_t i{0}; i < infos.size(); ++i) {
+        BOOST_CHECK(history.info[i + 1].value == infos[i]);
+        BOOST_CHECK_EQUAL(history.info[i + 1].height, 101 + static_cast<int>(i));
+    }
+    BOOST_CHECK_EQUAL(history.commitment.size(), 5u);
+    // At a height: what it was at the end of that block; nothing before the registration.
+    BOOST_CHECK(!f.state.View().DataAt(GOLD, 99));
+    BOOST_CHECK(!f.state.View().DataAt(GOLD, 100)->info);
+    BOOST_CHECK(f.state.View().DataAt(GOLD, 105)->info == "Version 4");
+    BOOST_CHECK(f.state.View().DataAt(GOLD, 1000) == record.data);
+
+    // Retired, its history goes; registered again, it starts again.
+    BOOST_REQUIRE(f.Apply(MakeTx({at, coins}, Burn{{Unit(Token::Kind::CONTROL, GOLD), Asset(GOLD, 1000)}}, {})));
+    BOOST_REQUIRE(f.Apply(MakeTx({}, ReleaseAsset{GOLD}, {})));
+    BOOST_CHECK(f.state.View().GetHistory(GOLD) == AssetHistory{});
+    f.Issue("GOLD", 5);
+    BOOST_CHECK_EQUAL(f.state.View().GetHistory(GOLD).info.size(), 1u);
+}
+
+BOOST_AUTO_TEST_CASE(index_lookups)
+{
+    Fixture f;
+    const auto [control, coins]{f.Issue("GOLD", 1000)};
+    // Many coins of it, and its control coin after them in outpoint order: found in one look.
+    const CTransaction split{MakeTx({coins}, std::nullopt, {Asset(GOLD, 100), Asset(GOLD, 100), Asset(GOLD, 100), Asset(GOLD, 700)})};
+    BOOST_REQUIRE(f.Apply(split));
+    BOOST_CHECK(f.state.View().FirstTokenOf(GOLD, Token::Kind::CONTROL) == control);
+    BOOST_CHECK(f.state.View().FirstTokenOf(GOLD, Token::Kind::ASSET).has_value());
+    BOOST_CHECK(!f.state.View().FirstTokenOf(GOLD, Token::Kind::LP));
+
+    // A closed auction leaves the index of auctions by asset.
+    const CTransaction made{MakeTx({COutPoint{split.GetHash(), 0}}, CreateAuction{GOLD, 100, CHN, 4'000, 400, f.height + 1, 10}, {Unit(Token::Kind::RECEIPT, uint256{})})};
+    BOOST_REQUIRE(f.Apply(made));
+    sidechain::StoreBytes by_gold{0x3b};
+    by_gold.insert(by_gold.end(), GOLD.begin(), GOLD.end());
+    BOOST_CHECK_EQUAL(f.state.Count(by_gold), 1u);
+    BOOST_REQUIRE(f.Apply(MakeTx({COutPoint{made.GetHash(), 0}}, Collect{made.GetHash(), HOLDER}, {std::nullopt})));
+    BOOST_CHECK(f.state.Auctions().at(made.GetHash()).closed);
+    BOOST_CHECK_EQUAL(f.state.Count(by_gold), 0u);
+}
+
+BOOST_AUTO_TEST_CASE(store_layout)
+{
+    // A store with assets and no layout written is of an earlier version: derived again.
+    sidechain::EmptyStore empty;
+    sidechain::StoreOverlay store{empty, /*journal=*/false};
+    BOOST_CHECK(StoreLayoutCurrent(store));
+    store.Put(sidechain::StoreBytes{0x31, 0x01}, sidechain::StoreBytes{0x00});
+    BOOST_CHECK(!StoreLayoutCurrent(store));
+    // Written by the first change to the assets.
+    Fixture f;
+    f.Issue("GOLD", 1);
+    BOOST_CHECK(StoreLayoutCurrent(f.state.Store()));
+    BOOST_CHECK(f.state.Store().Get(sidechain::StoreBytes{0x3f}) == sidechain::EncodeValue(STORE_LAYOUT));
 }
 
 BOOST_AUTO_TEST_CASE(revert_restores)

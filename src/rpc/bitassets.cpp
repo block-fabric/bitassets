@@ -123,7 +123,7 @@ UniValue AssetToJSON(Chainstate& chainstate, const bitassets::State& state, cons
     obj.pushKV("fixed", record.fixed);
     obj.pushKV("registered", record.height);
     obj.pushKV("registration", record.registration.GetHex());
-    const auto data{height ? record.AtHeight(*height) : std::optional{record.Current()}};
+    const auto data{height ? state.DataAt(asset, *height) : std::optional{record.Current()}};
     if (data) obj.pushKV("data", bitassets::DataToJSON(*data));
     const bool releasable{state.Releasable(asset)};
     obj.pushKV("releasable", releasable);
@@ -355,7 +355,9 @@ RPCMethod getassethistory()
     ChainstateManager& chainman{EnsureAnyChainman(request.context)};
     LOCK(::cs_main);
     const bitassets::State state{StateOf(chainman)};
-    const auto& record{Registered(state, ParseAsset(request.params[0], state))};
+    const AssetId asset{ParseAsset(request.params[0], state)};
+    Registered(state, asset);
+    const bitassets::AssetHistory record{state.GetHistory(asset)};
     UniValue result(UniValue::VOBJ);
     const auto add{[&](const std::string& field, const auto& history, const auto& format) {
         UniValue entries(UniValue::VARR);

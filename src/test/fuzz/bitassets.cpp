@@ -67,12 +67,13 @@ sidechain::StoreBytes Key2(uint8_t table, const uint256& a, const uint256& b)
 /** Every index, rebuilt from the tables, is the one in the store. */
 void CheckIndexes(const sidechain::StoreView& view)
 {
-    std::set<sidechain::StoreBytes> by_id, pools_by_asset, auctions_by_asset, by_commitment;
+    std::set<sidechain::StoreBytes> by_id, pools_by_asset, auctions_by_asset, by_commitment, history;
     sidechain::Table<COutPoint, Token>{0x30}.ForEach(view, [&](const COutPoint& outpoint, const Token& token) {
         sidechain::StoreBytes key{0x39};
         sidechain::KeyCodec<uint256>::Encode(key, token.id);
+        key.push_back(static_cast<uint8_t>(token.kind));
         sidechain::KeyCodec<COutPoint>::Encode(key, outpoint);
-        assert(view.Get(key) == sidechain::EncodeValue(static_cast<uint8_t>(token.kind)));
+        assert(view.Get(key) == sidechain::StoreBytes{});
         by_id.insert(key);
         return true;
     });
@@ -83,8 +84,26 @@ void CheckIndexes(const sidechain::StoreView& view)
         return true;
     });
     sidechain::Table<uint256, Auction>{0x35}.ForEach(view, [&](const uint256& id, const Auction& auction) {
+        if (auction.closed) return true;
         auctions_by_asset.insert(Key2(0x3b, auction.base, id));
         auctions_by_asset.insert(Key2(0x3b, auction.quote, id));
+        return true;
+    });
+    // The history of each asset: as many values of each field as its record counts, and none of assets gone.
+    sidechain::Table<uint256, AssetRecord>{0x31}.ForEach(view, [&](const uint256& id, const AssetRecord& record) {
+        for (size_t field{0}; field < DATA_FIELDS; ++field) {
+            assert(record.changes[field] >= 1);
+            for (uint32_t n{0}; n < record.changes[field]; ++n) {
+                sidechain::StoreBytes key{0x3e};
+                sidechain::KeyCodec<uint256>::Encode(key, id);
+                key.push_back(static_cast<uint8_t>(field));
+                sidechain::KeyCodec<uint32_t>::Encode(key, n);
+                history.insert(key);
+            }
+        }
+        // The data now is the last value of each field.
+        const State state{view};
+        assert(state.DataAt(id, std::numeric_limits<int>::max()) == record.data);
         return true;
     });
     const sidechain::Table<uint256, uint64_t> order{0x36};
@@ -100,6 +119,8 @@ void CheckIndexes(const sidechain::StoreView& view)
     assert(KeysUnder(view, 0x3a) == pools_by_asset);
     assert(KeysUnder(view, 0x3b) == auctions_by_asset);
     assert(KeysUnder(view, 0x3c) == by_commitment);
+    assert(KeysUnder(view, 0x3e) == history);
+    assert(StoreLayoutCurrent(view));
 
     // Supply: coins, pool reserves, and what auctions still sell or have taken in.
     const State state{view};

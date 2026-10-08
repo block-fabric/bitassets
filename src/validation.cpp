@@ -5069,7 +5069,12 @@ bool Chainstate::LoadDrivechainState()
     drivechain::Database& db{*m_blockman.m_drivechain_db};
     sidechain::StoreOverlay& cache{SideCache()};
     drivechain::SidechainDB scdb;
-    if (db.ReadState(DrivechainStateName(), scdb) && scdb.GetBlockHash() == tip->GetBlockHash()) {
+    const bool found{db.ReadState(DrivechainStateName(), scdb)};
+    // BitAssets: a store whose assets are in the layout of an earlier version is derived again from
+    // the blocks (bitassets::STORE_LAYOUT), as a snapshot of an earlier format is.
+    const bool layout_current{bitassets::StoreLayoutCurrent(cache)};
+    if (!layout_current) LogInfo("The assets in the sidechain database are in an earlier layout: deriving it again from the blocks");
+    if (found && layout_current && scdb.GetBlockHash() == tip->GetBlockHash()) {
         m_scdb = std::move(scdb);
         return true;
     }
@@ -5085,7 +5090,7 @@ bool Chainstate::LoadDrivechainState()
         return true;
     }
 
-    const CBlockIndex* pindex{scdb.GetBlockHash().IsNull() ? nullptr : m_blockman.LookupBlockIndex(scdb.GetBlockHash())};
+    const CBlockIndex* pindex{scdb.GetBlockHash().IsNull() || !layout_current ? nullptr : m_blockman.LookupBlockIndex(scdb.GetBlockHash())};
     if (!pindex) {
         // No usable snapshot -- none yet, or one of the format before the sidechain state had a
         // store of its own: derive everything from the blocks, the store emptied first.

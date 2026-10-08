@@ -91,10 +91,16 @@ bool GoodUpdates(const AssetUpdates& updates)
     return GoodData(set);
 }
 
-template <typename T>
-std::optional<T> Latest(const std::vector<Stamped<T>>& history)
+/** Calls `fn` for each field of the data of an asset: its number, and where it is in AssetData, AssetUpdates and AssetHistory. */
+template <typename Fn>
+void ForEachField(Fn&& fn)
 {
-    return history.empty() ? std::nullopt : history.back().value;
+    fn(DataField::COMMITMENT, &AssetData::commitment, &AssetUpdates::commitment, &AssetHistory::commitment);
+    fn(DataField::IPV4, &AssetData::ipv4, &AssetUpdates::ipv4, &AssetHistory::ipv4);
+    fn(DataField::IPV6, &AssetData::ipv6, &AssetUpdates::ipv6, &AssetHistory::ipv6);
+    fn(DataField::ENCRYPTION_KEY, &AssetData::encryption_key, &AssetUpdates::encryption_key, &AssetHistory::encryption_key);
+    fn(DataField::SIGNING_KEY, &AssetData::signing_key, &AssetUpdates::signing_key, &AssetHistory::signing_key);
+    fn(DataField::INFO, &AssetData::info, &AssetUpdates::info, &AssetHistory::info);
 }
 
 template <typename T>
@@ -106,13 +112,6 @@ std::optional<T> AtHeightOf(const std::vector<Stamped<T>>& history, int height)
         value = entry.value;
     }
     return value;
-}
-
-template <typename T>
-void ApplyUpdate(std::vector<Stamped<T>>& history, const Update<T>& update, const Txid& txid, int height)
-{
-    if (update.kind == UpdateKind::RETAIN) return;
-    history.push_back({update.kind == UpdateKind::SET ? update.value : std::nullopt, txid, height});
 }
 
 std::optional<std::vector<unsigned char>> MarkerData(const CScript& script)
@@ -311,28 +310,11 @@ std::optional<uint32_t> ParseSeq(const std::string& text)
     return static_cast<uint32_t>(seq);
 }
 
-AssetData AssetRecord::Current() const
+std::optional<AssetData> AssetHistory::AtHeight(int registered, int at) const
 {
+    if (at < registered) return std::nullopt;
     AssetData data;
-    data.commitment = Latest(commitment);
-    data.ipv4 = Latest(ipv4);
-    data.ipv6 = Latest(ipv6);
-    data.encryption_key = Latest(encryption_key);
-    data.signing_key = Latest(signing_key);
-    data.info = Latest(info);
-    return data;
-}
-
-std::optional<AssetData> AssetRecord::AtHeight(int at) const
-{
-    if (at < height) return std::nullopt;
-    AssetData data;
-    data.commitment = AtHeightOf(commitment, at);
-    data.ipv4 = AtHeightOf(ipv4, at);
-    data.ipv6 = AtHeightOf(ipv6, at);
-    data.encryption_key = AtHeightOf(encryption_key, at);
-    data.signing_key = AtHeightOf(signing_key, at);
-    data.info = AtHeightOf(info, at);
+    ForEachField([&](DataField, auto data_field, auto, auto history_field) { data.*data_field = AtHeightOf(this->*history_field, at); });
     return data;
 }
 
@@ -511,6 +493,8 @@ struct State::Plan {
     std::vector<COutPoint> spent;
     std::vector<std::pair<COutPoint, Token>> created;
     std::vector<std::pair<AssetId, AssetRecord>> assets;
+    //! Entries of the history of assets' data, added (keys and values).
+    std::vector<std::pair<sidechain::StoreBytes, sidechain::StoreBytes>> history;
     std::optional<std::pair<Txid, uint256>> reservation_made;
     std::vector<Txid> reservations_gone;
     std::optional<std::pair<uint32_t, AssetId>> seq;
@@ -522,6 +506,8 @@ struct State::Plan {
     std::vector<uint256> pools_gone;
     std::optional<AssetId> asset_gone;
     CAmount released{0};
+    //! Whether the transaction is one of the assets (has a marker or spends tokens): it writes the layout.
+    bool assets_tx{false};
 };
 
 namespace {
@@ -538,6 +524,9 @@ constexpr uint8_t TOKENS_BY_ID{0x39};
 constexpr uint8_t POOLS_BY_ASSET{0x3a};
 constexpr uint8_t AUCTIONS_BY_ASSET{0x3b};
 constexpr uint8_t BY_COMMITMENT{0x3c};
+constexpr uint8_t HISTORY{0x3e};
+//! Missing: the layout before it was written down (1).
+const sidechain::Cell<uint32_t> LAYOUT{0x3f, 1};
 
 sidechain::StoreBytes Key2(uint8_t table, const uint256& a, const uint256& b)
 {
@@ -546,11 +535,31 @@ sidechain::StoreBytes Key2(uint8_t table, const uint256& a, const uint256& b)
     sidechain::KeyCodec<uint256>::Encode(key, b);
     return key;
 }
-sidechain::StoreBytes TokenIdKey(const uint256& id, const COutPoint& outpoint)
+/** The outputs that carry tokens of an id and a kind, in outpoint order, under this. */
+sidechain::StoreBytes TokenIdPrefix(const uint256& id, Token::Kind kind)
 {
     sidechain::StoreBytes key{TOKENS_BY_ID};
     sidechain::KeyCodec<uint256>::Encode(key, id);
+    key.push_back(static_cast<uint8_t>(kind));
+    return key;
+}
+sidechain::StoreBytes TokenIdKey(const Token& token, const COutPoint& outpoint)
+{
+    sidechain::StoreBytes key{TokenIdPrefix(token.id, token.kind)};
     sidechain::KeyCodec<COutPoint>::Encode(key, outpoint);
+    return key;
+}
+sidechain::StoreBytes HistoryPrefix(const AssetId& asset, DataField field)
+{
+    sidechain::StoreBytes key{HISTORY};
+    sidechain::KeyCodec<uint256>::Encode(key, asset);
+    key.push_back(static_cast<uint8_t>(field));
+    return key;
+}
+sidechain::StoreBytes HistoryKey(const AssetId& asset, DataField field, uint32_t n)
+{
+    sidechain::StoreBytes key{HistoryPrefix(asset, field)};
+    sidechain::KeyCodec<uint32_t>::Encode(key, n);
     return key;
 }
 sidechain::StoreBytes CommitmentKey(const uint256& commitment, uint64_t order, const Txid& id)
@@ -573,6 +582,38 @@ sidechain::StoreOverlay& State::Writable() const { return *Assert(m_overlay); }
 std::optional<Token> State::GetToken(const COutPoint& outpoint) const { return TOKENS.Get(*m_view, outpoint); }
 std::optional<AssetRecord> State::GetAsset(const AssetId& asset) const { return ASSETS.Get(*m_view, asset); }
 bool State::HasAsset(const AssetId& asset) const { return ASSETS.Contains(*m_view, asset); }
+
+AssetHistory State::GetHistory(const AssetId& asset) const
+{
+    AssetHistory history;
+    ForEachField([&](DataField field, auto, auto, auto history_field) {
+        auto& entries{history.*history_field};
+        using Entry = typename std::decay_t<decltype(entries)>::value_type;
+        m_view->ForEach(HistoryPrefix(asset, field), [&](const sidechain::StoreBytes&, const sidechain::StoreBytes& value) {
+            entries.push_back(sidechain::DecodeValue<Entry>(value));
+            return true;
+        });
+    });
+    return history;
+}
+
+std::optional<AssetData> State::DataAt(const AssetId& asset, int height) const
+{
+    const auto record{GetAsset(asset)};
+    if (!record || height < record->height) return std::nullopt;
+    return GetHistory(asset).AtHeight(record->height, height);
+}
+
+bool StoreLayoutCurrent(const sidechain::StoreView& view)
+{
+    if (LAYOUT.Get(view) == STORE_LAYOUT) return true;
+    // Written with the first change to the assets: a store without it has none, or has them in an earlier layout.
+    for (uint8_t table{0x30}; table <= 0x3e; ++table) {
+        const sidechain::StoreBytes prefix{table};
+        if (view.Next(prefix, prefix)) return false;
+    }
+    return true;
+}
 std::optional<uint256> State::GetReservation(const Txid& id) const { return RESERVATIONS.Get(*m_view, id.ToUint256()); }
 std::optional<Pool> State::GetPool(const uint256& id) const { return POOLS.Get(*m_view, id); }
 std::optional<Auction> State::GetAuction(const Txid& id) const { return AUCTIONS.Get(*m_view, id.ToUint256()); }
@@ -595,10 +636,10 @@ void State::ForEachReservation(const std::function<bool(const Txid&, const uint2
 void State::SetToken(const COutPoint& outpoint, const std::optional<Token>& token)
 {
     sidechain::StoreOverlay& out{Writable()};
-    if (const auto old{GetToken(outpoint)}) out.Erase(TokenIdKey(old->id, outpoint));
+    if (const auto old{GetToken(outpoint)}) out.Erase(TokenIdKey(*old, outpoint));
     if (token) {
         TOKENS.Put(out, outpoint, *token);
-        out.Put(TokenIdKey(token->id, outpoint), sidechain::EncodeValue(static_cast<uint8_t>(token->kind)));
+        out.Put(TokenIdKey(*token, outpoint), {});
     } else {
         TOKENS.Erase(out, outpoint);
     }
@@ -649,14 +690,17 @@ void State::SetPool(const uint256& id, const std::optional<Pool>& pool)
 void State::SetAuction(const Txid& id, const std::optional<Auction>& auction)
 {
     sidechain::StoreOverlay& out{Writable()};
-    if (const auto old{GetAuction(id)}) {
+    // Only auctions not closed are indexed: the rules look for those alone.
+    if (const auto old{GetAuction(id)}; old && !old->closed) {
         out.Erase(Key2(AUCTIONS_BY_ASSET, old->base, id.ToUint256()));
         out.Erase(Key2(AUCTIONS_BY_ASSET, old->quote, id.ToUint256()));
     }
     if (auction) {
         AUCTIONS.Put(out, id.ToUint256(), *auction);
-        out.Put(Key2(AUCTIONS_BY_ASSET, auction->base, id.ToUint256()), {});
-        out.Put(Key2(AUCTIONS_BY_ASSET, auction->quote, id.ToUint256()), {});
+        if (!auction->closed) {
+            out.Put(Key2(AUCTIONS_BY_ASSET, auction->base, id.ToUint256()), {});
+            out.Put(Key2(AUCTIONS_BY_ASSET, auction->quote, id.ToUint256()), {});
+        }
     } else {
         AUCTIONS.Erase(out, id.ToUint256());
     }
@@ -664,15 +708,13 @@ void State::SetAuction(const Txid& id, const std::optional<Auction>& auction)
 
 std::optional<COutPoint> State::FirstTokenOf(const uint256& id, Token::Kind kind) const
 {
-    std::optional<COutPoint> found;
-    m_view->ForEach(Prefix(TOKENS_BY_ID, id), [&](const sidechain::StoreBytes& key, const sidechain::StoreBytes& value) {
-        if (static_cast<Token::Kind>(sidechain::DecodeValue<uint8_t>(value)) != kind) return true;
-        std::span<const unsigned char> in{key};
-        in = in.subspan(33);
-        found = sidechain::KeyCodec<COutPoint>::Decode(in);
-        return false;
-    });
-    return found;
+    // The index has the kind before the outpoint: the first entry under both is the one.
+    const sidechain::StoreBytes prefix{TokenIdPrefix(id, kind)};
+    const auto first{m_view->Next(prefix, prefix)};
+    if (!first) return std::nullopt;
+    std::span<const unsigned char> in{first->first};
+    in = in.subspan(prefix.size());
+    return sidechain::KeyCodec<COutPoint>::Decode(in);
 }
 
 std::vector<std::pair<uint256, Pool>> State::PoolsOf(const AssetId& asset) const
@@ -725,15 +767,10 @@ bool State::Releasable(const AssetId& asset, std::string* why) const
     const auto record{GetAsset(asset)};
     if (!record) return no("no such asset");
     if (!record->fixed) return no("its supply is not fixed: its control coin exists");
-    // What carries it, through the index of outputs by what they carry, in outpoint order.
-    std::optional<const char*> held;
-    m_view->ForEach(Prefix(TOKENS_BY_ID, asset), [&](const sidechain::StoreBytes&, const sidechain::StoreBytes& value) {
-        const auto kind{static_cast<Token::Kind>(sidechain::DecodeValue<uint8_t>(value))};
-        if (kind == Token::Kind::ASSET) held = "someone holds some of it";
-        if (kind == Token::Kind::CONTROL) held = "its control coin exists";
-        return !held;
-    });
-    if (held) return no(*held);
+    // What carries it, through the index of outputs by what they carry: one look per kind.
+    if (FirstTokenOf(asset, Token::Kind::ASSET)) return no("someone holds some of it");
+    if (FirstTokenOf(asset, Token::Kind::CONTROL)) return no("its control coin exists");
+    // The index has the auctions not closed only.
     bool open_auction{false};
     m_view->ForEach(Prefix(AUCTIONS_BY_ASSET, asset), [&](const sidechain::StoreBytes& key, const sidechain::StoreBytes&) {
         std::span<const unsigned char> in{key};
@@ -800,6 +837,7 @@ std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, s
     }
 
     Plan plan;
+    plan.assets_tx = true;
     for (const auto& [n, token] : spent) plan.spent.push_back(tx.vin[n].prevout);
     // CHN the operation takes in, which the marker burns.
     uint64_t chn_taken{0};
@@ -855,12 +893,13 @@ std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, s
         if (reg->text) record.text = *reg->text;
         record.decimals = reg->decimals;
         record.supply = record.minted = reg->supply;
-        record.commitment.push_back({reg->data.commitment, txid, height});
-        record.ipv4.push_back({reg->data.ipv4, txid, height});
-        record.ipv6.push_back({reg->data.ipv6, txid, height});
-        record.encryption_key.push_back({reg->data.encryption_key, txid, height});
-        record.signing_key.push_back({reg->data.signing_key, txid, height});
-        record.info.push_back({reg->data.info, txid, height});
+        record.data = reg->data;
+        // Each field starts its history with its value at the registration, set or not.
+        ForEachField([&](DataField field, auto data_field, auto, auto) {
+            using T = typename std::decay_t<decltype(reg->data.*data_field)>::value_type;
+            plan.history.emplace_back(HistoryKey(reg->name, field, 0), sidechain::EncodeValue(Stamped<T>{reg->data.*data_field, txid, height}));
+            record.changes[static_cast<size_t>(field)] = 1;
+        });
         plan.assets.emplace_back(reg->name, std::move(record));
         plan.seq = std::make_pair(NextSeq(), reg->name);
     } else if (const auto* mint{op ? std::get_if<Mint>(op) : nullptr}) {
@@ -881,12 +920,17 @@ std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, s
         // The control coin of this asset, not of any.
         if (!spends(Token::Kind::CONTROL, update->asset)) return invalid("bad-ba-no-control");
         AssetRecord record{*found};
-        ApplyUpdate(record.commitment, update->updates.commitment, txid, height);
-        ApplyUpdate(record.ipv4, update->updates.ipv4, txid, height);
-        ApplyUpdate(record.ipv6, update->updates.ipv6, txid, height);
-        ApplyUpdate(record.encryption_key, update->updates.encryption_key, txid, height);
-        ApplyUpdate(record.signing_key, update->updates.signing_key, txid, height);
-        ApplyUpdate(record.info, update->updates.info, txid, height);
+        // A field set or deleted gets a new value (none, if deleted), at the end of its history.
+        ForEachField([&](DataField field, auto data_field, auto update_field, auto) {
+            const auto& change{update->updates.*update_field};
+            if (change.kind == UpdateKind::RETAIN) return;
+            auto& value{record.data.*data_field};
+            value = change.kind == UpdateKind::SET ? change.value : std::nullopt;
+            using T = typename std::decay_t<decltype(value)>::value_type;
+            uint32_t& n{record.changes[static_cast<size_t>(field)]};
+            plan.history.emplace_back(HistoryKey(update->asset, field, n), sidechain::EncodeValue(Stamped<T>{value, txid, height}));
+            ++n;
+        });
         plan.assets.emplace_back(update->asset, std::move(record));
     } else if (const auto* burn{op ? std::get_if<Burn>(op) : nullptr}) {
         std::map<AssetId, AssetRecord> changed;
@@ -1130,15 +1174,26 @@ bool State::ApplyTx(const CTransaction& tx, int height, std::vector<CTxOut>& pay
     for (const Txid& id : plan->reservations_gone) {
         if (OrderOf(id)) SetOrder(id, std::nullopt);
     }
+    // The layout of the assets in the store, with their first change (StoreLayoutCurrent).
+    if (plan->assets_tx && LAYOUT.Get(out) != STORE_LAYOUT) LAYOUT.Put(out, STORE_LAYOUT);
     for (const auto& [id, record] : plan->assets) ASSETS.Put(out, id, record);
+    for (const auto& [key, value] : plan->history) out.Put(key, value);
     if (plan->seq) {
         SEQ.Put(out, plan->seq->first, plan->seq->second);
         NEXT_SEQ.Put(out, NextSeq() + 1);
     }
     if (plan->pool) SetPool(plan->pool->first, plan->pool->second);
     for (const uint256& id : plan->pools_gone) SetPool(id, std::nullopt);
-    // The name is free again; its number is not given again (lists skip it).
-    if (plan->asset_gone) ASSETS.Erase(out, *plan->asset_gone);
+    // The name is free again; its number is not given again (lists skip it). Its history goes with it.
+    if (plan->asset_gone) {
+        ASSETS.Erase(out, *plan->asset_gone);
+        std::vector<sidechain::StoreBytes> history;
+        out.ForEach(Prefix(HISTORY, *plan->asset_gone), [&](const sidechain::StoreBytes& key, const sidechain::StoreBytes&) {
+            history.push_back(key);
+            return true;
+        });
+        for (const sidechain::StoreBytes& key : history) out.Erase(key);
+    }
     if (released) *released = plan->released;
     if (plan->auction) SetAuction(plan->auction->first, plan->auction->second);
     payouts.insert(payouts.end(), plan->payouts.begin(), plan->payouts.end());

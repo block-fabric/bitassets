@@ -396,6 +396,15 @@ struct Stamped {
     friend bool operator==(const Stamped&, const Stamped&) = default;
 };
 
+/** The fields of the data of an asset, in the order of AssetData: their numbers in the keys of the history. */
+enum class DataField : uint8_t { COMMITMENT = 0, IPV4 = 1, IPV6 = 2, ENCRYPTION_KEY = 3, SIGNING_KEY = 4, INFO = 5 };
+inline constexpr size_t DATA_FIELDS{6};
+static_assert(DATA_FIELDS == 6, "AssetRecord serializes each count");
+
+/**
+ * An asset as it is now. Every value each field of its data has had is kept apart, one entry per
+ * value (State::GetHistory), so that a change to it reads and writes a record of fixed size.
+ */
 struct AssetRecord {
     uint32_t seq{0};
     Txid registration;
@@ -409,23 +418,33 @@ struct AssetRecord {
     uint64_t burned{0};
     //! Whether the control coin was burned: no more can be minted, the data cannot change.
     bool fixed{false};
+    //! Its data now.
+    AssetData data;
+    //! How many values each field has had (its registration's included): where its history ends.
+    std::array<uint32_t, DATA_FIELDS> changes{};
+
+    SERIALIZE_METHODS(AssetRecord, obj)
+    {
+        READWRITE(obj.seq, obj.registration, obj.height, obj.text, obj.decimals, obj.supply, obj.minted, obj.burned, obj.fixed,
+                  obj.data, obj.changes[0], obj.changes[1], obj.changes[2], obj.changes[3], obj.changes[4], obj.changes[5]);
+    }
+    friend bool operator==(const AssetRecord&, const AssetRecord&) = default;
+
+    const AssetData& Current() const { return data; }
+};
+
+/** Every value each field of the data of an asset has had, oldest first, with where it was set. */
+struct AssetHistory {
     std::vector<Stamped<uint256>> commitment;
     std::vector<Stamped<SocketV4>> ipv4;
     std::vector<Stamped<SocketV6>> ipv6;
     std::vector<Stamped<EncryptionKey>> encryption_key;
     std::vector<Stamped<SigningKey>> signing_key;
     std::vector<Stamped<std::string>> info;
+    friend bool operator==(const AssetHistory&, const AssetHistory&) = default;
 
-    SERIALIZE_METHODS(AssetRecord, obj)
-    {
-        READWRITE(obj.seq, obj.registration, obj.height, obj.text, obj.decimals, obj.supply, obj.minted, obj.burned, obj.fixed,
-                  obj.commitment, obj.ipv4, obj.ipv6, obj.encryption_key, obj.signing_key, obj.info);
-    }
-    friend bool operator==(const AssetRecord&, const AssetRecord&) = default;
-
-    AssetData Current() const;
-    /** The data at the end of the block at `height`; nullopt before the registration. */
-    std::optional<AssetData> AtHeight(int height) const;
+    /** The data at the end of the block at `height`; nullopt before `registered`, the height of the registration. */
+    std::optional<AssetData> AtHeight(int registered, int height) const;
 };
 
 /** A pool of two assets, `asset0` < `asset1`. */
@@ -537,10 +556,12 @@ struct Result {
 /**
  * The assets, on the store of the sidechain state (sidechain/store.h), one entry per key. Tables:
  * 0x30 what outputs carry, 0x31 assets, 0x32 reservations not revealed yet, 0x33 assets by number,
- * 0x34 pools, 0x35 auctions, 0x36 the order of reservations; single values 0x37 the next number,
- * 0x38 the next order. Indexes, so that no rule reads a table whole: 0x39 outputs by what they
- * carry (its id, with the kind), 0x3a pools by asset, 0x3b auctions by asset, 0x3c reservations by
- * commitment then order. What a block changes, the store's journal notes: its undo data.
+ * 0x34 pools, 0x35 auctions, 0x36 the order of reservations, 0x3e the history of the data of the
+ * assets (by asset, field, then position); single values 0x37 the next number, 0x38 the next
+ * order, 0x3f the layout of these tables (STORE_LAYOUT). Indexes, so that no rule reads a table
+ * whole: 0x39 outputs by what they carry (its id, then its kind), 0x3a pools by asset, 0x3b
+ * auctions not closed by asset, 0x3c reservations by commitment then order. What a block changes,
+ * the store's journal notes: its undo data.
  */
 class State
 {
@@ -566,6 +587,10 @@ public:
 
     std::optional<Token> GetToken(const COutPoint& outpoint) const;
     std::optional<AssetRecord> GetAsset(const AssetId& asset) const;
+    /** Every value each field of the data of an asset has had (read whole: for those who look). */
+    AssetHistory GetHistory(const AssetId& asset) const;
+    /** The data of an asset at the end of the block at `height`; nullopt if not registered then (or now). */
+    std::optional<AssetData> DataAt(const AssetId& asset, int height) const;
     bool HasAsset(const AssetId& asset) const;
     std::optional<uint256> GetReservation(const Txid& id) const;
     std::optional<Pool> GetPool(const uint256& id) const;
@@ -603,6 +628,16 @@ private:
     const sidechain::StoreView* m_view;
     sidechain::StoreOverlay* m_overlay;
 };
+
+/**
+ * The layout of the tables of the assets in the store. A store of another layout (one written by an
+ * earlier version) is not read: the node derives the state again from the blocks (StoreLayoutCurrent).
+ *  1: the history of an asset's data in its record; outputs indexed by id only; closed auctions indexed.
+ *  2: the history apart (0x3e); outputs indexed by id then kind; closed auctions out of the index.
+ */
+inline constexpr uint32_t STORE_LAYOUT{2};
+/** Whether the assets in a store are in the layout of this version, or there are none yet. */
+bool StoreLayoutCurrent(const sidechain::StoreView& view);
 
 /** Whether the marker of a transaction, if any, is well formed. This depends on the transaction alone. */
 [[nodiscard]] bool CheckMarker(const CTransaction& tx, std::string& reject_reason);
