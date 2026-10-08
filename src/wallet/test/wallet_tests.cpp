@@ -4,9 +4,12 @@
 
 #include <wallet/wallet.h>
 
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <future>
 #include <memory>
+#include <thread>
 #include <vector>
 
 #include <addresstype.h>
@@ -709,6 +712,50 @@ BOOST_FIXTURE_TEST_CASE(CreateWallet, TestChain100Setup)
 
 
     TestUnloadWallet(std::move(wallet));
+}
+
+//! A load handler is called without the wallets' lock, and once disconnected it is never called
+//! again: disconnecting waits for a call in flight (its owner may be deleted right after).
+BOOST_FIXTURE_TEST_CASE(load_wallet_handler_disconnect, TestingSetup)
+{
+    WalletContext context;
+    context.args = &m_args;
+    auto wallet = std::make_shared<CWallet>(m_node.chain.get(), "", CreateMockableWalletDatabase());
+
+    std::promise<void> entered;
+    std::promise<void> release;
+    std::shared_future<void> released{release.get_future().share()};
+    std::atomic<int> calls{0};
+    std::atomic<int> other_calls{0};
+    auto handler = HandleLoadWallet(context, [&](std::unique_ptr<interfaces::Wallet>) {
+        GetWallets(context); // the wallets' lock is free
+        if (++calls == 1) {
+            entered.set_value();
+            released.wait();
+        }
+    });
+    auto other = HandleLoadWallet(context, [&](std::unique_ptr<interfaces::Wallet>) { ++other_calls; });
+
+    std::thread notifier{[&] { NotifyWalletLoaded(context, wallet); }};
+    entered.get_future().wait();
+    std::atomic<bool> disconnected{false};
+    std::thread remover{[&] { handler->disconnect(); disconnected = true; }};
+    std::this_thread::sleep_for(std::chrono::milliseconds{200});
+    BOOST_CHECK(!disconnected); // waits for the call in flight
+    release.set_value();
+    remover.join();
+    notifier.join();
+    BOOST_CHECK(disconnected);
+    BOOST_CHECK_EQUAL(calls, 1);
+    BOOST_CHECK_EQUAL(other_calls, 1);
+
+    NotifyWalletLoaded(context, wallet);
+    BOOST_CHECK_EQUAL(calls, 1);
+    BOOST_CHECK_EQUAL(other_calls, 2);
+    handler.reset(); // destroying a disconnected handler is harmless
+    other.reset();
+    NotifyWalletLoaded(context, wallet);
+    BOOST_CHECK_EQUAL(other_calls, 2);
 }
 
 BOOST_FIXTURE_TEST_CASE(CreateWalletWithoutChain, BasicTestingSetup)
