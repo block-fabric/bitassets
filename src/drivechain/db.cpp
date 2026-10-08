@@ -318,15 +318,33 @@ std::vector<Deposit> Database::ListBlockDeposits(SidechainId slot, int height) c
     return deposits;
 }
 
-std::optional<std::vector<Deposit>> Database::ListDeposits(SidechainId slot, const std::optional<uint256>& after, size_t count) const
+std::optional<std::vector<Deposit>> Database::ListDeposits(SidechainId slot, const std::optional<uint256>& after, size_t count,
+                                                           const std::function<bool(const uint256&)>& in_active_chain) const
 {
     std::vector<Deposit> deposits;
     DepositKey start{slot, 0, 0};
     if (after) {
         // Straight to the change the caller knows, by its txid: not through all those before it.
-        if (!m_db.Read(DepositTxidKey{slot, *after}, start)) return std::nullopt;
         Deposit known;
-        if (!m_db.Read(start, known) || known.slot != slot || known.tx->GetHash().ToUint256() != *after) return std::nullopt;
+        const bool indexed{m_db.Read(DepositTxidKey{slot, *after}, start) && m_db.Read(start, known) &&
+                           known.slot == slot && known.tx->GetHash().ToUint256() == *after};
+        if (!indexed || !in_active_chain(known.block_hash)) {
+            // The txid entry names the record of a block that left the chain, or the entry went with
+            // such a record (a crash after a reorg can leave either). Going on from there would skip,
+            // or repeat, changes: the record of the transaction in the active chain is looked for
+            // instead, through the sidechain's records (an `after` that is no change at all costs that).
+            std::optional<DepositKey> found;
+            const std::unique_ptr<CDBIterator> it{m_db.NewIterator()};
+            for (it->Seek(DepositKey{slot, 0, 0}); it->Valid(); it->Next()) {
+                DepositKey key;
+                if (!it->GetKey(key) || key.slot != slot) break;
+                Deposit deposit;
+                if (!it->GetValue(deposit)) break;
+                if (deposit.tx->GetHash().ToUint256() == *after && in_active_chain(deposit.block_hash)) found = key;
+            }
+            if (!found) return std::nullopt;
+            start = *found;
+        }
     }
     const std::unique_ptr<CDBIterator> it{m_db.NewIterator()};
     it->Seek(start);
@@ -336,6 +354,7 @@ std::optional<std::vector<Deposit>> Database::ListDeposits(SidechainId slot, con
         if (!it->GetKey(key) || key.slot != slot) break;
         Deposit deposit;
         if (!it->GetValue(deposit)) break;
+        if (!in_active_chain(deposit.block_hash)) continue;
         deposits.push_back(std::move(deposit));
         if (count != 0 && deposits.size() >= count) break;
     }

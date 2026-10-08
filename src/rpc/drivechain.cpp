@@ -855,15 +855,19 @@ RPCMethod listsidechaindeposits()
     if (count == 0) count = MAX_DEPOSITS_LISTED;
 
     LOCK(::cs_main);
-    const auto deposits{chainman.m_blockman.m_drivechain_db->ListDeposits(id, after, static_cast<size_t>(count))};
+    // Records left by blocks the active chain no longer has (a crash between a reorg and the next
+    // flush can leave some) are neither listed nor counted, nor taken as the place to go on from.
+    const auto in_active_chain{[&](const uint256& block_hash) {
+        AssertLockHeld(::cs_main);
+        const CBlockIndex* pindex{chainman.m_blockman.LookupBlockIndex(block_hash)};
+        return pindex && chainman.ActiveChain().Contains(*pindex);
+    }};
+    const auto deposits{chainman.m_blockman.m_drivechain_db->ListDeposits(id, after, static_cast<size_t>(count), in_active_chain)};
     if (!deposits) throw JSONRPCError(RPC_INVALID_PARAMETER, "The transaction given in 'after' is not an escrow change of this sidechain in the active chain");
 
     UniValue result(UniValue::VARR);
     for (const drivechain::Deposit& deposit : *deposits) {
-        const CBlockIndex* pindex{chainman.m_blockman.LookupBlockIndex(deposit.block_hash)};
-        // A record left by a block the active chain no longer has (a crash between a reorg and the
-        // next write of the state can leave one) is not a deposit.
-        if (!pindex || !chainman.ActiveChain().Contains(*pindex)) continue;
+        const CBlockIndex* pindex{Assert(chainman.m_blockman.LookupBlockIndex(deposit.block_hash))};
         UniValue obj(UniValue::VOBJ);
         obj.pushKV("slot", deposit.slot);
         obj.pushKV("destination", deposit.destination);
@@ -873,7 +877,7 @@ RPCMethod listsidechaindeposits()
         obj.pushKV("burnindex", deposit.burn_index);
         obj.pushKV("txindex", deposit.tx_index);
         obj.pushKV("blockhash", deposit.block_hash.GetHex());
-        obj.pushKV("confirmations", pindex && chainman.ActiveChain().Contains(*pindex) ? chainman.ActiveHeight() - pindex->nHeight + 1 : 0);
+        obj.pushKV("confirmations", chainman.ActiveHeight() - pindex->nHeight + 1);
         obj.pushKV("hex", EncodeHexTx(*deposit.tx));
         result.push_back(std::move(obj));
     }

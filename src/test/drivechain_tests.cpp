@@ -1612,22 +1612,49 @@ BOOST_AUTO_TEST_CASE(database_records)
         BOOST_CHECK(!db.FindClosure(2, uint256{0xc1}, all));
     }
 
+    const auto any{[](const uint256&) { return true; }};
     // Deposits after one, found by its txid, a few at a time.
-    const auto all{db.ListDeposits(1, std::nullopt, 0)};
+    const auto all{db.ListDeposits(1, std::nullopt, 0, any)};
     BOOST_REQUIRE(all);
     BOOST_CHECK_EQUAL(all->size(), 5U);
-    const auto after{db.ListDeposits(1, txids[1], 2)};
+    const auto after{db.ListDeposits(1, txids[1], 2, any)};
     BOOST_REQUIRE(after);
     BOOST_REQUIRE_EQUAL(after->size(), 2U);
     BOOST_CHECK((*after)[0].tx->GetHash().ToUint256() == txids[2]);
     BOOST_CHECK((*after)[1].tx->GetHash().ToUint256() == txids[3]);
-    BOOST_CHECK(db.ListDeposits(1, txids[4], 0)->empty());
-    BOOST_CHECK(!db.ListDeposits(1, uint256{0x77}, 0));
-    BOOST_CHECK(!db.ListDeposits(2, txids[0], 0));
+    BOOST_CHECK(db.ListDeposits(1, txids[4], 0, any)->empty());
+    BOOST_CHECK(!db.ListDeposits(1, uint256{0x77}, 0, any));
+    BOOST_CHECK(!db.ListDeposits(2, txids[0], 0, any));
+    // Records of blocks that are not in the active chain are skipped, and not counted.
+    {
+        const auto without_second{[&](const uint256& h) { return h != blocks[1].first; }};
+        const auto page{db.ListDeposits(1, txids[0], 2, without_second)};
+        BOOST_REQUIRE(page);
+        BOOST_REQUIRE_EQUAL(page->size(), 2U);
+        BOOST_CHECK((*page)[0].tx->GetHash().ToUint256() == txids[2]);
+        BOOST_CHECK((*page)[1].tx->GetHash().ToUint256() == txids[3]);
+        // Nor taken as the place to go on from.
+        BOOST_CHECK(!db.ListDeposits(1, txids[1], 0, without_second));
+    }
     // A block taken out of the chain takes its deposits, and their txids, with it.
     BOOST_CHECK(db.EraseBlockDeposits(blocks[4].first));
-    BOOST_CHECK(!db.ListDeposits(1, txids[4], 0));
-    BOOST_CHECK_EQUAL(db.ListDeposits(1, std::nullopt, 0)->size(), 4U);
+    BOOST_CHECK(!db.ListDeposits(1, txids[4], 0, any));
+    BOOST_CHECK_EQUAL(db.ListDeposits(1, std::nullopt, 0, any)->size(), 4U);
+    // The txid entry naming the record of a block that left the chain (the same transaction in a
+    // block of another branch, left by a crash): the place to go on from is its record in the active chain.
+    {
+        const uint256 stale{0x5e};
+        Deposit copy{blocks[2].second.at(0)};
+        copy.block_hash = stale;
+        BOOST_REQUIRE(db.WriteBlock(stale, 20, BlockUndo{}, {copy}, chain.scdb));
+        BOOST_CHECK(db.ListDeposits(1, txids[2], 0, any)->empty());
+        const auto active{[&](const uint256& h) { return h != stale; }};
+        const auto page{db.ListDeposits(1, txids[2], 0, active)};
+        BOOST_REQUIRE(page);
+        BOOST_REQUIRE_EQUAL(page->size(), 1U);
+        BOOST_CHECK((*page)[0].tx->GetHash().ToUint256() == txids[3]);
+        BOOST_CHECK(db.EraseBlockDeposits(stale));
+    }
 
     // The snapshot: read back as written; a missing or unreadable one leaves nothing behind.
     BOOST_REQUIRE(db.WriteState("", chain.scdb));
@@ -1643,7 +1670,7 @@ BOOST_AUTO_TEST_CASE(database_records)
     BOOST_CHECK(db.IsCurrentFormat());
     BOOST_CHECK(!db.ReadState("", read));
     BOOST_CHECK(!db.ReadBlockEvents(blocks[0].first, events));
-    BOOST_CHECK(!db.ListDeposits(1, txids[0], 0));
+    BOOST_CHECK(!db.ListDeposits(1, txids[0], 0, any));
 }
 
 BOOST_AUTO_TEST_CASE(database_params_fingerprint)

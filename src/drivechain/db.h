@@ -107,13 +107,16 @@ public:
     bool ReadState(const std::string& chainstate, SidechainDB& scdb) const;
 
     /**
-     * Escrow changes of a sidechain in chain order.
+     * Escrow changes of a sidechain in chain order, of the blocks `in_active_chain` accepts. Records
+     * of other blocks (a crash between a reorg and the next flush can leave some) are skipped, and
+     * do not count towards `count`.
      *
      * @param[in] after  if set, the txid of the last change the caller knows about; only later ones are returned
      * @param[in] count  maximum number of changes to return, zero for no limit
-     * @return nullopt if `after` is not a known escrow change of the sidechain
+     * @return nullopt if `after` is not an escrow change of the sidechain in an accepted block
      */
-    std::optional<std::vector<Deposit>> ListDeposits(SidechainId slot, const std::optional<uint256>& after, size_t count) const;
+    std::optional<std::vector<Deposit>> ListDeposits(SidechainId slot, const std::optional<uint256>& after, size_t count,
+                                                     const std::function<bool(const uint256&)>& in_active_chain) const;
     /** Escrow changes of a sidechain made by the block of the active chain at `height`, in block order. */
     std::vector<Deposit> ListBlockDeposits(SidechainId slot, int height) const;
 
