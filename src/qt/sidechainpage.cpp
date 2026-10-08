@@ -408,9 +408,12 @@ void SidechainPage::deposit()
         return;
     }
     // Without the checks of a deposit address, a destination the sidechain does not understand is lost there.
+    // The page, or the wallet, may be gone after a message box (its event loop runs everything else).
+    const QPointer<SidechainPage> self{this};
     if (kind == drivechain::DepositAddressKind::PLAIN &&
         QMessageBox::question(this, tr("Sidechains"), tr("\"%1\" is not a deposit address (s<slot>_<address>_<checksum>), so it cannot be checked. If the sidechain does not understand it, the coins are lost. Deposit anyway?").arg(destination),
                               QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes) return;
+    if (!self || !m_wallet_model) return;
     if (!m_deposit_amount->validate() || m_deposit_amount->value() <= 0) {
         QMessageBox::warning(this, tr("Sidechains"), tr("Enter the amount to deposit."));
         return;
@@ -420,9 +423,10 @@ void SidechainPage::deposit()
     const QString question{tr("Deposit %1 to the sidechain \"%2\" (slot %3), to be credited there to:\n\n%4\n\nCoins deposited to a sidechain can only come back through a withdrawal approved by the miners.")
                                .arg(BitcoinUnits::formatWithUnit(unit, amount), selected(m_sidechains, 1), slot, destination)};
     if (QMessageBox::question(this, tr("Confirm sidechain deposit"), question, QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes) return;
+    if (!self || !m_wallet_model) return;
 
     WalletModel::UnlockContext unlock{m_wallet_model->requestUnlock()};
-    if (!unlock.isValid()) return;
+    if (!unlock.isValid() || !self || !m_wallet_model) return;
 
     UniValue params{UniValue::VARR};
     params.push_back(slot.toInt());
@@ -430,6 +434,7 @@ void SidechainPage::deposit()
     params.push_back(ValueFromAmount(amount));
     if (const auto result{call("createsidechaindeposit", params, /*wallet=*/true)}) {
         QMessageBox::information(this, tr("Sidechains"), tr("Deposit sent in transaction %1.").arg(Text((*result)["txid"])));
+        if (!self) return;
         m_deposit_destination->clear();
         m_deposit_amount->clear();
         refresh();

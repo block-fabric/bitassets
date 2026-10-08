@@ -7,6 +7,7 @@
 
 #include <univalue.h>
 
+#include <QPointer>
 #include <QWidget>
 
 #include <optional>
@@ -73,7 +74,8 @@ private:
     static QString selected(const QTableWidget* table, int column);
 
     ClientModel* m_client_model{nullptr};
-    WalletModel* m_wallet_model{nullptr};
+    //! Guarded: the wallet may be unloaded while a message box of this page is shown.
+    QPointer<WalletModel> m_wallet_model;
 
     QLabel* m_summary{nullptr};
     QTabWidget* m_tabs{nullptr};
