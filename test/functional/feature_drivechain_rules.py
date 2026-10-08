@@ -222,7 +222,7 @@ class DrivechainRulesTest(BitcoinTestFramework):
         self.sync_all()
 
     def test_wallet_avoids_pinned_parents(self):
-        self.log.info("The wallet pays nothing but small BMM requests and deposits from the unconfirmed change of a BMM request")
+        self.log.info("The wallet pays nothing but small BMM requests from the unconfirmed change of a BMM request")
         node = self.nodes[0]
         node.createwallet("pinning")
         wallet = node.get_wallet_rpc("pinning")
@@ -251,10 +251,10 @@ class DrivechainRulesTest(BitcoinTestFramework):
         # It is listed all the same.
         assert any(u["txid"] == request["txid"] for u in wallet.listunspent(0))
 
-        # A deposit may be paid from it: it is small enough for the mempool to take it.
-        deposit = wallet.createsidechaindeposit(SLOT, "dest", Decimal("0.5"))
-        assert deposit["txid"] in node.getrawmempool()
-        assert request["txid"] in [i["txid"] for i in wallet.getrawtransaction(deposit["txid"], True)["vin"]]
+        # Neither is a deposit, though the mempool would take it (it is small): it would leave the
+        # mempool with the request if that is not in the next block. The wallet says why.
+        assert_raises_rpc_error(-6, "unconfirmed change of a BMM request", wallet.createsidechaindeposit, SLOT, "dest", Decimal("0.5"))
+        assert not any(request["txid"] in [i["txid"] for i in node.getrawtransaction(t, True)["vin"]] for t in node.getrawmempool())
         self.mine()
         self.sync_all()
         wallet.unloadwallet()
