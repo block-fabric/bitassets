@@ -86,6 +86,8 @@ public:
     bool HasBlockUndo(const uint256& block_hash) const;
     /** Erase the undo data of a block (not its events), once no reorg can take it back. */
     void EraseBlockUndo(const uint256& block_hash);
+    /** The same for several blocks, in one batch. */
+    void EraseBlockUndo(const std::vector<uint256>& block_hashes);
     bool ReadBlockEvents(const uint256& block_hash, BlockEvents& events) const;
     /** Remove the escrow changes of a block that is no longer in the active chain from the index. */
     bool EraseBlockDeposits(const uint256& block_hash);

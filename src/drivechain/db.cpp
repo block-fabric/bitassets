@@ -239,6 +239,13 @@ void Database::EraseBlockUndo(const uint256& block_hash)
     m_db.Erase(std::make_pair(DB_UNDO, block_hash));
 }
 
+void Database::EraseBlockUndo(const std::vector<uint256>& block_hashes)
+{
+    CDBBatch batch{m_db};
+    for (const uint256& block_hash : block_hashes) batch.Erase(std::make_pair(DB_UNDO, block_hash));
+    m_db.WriteBatch(batch);
+}
+
 bool Database::ReadBlockEvents(const uint256& block_hash, BlockEvents& events) const
 {
     BlockRecord record;

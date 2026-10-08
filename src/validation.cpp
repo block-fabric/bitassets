@@ -3030,6 +3030,7 @@ bool Chainstate::FlushStateToDisk(
                     m_blockman.m_drivechain_db->WriteState(DrivechainStateName(), m_scdb);
                 }
                 m_last_flushed_block = m_blockman.LookupBlockIndex(CoinsTip().GetBestBlock());
+                EraseDrivechainUndo();
                 full_flush_completed = true;
                 TRACEPOINT(utxocache, flush,
                     int64_t{Ticks<std::chrono::microseconds>(NodeClock::now() - nNow)},
@@ -3187,6 +3188,9 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
         }
         view.Flush(/*reallocate_cache=*/false); // local CCoinsViewCache goes out of scope
         m_blockman.m_drivechain_db->EraseBlockDeposits(pindexDelete->GetBlockHash());
+        // The blocks connected next, at this height and above, keep their undo data until a flush
+        // puts them deep enough (a reorg deeper than DRIVECHAIN_UNDO_DEPTH gets here).
+        m_drivechain_undo_erased_height = std::min(m_drivechain_undo_erased_height, pindexDelete->nHeight - 1);
     }
     LogDebug(BCLog::BENCH, "- Disconnect block: %.2fms\n",
              Ticks<MillisecondsDouble>(SteadyClock::now() - time_start));
@@ -3285,10 +3289,8 @@ bool Chainstate::ConnectTip(
             LogError("%s: ConnectBlock %s failed, %s\n", __func__, pindexNew->GetBlockHash().ToString(), state.ToString());
             return false;
         }
-        // The block now at DRIVECHAIN_UNDO_DEPTH no reorg takes back: its sidechain undo data goes.
-        if (pindexNew->nHeight >= DRIVECHAIN_UNDO_DEPTH) {
-            m_blockman.m_drivechain_db->EraseBlockUndo(pindexNew->GetAncestor(pindexNew->nHeight - DRIVECHAIN_UNDO_DEPTH)->GetBlockHash());
-        }
+        // (The sidechain undo data of blocks no reorg takes back goes when the chainstate is
+        // flushed: see EraseDrivechainUndo.)
         time_3 = SteadyClock::now();
         m_chainman.time_connect_total += time_3 - time_2;
         assert(m_chainman.num_blocks_total > 0);
@@ -4972,11 +4974,33 @@ std::string Chainstate::DrivechainStateName() const
     return m_from_snapshot_blockhash ? m_from_snapshot_blockhash->ToString() : std::string{};
 }
 
+void Chainstate::EraseDrivechainUndo()
+{
+    AssertLockHeld(::cs_main);
+    const CBlockIndex* flushed{m_last_flushed_block};
+    if (!flushed || !m_chain.Contains(*flushed)) return;
+    const int last{flushed->nHeight - DRIVECHAIN_UNDO_DEPTH};
+    std::vector<uint256> hashes;
+    for (int height{std::max(0, m_drivechain_undo_erased_height + 1)}; height <= last; ++height) {
+        hashes.push_back(m_chain[height]->GetBlockHash());
+        // In batches: after a long initial sync without a flush there can be many.
+        if (hashes.size() >= 10'000) {
+            m_blockman.m_drivechain_db->EraseBlockUndo(hashes);
+            hashes.clear();
+        }
+    }
+    if (!hashes.empty()) m_blockman.m_drivechain_db->EraseBlockUndo(hashes);
+    m_drivechain_undo_erased_height = std::max(m_drivechain_undo_erased_height, last);
+}
+
 bool Chainstate::LoadDrivechainState()
 {
     AssertLockHeld(::cs_main);
     const CBlockIndex* tip{m_chain.Tip()};
     if (!tip) return true;
+    // The tip is the flushed block: the undo data below it out of reach was erased then (or is
+    // erased below by the roll forward).
+    m_drivechain_undo_erased_height = tip->nHeight - DRIVECHAIN_UNDO_DEPTH;
 
     drivechain::Database& db{*m_blockman.m_drivechain_db};
     switch (db.CheckFormat()) {

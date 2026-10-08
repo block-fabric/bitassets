@@ -75,8 +75,10 @@ replaying every proposal and closure since its slot activated.
   those it proposed, those pending after it with their scores, and its escrow changes): for good,
   for `getsidechainevents` and `listsidechaindeposits`. The pending bundles cost about 36 bytes per
   bundle per block for the sidechains that have any.
-* Per block, the changes it made to the database, to take it back in a reorg: only for the last
-  `DRIVECHAIN_UNDO_DEPTH` (2880) blocks of the active chain. A reorg deeper than that derives the
+* Per block, the changes it made to the database, to take it back in a reorg: only for the blocks
+  of the active chain less than `DRIVECHAIN_UNDO_DEPTH` (2880) below the last block flushed to disk
+  (erased as the chainstate is flushed, not as blocks connect: a node that stops uncleanly restarts
+  from the flushed block, and must find the undo data of every block a reorg from there can reach). A reorg deeper than that derives the
   database from the blocks (slow, and impossible on a pruned node, which cannot reorg that deep in
   any case); `verifychain` goes as deep as the undo data.
 * Bundles that were paid out, for good: they can never be proposed again. Bundles that failed, for a

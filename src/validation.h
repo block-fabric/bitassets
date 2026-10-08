@@ -827,6 +827,16 @@ public:
     std::string DrivechainStateName() const;
 
     /**
+     * Erase the drivechain undo data of the blocks of the active chain DRIVECHAIN_UNDO_DEPTH or more
+     * below the last flushed block, which no reorg takes back. Relative to what is on disk rather
+     * than to the tip: after an unclean shutdown the node restarts from the flushed block, and a
+     * reorg from there must still find the undo data of the blocks within reach.
+     */
+    void EraseDrivechainUndo() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    //! Height up to which EraseDrivechainUndo erased the undo data of the active chain.
+    int m_drivechain_undo_erased_height GUARDED_BY(::cs_main){-1};
+
+    /**
      * Remove the mempool transactions that the drivechain rules no longer
      * allow in a block on top of the tip: requests for blind merged mining made
      * for another block, and deposits that do not follow from the current

@@ -21,6 +21,7 @@
 #include <streams.h>
 #include <test/util/setup_common.h>
 #include <uint256.h>
+#include <validation.h>
 #include <crypto/common.h>
 #include <tinyformat.h>
 #include <util/strencodings.h>
@@ -1681,6 +1682,38 @@ BOOST_AUTO_TEST_CASE(database_params_fingerprint)
         db.WriteFormatVersion();
         BOOST_CHECK(db.IsCurrentFormat());
     }
+}
+
+BOOST_FIXTURE_TEST_CASE(undo_erased_below_the_flushed_block, TestChain100Setup)
+{
+    // The drivechain undo data of a block goes once it is DRIVECHAIN_UNDO_DEPTH below the last
+    // flushed block, not below the tip: a node that stops uncleanly restarts from the flushed block,
+    // and a reorg from there must find the undo data of every block within reach.
+    Chainstate& chainstate{m_node.chainman->ActiveChainstate()};
+    const auto check{[&] {
+        LOCK(::cs_main);
+        const int flushed{chainstate.GetLastFlushedBlock()->nHeight};
+        for (int height{1}; height <= chainstate.m_chain.Height(); ++height) {
+            const bool kept{m_node.chainman->m_blockman.m_drivechain_db->HasBlockUndo(chainstate.m_chain[height]->GetBlockHash())};
+            BOOST_CHECK_MESSAGE(kept == (height > flushed - DRIVECHAIN_UNDO_DEPTH), strprintf("height %d, flushed %d", height, flushed));
+        }
+        return flushed;
+    }};
+    const auto flush{[&] {
+        LOCK(::cs_main);
+        BlockValidationState state;
+        BOOST_REQUIRE(chainstate.FlushStateToDisk(state, FlushStateMode::FORCE_FLUSH));
+    }};
+    flush();
+    const int flushed{check()};
+    mineBlocks(DRIVECHAIN_UNDO_DEPTH + 20);
+    // Unless a periodic flush came meanwhile, nothing was erased: the tip is far ahead of what is on disk.
+    if (check() == flushed) {
+        LOCK(::cs_main);
+        BOOST_CHECK(m_node.chainman->m_blockman.m_drivechain_db->HasBlockUndo(chainstate.m_chain[chainstate.m_chain.Height() - DRIVECHAIN_UNDO_DEPTH]->GetBlockHash()));
+    }
+    flush();
+    BOOST_CHECK_EQUAL(check(), WITH_LOCK(::cs_main, return chainstate.m_chain.Height()));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
