@@ -14,11 +14,19 @@ based sidechain, with Bitcoin's keys and transactions, and without the defects o
   (zero is allowed) and its **control coin**. The window ("Assets", in the sidebar) does both steps.
   Bound to its output's script, a reservation cannot be copied to any use: a copy made by someone
   else, with an output of their own, commits to nothing they can reveal.
+- **A reservation is revealed only once it is deep enough** (`bitassets_reveal_depth` blocks: 6 on
+  the main network, 3 on the test network and signet, 2 on regtest, as for BitNames): a
+  registration in block *h* of a reservation made in block *r* needs *h - r* ≥ the depth. Whoever
+  makes a block sees every registration waiting for it; without this, it could reserve the same
+  name under a nonce of its own and register it in its own block, ahead of the one it saw.
+  `registerasset` refuses to register sooner and says from which block it can; `listmyassets`
+  gives each reservation's `registers_from` and `wait`, and `getbitassetsinfo` the depth
+  (`reveal_depth`). The window waits as long by itself.
 - **A name may not read as another asset**: not CHN (in any case), not like a number
   (`1739-0029`, `0001-1739-0029`), not starting with `0x`.
 - **An asset is known by the SHA-256 hash of its name.** The registration publishes the name
   unless asked not to; an asset can be named by its name, `0x` and its hash, or its number
-  (`1739-0029` for the first), and CHN by `CHN`.
+  (`1739-0029` for the first), and CHN by `CHN`, in the node's commands and the wallet's alike.
 - **Decimals** (0 to 12) are set at registration and only change how amounts are shown: with 2,
   1.5 is 150 units.
 - **The control coin** mints more (`mintasset`) and changes the asset's data (`updateasset`): a
@@ -44,6 +52,10 @@ spends a token without carrying it on, or outputs one it does not have, is inval
 - `addliquidity` puts both assets in, for shares of the pool (tokens like any other). The first
   deposit makes the pool and sets its price; it keeps 1000 shares for good, so that a pool is never
   emptied. Later deposits go in at the pool's price.
+- A pool everyone has left (*abandoned*: only the 1000 shares nobody holds) takes no trades, and is
+  reopened as a new pool is made: the wallet and the window want both amounts, which set its price,
+  and say so. What it holds is dust, at whatever price the last trade or provider left it — a price
+  anyone can set, which nobody should deposit at unawares.
 - `swapasset` pays one asset in and takes at least an amount of the other out (the slippage the
   trade accepts); `quoteswap` says what a trade gives now. `removeliquidity` gives shares back for
   both assets; a side that rounds to nothing is left out, so that a small provider can always leave.
@@ -56,6 +68,8 @@ spends a token without carrying it on, or outputs one it does not have, is inval
 - The transaction outputs a **receipt**. Its holder collects (`collectauction`) what the auction
   brought in and what is left of what it sold, once it has ended or sold out — or at once, before
   any bid, which cancels it.
+- `getauction` and `quotebid` give what all that is left costs in the next block
+  (`cost_of_remaining`); the window's "Buy all" asks about that amount.
 - An auction starts within 52560 blocks (about a year) of the one that makes it.
 
 ## Retiring an asset
@@ -81,14 +95,28 @@ it went in).
 
 ## Rules by height
 
-The rules of the second audit (October 2026) apply from `bitassets_audit2_height`: from the start
-on mainnet, signet and regtest; on the test network from the height set when it is deployed.
-Reservations made before it, committing to the name alone, still register after it, under the rule
-of the first audit (only the oldest reservation of a commitment reveals it).
+The rules of the first audit apply from `bitassets_audit_height`, those of the second (October 2026)
+from `bitassets_audit2_height`: from the start on mainnet, signet and regtest; on the test network
+both from the height set when it is deployed (the first no later than the second, so that what the
+second leaves to the first applies as soon as the second does).
 
-A node stores the assets in a layout of its version (`bitassets::STORE_LAYOUT`); one that finds them
-in an earlier layout derives the sidechain state again from its blocks at startup (a pruned node
-cannot, and has to be resynced).
+- Reservations made before the second audit's rules, committing to the name alone, still register
+  after them, under the rule of the first audit (only the oldest reservation of a commitment reveals
+  it), once they are deep enough.
+- A reservation of the name alone **mined** from the second audit's rules on registers nothing (it
+  can only be released, and the name reserved again). The wallet makes reservations bound to their
+  output's script from 100 blocks before the rules, so that one made before them and mined after
+  them still registers; such a reservation registers from the block the rules start at.
+- Under the second audit's rules, whether an asset can be retired is read from counts its record
+  keeps (auctions that hold some of it, its pools with providers), not by going through every
+  auction that quotes it.
+- Retiring an asset whose pools hold 1 satoshi of CHN gives it to mainchain miners too (a
+  withdrawal of 1 satoshi, without fee); before the second audit's rules, it stayed in the
+  mainchain's escrow.
+
+A node stores the assets in a layout of its version (`bitassets::STORE_LAYOUT`, 3 since the third
+audit: the counts above); one that finds them in an earlier layout derives the sidechain state again
+from its blocks at startup (a pruned node cannot, and has to be resynced).
 
 ## Commands
 
