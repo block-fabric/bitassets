@@ -242,14 +242,6 @@ std::string AuctionStatus(const bitassets::Auction& auction, int height)
     return "open";
 }
 
-/** What buys all that is left of an auction at the price of all of it `price`: ceil(remaining * price / base_amount). */
-uint64_t CostOfRemaining(const bitassets::Auction& auction, uint64_t price)
-{
-    if (auction.base_amount == 0) return 0;
-    const unsigned __int128 cost{(static_cast<unsigned __int128>(auction.remaining) * price + auction.base_amount - 1) / auction.base_amount};
-    return static_cast<uint64_t>(std::min<unsigned __int128>(cost, bitassets::MAX_AMOUNT));
-}
-
 UniValue AuctionToJSON(Chainstate& chainstate, const bitassets::State& state, const Txid& id, const bitassets::Auction& auction, int height) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
 {
     const uint8_t db{DecimalsOf(state, auction.base)}, dq{DecimalsOf(state, auction.quote)};
@@ -267,7 +259,7 @@ UniValue AuctionToJSON(Chainstate& chainstate, const bitassets::State& state, co
     const uint64_t price{auction.PriceAt(std::max(height, auction.start_height))};
     obj.pushKV("unit_price", PriceToJSON(auction.base_amount, db, price, dq));
     obj.pushKV("price", AmountToJSON(price, dq));
-    obj.pushKV("cost_of_remaining", AmountToJSON(CostOfRemaining(auction, price), dq));
+    obj.pushKV("cost_of_remaining", AmountToJSON(auction.CostOfRemaining(std::max(height, auction.start_height)), dq));
     obj.pushKV("start_height", auction.start_height);
     obj.pushKV("end_height", auction.EndHeight());
     obj.pushKV("bids", auction.bids);
@@ -651,7 +643,7 @@ RPCMethod quotebid()
     UniValue result(UniValue::VOBJ);
     result.pushKV("buys", AmountToJSON(std::min(auction.BuysAt(at, amount), auction.remaining), db));
     result.pushKV("remaining", AmountToJSON(auction.remaining, db));
-    result.pushKV("cost_of_remaining", AmountToJSON(CostOfRemaining(auction, auction.PriceAt(at)), dq));
+    result.pushKV("cost_of_remaining", AmountToJSON(auction.CostOfRemaining(at), dq));
     result.pushKV("open", auction.OpenAt(height));
     return result;
 },

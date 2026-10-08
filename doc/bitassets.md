@@ -69,7 +69,11 @@ spends a token without carrying it on, or outputs one it does not have, is inval
   brought in and what is left of what it sold, once it has ended or sold out — or at once, before
   any bid, which cancels it.
 - `getauction` and `quotebid` give what all that is left costs in the next block
-  (`cost_of_remaining`); the window's "Buy all" asks about that amount.
+  (`cost_of_remaining`: the least amount whose bid buys it all). `bidauction` with `buy_all` pays
+  exactly that, never more (with an amount, at most that amount), and refuses when no bid buys
+  exactly what is left (the least that buys it all buys more, which the rules refuse); a bid of an
+  amount that buys all that is left pays only what that costs. The window's "Buy all" pays the
+  amount it shows (less, should the price fall first).
 - An auction starts within 52560 blocks (about a year) of the one that makes it.
 
 ## Retiring an asset

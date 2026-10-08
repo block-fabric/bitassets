@@ -374,6 +374,13 @@ uint64_t Auction::BuysAt(int height, uint64_t quote_amount) const
     return units > MAX_AMOUNT ? MAX_AMOUNT : static_cast<uint64_t>(units);
 }
 
+uint64_t Auction::CostOfRemaining(int height) const
+{
+    if (base_amount == 0) return 0;
+    const unsigned __int128 cost{(static_cast<unsigned __int128>(remaining) * PriceAt(height) + base_amount - 1) / base_amount};
+    return static_cast<uint64_t>(std::min<unsigned __int128>(cost, MAX_AMOUNT));
+}
+
 namespace amm {
 uint64_t SwapOut(uint64_t reserve_in, uint64_t reserve_out, uint64_t amount_in)
 {

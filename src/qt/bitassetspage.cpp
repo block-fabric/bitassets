@@ -1507,8 +1507,9 @@ void BitAssetsPage::showAuctionDetail()
             // What is left now, and what all of it costs in the next block: not the price of all the auction sold.
             const auto now{call("getauction", Args({id.toStdString()}), false)};
             if (!now) return;
-            if (!confirm(tr("Buy all"), tr("Pay about %1 %2 for the %3 %4 left?").arg(Num((*now)["cost_of_remaining"]), quote, Num((*now)["remaining"]), base))) return;
-            if (const auto r{call("bidauction", Args({id.toStdString(), UniValue{}, true}), true)}) {
+            // The wallet pays exactly that (less, should the price fall first), never more: it is the most it is given.
+            if (!confirm(tr("Buy all"), tr("Pay %1 %2 for the %3 %4 left?").arg(Num((*now)["cost_of_remaining"]), quote, Num((*now)["remaining"]), base))) return;
+            if (const auto r{call("bidauction", Args({id.toStdString(), (*now)["cost_of_remaining"], true}), true)}) {
                 say(tr("Bidding %1 %2 for the %3 %4 left, with the next block.").arg(Num((*r)["pays"]), quote, Num((*r)["buys"]), base));
             }
         });

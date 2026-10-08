@@ -228,8 +228,10 @@ class BitAssetsTest(SidechainTest):
         assert_raises_rpc_error(-8, "running", side.collectauction, auction["auction"])
         # The price fell: all that is left, for less.
         assert_raises_rpc_error(-8, "more than is left", other.bidauction, auction["auction"], 100)
+        cost = other.getauction(auction["auction"])["cost_of_remaining"]
         all_left = other.bidauction(auction["auction"], None, True)
         assert_equal(all_left["buys"], Decimal("75.00"))
+        assert_equal(all_left["pays"], cost)
         self.mine_txs()
         auction = side.getauction(auction["auction"])
         assert_equal(auction["status"], "sold out")
@@ -253,6 +255,39 @@ class BitAssetsTest(SidechainTest):
         side.collectauction(auction["auction"])
         self.mine_txs()
         assert_equal(self.holding(side, "GOLD")["balance"], before)
+
+        self.log.info("Buying all that is left pays what it costs, no more")
+        # 1 SILVER (no decimals) for 1 CHN: the most that buys no more than 1 was 1.99999999 CHN.
+        side.createauction("SILVER", 1, "CHN", 1, 1, 5)
+        self.mine_txs()
+        auction = side.listauctions()[0]
+        assert_equal(auction["cost_of_remaining"], Decimal("1.00000000"))
+        assert_raises_rpc_error(-8, "more than the most given", other.bidauction, auction["auction"], "0.99999999", True)
+        all_left = other.bidauction(auction["auction"], 1, True)
+        assert_equal(all_left["pays"], auction["cost_of_remaining"])
+        assert_equal(all_left["buys"], 1)
+        self.mine_txs()
+        assert_equal(side.getauction(auction["auction"])["proceeds"], Decimal("1.00000000"))
+        assert_equal(self.holding(other, "SILVER")["balance"], 1)
+        side.collectauction(auction["auction"])
+        self.mine_txs()
+        # 300 SILVER for 0.07 GOLD (7 units): a unit of GOLD buys 42 SILVER, so after a bid no amount
+        # buys exactly the 258 left (6 units buy 257, 7 buy 300): buying all is refused.
+        side.createauction("SILVER", 300, "GOLD", "0.07", "0.07", 5)
+        self.mine_txs()
+        auction = side.listauctions()[0]
+        assert_equal(auction["cost_of_remaining"], Decimal("0.07"))
+        assert_equal(other.bidauction(auction["auction"], "0.01")["buys"], 42)
+        self.mine_txs()
+        assert_raises_rpc_error(-8, "No bid buys exactly what is left", other.bidauction, auction["auction"], None, True)
+        # A bid of more than all that is left costs pays only that.
+        side.createauction("SILVER", 10, "CHN", "0.5", "0.5", 5)
+        self.mine_txs()
+        auction = side.listauctions()[0]
+        overpaid = other.bidauction(auction["auction"], "0.52")
+        assert_equal(overpaid["pays"], Decimal("0.50000000"))
+        assert_equal(overpaid["buys"], 10)
+        self.mine_txs()
 
         self.log.info("Reservations are released")
         side.reserveasset("SPARE")

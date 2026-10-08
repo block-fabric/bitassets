@@ -202,6 +202,27 @@ BOOST_AUTO_TEST_CASE(seq_format)
     for (uint32_t seq : {0u, 1u, 99999999u, 100000000u, 4000000000u}) BOOST_CHECK_EQUAL(*ParseSeq(FormatSeq(seq)), seq);
 }
 
+BOOST_AUTO_TEST_CASE(auction_cost_of_remaining)
+{
+    // 1 unit (no decimals) for 100 CHN: what buys it is 100 CHN, not the most that buys no more than
+    // it (199.99999999 CHN, as the wallet's "buy all" paid).
+    Auction auction;
+    auction.base_amount = 1;
+    auction.remaining = 1;
+    auction.start_price = auction.end_price = 100 * COIN;
+    auction.duration = 10;
+    BOOST_CHECK_EQUAL(auction.CostOfRemaining(5), uint64_t(100 * COIN));
+    BOOST_CHECK_EQUAL(auction.BuysAt(5, auction.CostOfRemaining(5)), 1u);
+    BOOST_CHECK_EQUAL(auction.BuysAt(5, auction.CostOfRemaining(5) - 1), 0u);
+    // 300 for 7: after 42 sold, 258 left; the least that buys them buys 300.
+    auction.base_amount = 300;
+    auction.remaining = 258;
+    auction.start_price = auction.end_price = 7;
+    BOOST_CHECK_EQUAL(auction.CostOfRemaining(5), 7u);
+    BOOST_CHECK(auction.BuysAt(5, 7) > auction.remaining);
+    BOOST_CHECK(auction.BuysAt(5, 6) < auction.remaining);
+}
+
 BOOST_AUTO_TEST_CASE(asset_arg_number_never_a_name)
 {
     // The number of an asset retired since (or not given yet): an error, never the asset whose

@@ -536,6 +536,13 @@ struct Auction {
     uint64_t PriceAt(int height) const;
     /** What a bid of `quote_amount` buys in the block at `height` (more than is left, if it is too much). */
     uint64_t BuysAt(int height, uint64_t quote_amount) const;
+    /**
+     * The least a bid in the block at `height` pays to buy all that is left: ceil(remaining * price
+     * / base_amount), the smallest amount whose BuysAt is at least what is left. Not a rule: what
+     * wallets pay. A bid of it may buy more than is left (when one unit of the quote buys more than
+     * one of the base), which the rules refuse: then no bid buys exactly all that is left.
+     */
+    uint64_t CostOfRemaining(int height) const;
     /** Whether bids are taken in the block at `height`. */
     bool OpenAt(int height) const { return !closed && remaining > 0 && height >= start_height && height <= EndHeight(); }
     /** Whether the receipt can close it in the block at `height`. */

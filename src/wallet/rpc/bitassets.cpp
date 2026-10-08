@@ -1090,8 +1090,8 @@ RPCMethod bidauction()
         "takes the bid (at least what it buys in the next block: the price only falls)." + HELP_REQUIRING_PASSPHRASE,
         {
             {"auction", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The transaction that made it"},
-            {"amount", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED, "What to pay"},
-            {"buy_all", RPCArg::Type::BOOL, RPCArg::Default{false}, "Pay what buys all that is left, at the price of the next block, instead"},
+            {"amount", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED, "What to pay; with buy_all, the most to pay (refused if all that is left costs more)"},
+            {"buy_all", RPCArg::Type::BOOL, RPCArg::Default{false}, "Pay what buys all that is left at the price of the next block, and no more (cost_of_remaining in getauction)"},
         },
         RPCResult{RPCResult::Type::OBJ, "", "",
         {
@@ -1119,19 +1119,32 @@ RPCMethod bidauction()
         if (!record || record->registration != registration) throw JSONRPCError(RPC_INVALID_PARAMETER, "An asset of this auction was retired since it was made: it takes no bids");
     }
     const uint8_t dq{DecimalsOf(*pwallet, auction->quote)}, db{DecimalsOf(*pwallet, auction->base)};
-    const uint64_t price{auction->PriceAt(height)};
+    // The least that buys all that is left: what the window shows, and the most a bid ever pays.
+    const uint64_t cost{auction->CostOfRemaining(height)};
     uint64_t amount;
     if (!request.params[2].isNull() && request.params[2].get_bool()) {
-        // The most that buys no more than what is left.
-        const unsigned __int128 most{((static_cast<unsigned __int128>(auction->remaining) + 1) * price - 1) / auction->base_amount};
-        amount = static_cast<uint64_t>(std::min<unsigned __int128>(most, bitassets::MAX_AMOUNT));
+        // Not the most that buys no more than what is left: that overpays by up to the price of a
+        // unit (with 0 decimals, nearly twice the price for the last one).
+        amount = cost;
+        if (amount == 0 || auction->BuysAt(height, amount) != auction->remaining) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("No bid buys exactly what is left at the price of the next block: the least that buys it all, %s, buys more than is left (the rules refuse that). Bid an amount instead",
+                                                                bitassets::FormatUnits(cost, dq)));
+        }
+        if (!request.params[1].isNull() && amount > bitassets::ParseUnits(request.params[1], dq)) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("All that is left costs %s now, more than the most given", bitassets::FormatUnits(amount, dq)));
+        }
     } else {
         if (request.params[1].isNull()) throw JSONRPCError(RPC_INVALID_PARAMETER, "Give an amount, or buy_all");
         amount = bitassets::ParseUnits(request.params[1], dq);
     }
-    const uint64_t buys{auction->BuysAt(height, amount)};
+    uint64_t buys{auction->BuysAt(height, amount)};
     if (buys == 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "Too little: it buys nothing at the price of the next block");
     if (buys > auction->remaining) throw JSONRPCError(RPC_INVALID_PARAMETER, "Too much: it buys more than is left (see buy_all)");
+    // An amount that buys all that is left pays what that costs, not more: the rest would buy nothing.
+    if (buys == auction->remaining && amount > cost && auction->BuysAt(height, cost) == auction->remaining) amount = cost;
+    // Never more than what all that is left costs (an amount that buys less costs less than that).
+    if (amount > cost) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("The bid would pay %s, more than all that is left costs (%s)", bitassets::FormatUnits(amount, dq), bitassets::FormatUnits(cost, dq)));
+    buys = auction->BuysAt(height, amount);
     if (auction->base.IsNull() && buys < bitassets::MIN_CHN_PAYOUT && pwallet->chain().getBitAssetsAudit2()) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("Too little: the least CHN paid out is %s", FormatMoney(bitassets::MIN_CHN_PAYOUT)));
     }
