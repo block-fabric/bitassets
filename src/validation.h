@@ -843,6 +843,13 @@ public:
      * what the store held for the old tip must not be read as the state before block 1.
      */
     void ResetDrivechainState() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /**
+     * Drop the database iterator that the store of the sidechain state keeps between reads in order
+     * (sidechain::DbStore): it holds on to the database as it was when made, files LevelDB would
+     * otherwise let go included. Done after every block connected or disconnected, after block
+     * assembly and after loading; the next read in order makes another.
+     */
+    void ReleaseSideCursor() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 private:
     std::unique_ptr<sidechain::DbStore> m_side_db GUARDED_BY(::cs_main);
     std::unique_ptr<sidechain::StoreOverlay> m_side_cache GUARDED_BY(::cs_main);

@@ -125,7 +125,9 @@ static ChainstateLoadResult CompleteChainstateInitialization(
                 return {ChainstateLoadStatus::FAILURE, _("Error initializing block database")};
             }
             assert(chainstate->m_chain.Tip() != nullptr);
-            if (auto loaded{chainstate->LoadDrivechainState()}; !loaded) {
+            auto loaded{chainstate->LoadDrivechainState()};
+            chainstate->ReleaseSideCursor();
+            if (!loaded) {
                 if (chainman.m_interrupt) return {ChainstateLoadStatus::INTERRUPTED, {}};
                 return {ChainstateLoadStatus::FAILURE, Untranslated(strprintf("Error loading the sidechain database: %s", util::ErrorString(loaded).original))};
             }

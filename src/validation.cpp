@@ -3265,7 +3265,9 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
         // if the coins turn out unclean after all, the block is applied to it again. The sidechain
         // state is undone in an overlay of its own, merged once all went well, dropped otherwise.
         sidechain::StoreOverlay side_store{SideCache(), /*journal=*/false};
-        if (DisconnectBlock(block, pindexDelete, view, &m_scdb, &side_store) != DISCONNECT_OK) {
+        const DisconnectResult disconnected{DisconnectBlock(block, pindexDelete, view, &m_scdb, &side_store)};
+        ReleaseSideCursor();
+        if (disconnected != DISCONNECT_OK) {
             if (m_chainman.m_interrupt) {
                 // Interrupted while deriving the sidechain database for a deep reorg: nothing changed.
                 LogInfo("DisconnectTip(): interrupted while disconnecting block %s", pindexDelete->GetBlockHash().ToString());
@@ -3381,6 +3383,7 @@ bool Chainstate::ConnectTip(
         std::optional<drivechain::SidechainDB> scdb_before;
         if (m_chainman.GetParams().DefaultConsistencyChecks()) scdb_before.emplace(m_scdb);
         bool rv = ConnectBlock(*block_to_connect, state, pindexNew, view, /*fJustCheck=*/false, &m_scdb, &SideCache());
+        ReleaseSideCursor();
         if (!rv && scdb_before) assert(m_scdb == *scdb_before);
         if (m_chainman.m_options.signals) {
             m_chainman.m_options.signals->BlockChecked(block_to_connect, state);
@@ -5176,6 +5179,12 @@ void Chainstate::WriteDrivechainState()
     sidechain::StoreOverlay& cache{SideCache()};
     m_blockman.m_drivechain_db->WriteState(DrivechainStateName(), m_scdb, m_side_db.get(), &cache.Changes());
     cache.Clear();
+}
+
+void Chainstate::ReleaseSideCursor()
+{
+    AssertLockHeld(::cs_main);
+    if (m_side_db) m_side_db->Reset();
 }
 
 void Chainstate::ResetDrivechainState()
