@@ -5137,21 +5137,18 @@ bool Chainstate::RollBackFromInvalidBlock(CBlockIndex* invalid, drivechain::Side
     return true;
 }
 
-bool Chainstate::LoadDrivechainState(bilingual_str& error)
+bool Chainstate::PrepareDrivechainDB(const CBlockIndex* rebuild_from, bilingual_str& error)
 {
     AssertLockHeld(::cs_main);
-    const CBlockIndex* tip{m_chain.Tip()};
-    if (!tip) return true;
-    // The tip is the flushed block: the undo data below it out of reach was erased then (or is
-    // erased below by the roll forward).
-    m_drivechain_undo_erased_height = tip->nHeight - DRIVECHAIN_UNDO_DEPTH;
-
     drivechain::Database& db{*m_blockman.m_drivechain_db};
-    switch (db.CheckFormat()) {
+    const drivechain::Database::Format format{db.CheckFormat()};
+    if (format == drivechain::Database::Format::CURRENT) return true;
+
+    switch (format) {
     case drivechain::Database::Format::CURRENT:
         break;
     case drivechain::Database::Format::OTHER_VERSION:
-        // Laid out another way (by an older version): built anew from the blocks below.
+        // Laid out another way (by an older version): built anew from the blocks.
         LogInfo("The sidechain database is in an older format; it is rebuilt from the blocks");
         db.Wipe();
         break;
@@ -5164,6 +5161,23 @@ bool Chainstate::LoadDrivechainState(bilingual_str& error)
         db.Wipe();
         break;
     }
+    // Without a chainstate to rebuild from (-reindex-chainstate, say), the blocks connected next
+    // fill the database in the current format.
+    if (!rebuild_from) db.WriteFormatVersion();
+    return true;
+}
+
+bool Chainstate::LoadDrivechainState(bilingual_str& error)
+{
+    AssertLockHeld(::cs_main);
+    const CBlockIndex* tip{m_chain.Tip()};
+    if (!tip) return true;
+    // The tip is the flushed block: the undo data below it out of reach was erased then (or is
+    // erased below by the roll forward).
+    m_drivechain_undo_erased_height = tip->nHeight - DRIVECHAIN_UNDO_DEPTH;
+
+    drivechain::Database& db{*m_blockman.m_drivechain_db};
+    if (!PrepareDrivechainDB(/*rebuild_from=*/tip, error)) return false;
 
     drivechain::SidechainDB scdb;
     // On failure ReadState leaves `scdb` empty: nothing half read is used.

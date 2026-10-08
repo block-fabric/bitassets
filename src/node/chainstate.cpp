@@ -128,6 +128,14 @@ static ChainstateLoadResult CompleteChainstateInitialization(
                 if (chainman.m_interrupt) return {ChainstateLoadStatus::INTERRUPTED, {}};
                 return {ChainstateLoadStatus::FAILURE, error.empty() ? _("Error loading the sidechain database (see the log)") : error};
             }
+        } else {
+            // The chainstate is built from the blocks (-reindex-chainstate, a new node): the
+            // drivechain database too, which has to be in the current format, derived under the
+            // current parameters, before the blocks are connected.
+            bilingual_str error;
+            if (!chainstate->PrepareDrivechainDB(/*rebuild_from=*/nullptr, error)) {
+                return {ChainstateLoadStatus::FAILURE, error};
+            }
         }
     }
 

@@ -854,6 +854,15 @@ public:
     int m_drivechain_undo_erased_height GUARDED_BY(::cs_main){-1};
 
     /**
+     * Check the format of the drivechain database, and wipe it if it was laid out another way or
+     * derived under other drivechain parameters (resetting the failure flags of all blocks, in the
+     * latter case). With `rebuild_from` (the chain tip to rebuild it up to), nothing is wiped if a
+     * block below it is no longer on disk: false, with `error` set. Without (no chainstate yet, as
+     * with -reindex-chainstate), the database is marked as of the current format at once.
+     */
+    bool PrepareDrivechainDB(const CBlockIndex* rebuild_from, bilingual_str& error) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /**
      * Remove the mempool transactions that the drivechain rules no longer
      * allow in a block on top of the tip: requests for blind merged mining made
      * for another block, and deposits that do not follow from the current
