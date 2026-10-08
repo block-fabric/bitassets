@@ -831,7 +831,10 @@ public:
     /**
      * Bring m_scdb in line with the chain tip after startup, starting from the
      * snapshot taken at the last flush and using the undo data and blocks on
-     * disk for the difference.
+     * disk for the difference. A database of another format, or derived under other
+     * parameters, is wiped (the store of the sidechain state with it) and derived again.
+     * An error if that fails, or is interrupted (m_chainman.m_interrupt; what was done
+     * is kept for the next start).
      */
     util::Result<void> LoadDrivechainState() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /**
@@ -862,6 +865,16 @@ public:
 
     /** Name under which the sidechain database of this chainstate is stored. */
     std::string DrivechainStateName() const;
+
+    /**
+     * Erase the drivechain undo data of the blocks of the active chain DRIVECHAIN_UNDO_DEPTH or more
+     * below the last flushed block, which no reorg takes back. Relative to what is on disk rather
+     * than to the tip: after an unclean shutdown the node restarts from the flushed block, and a
+     * reorg from there must still find the undo data of the blocks within reach.
+     */
+    void EraseDrivechainUndo() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    //! Height up to which EraseDrivechainUndo erased the undo data of the active chain.
+    int m_drivechain_undo_erased_height GUARDED_BY(::cs_main){-1};
 
     /**
      * Remove the mempool transactions that the drivechain rules no longer

@@ -994,7 +994,7 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
     // compete with: the next request of its sidechain replaces it, the next treasury transaction
     // follows it. Like a TRUC transaction it takes no unconfirmed children that could pin it there,
     // with their size or their low fee, but small ones of its kind: the next treasury transaction
-    // through the escrow output, and a request or treasury transaction paid from its change (a
+    // through the escrow output (a withdrawal of any size), and a request or treasury transaction paid from its change (a
     // wallet that serves several sidechains). Not for transactions a reorg brings back.
     if (!bypass_limits) {
         const uint32_t max_sidechains{m_active_chainstate.m_chainman.GetConsensus().drivechain.max_sidechains};
@@ -1008,8 +1008,20 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
         for (const CTxIn& in : tx.vin) {
             const CTransactionRef parent{m_pool.get(in.prevout.hash)};
             if (!parent || in.prevout.n >= parent->vout.size()) continue;
-            // The escrow output: spent only by the next treasury transaction, as the escrow rules have it.
-            if (const auto slot{drivechain::ParseEscrowScript(parent->vout[in.prevout.n].scriptPubKey)}; slot && *slot < max_sidechains) continue;
+            // The escrow output: spent only by the next treasury transaction, as the escrow rules have
+            // it. A deposit chained on an unconfirmed one is small, like a TRUC child: a large one at
+            // a low fee rate would hold up every deposit chained after it. (A withdrawal, of any size,
+            // pays a bundle the miners voted through.)
+            if (const auto slot{drivechain::ParseEscrowScript(parent->vout[in.prevout.n].scriptPubKey)}; slot && *slot < max_sidechains) {
+                const bool withdrawal{std::any_of(tx.vout.begin(), tx.vout.end(), [&](const CTxOut& out) {
+                    return drivechain::ParseEscrowScript(out.scriptPubKey) == slot && out.nValue < parent->vout[in.prevout.n].nValue;
+                })};
+                if (!withdrawal && GetVirtualTransactionSize(tx) > TRUC_CHILD_MAX_VSIZE) {
+                    return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "dc-unconfirmed-parent",
+                                         strprintf("a deposit of more than %u vbytes spends the escrow output of %s, which is not confirmed", TRUC_CHILD_MAX_VSIZE, parent->GetHash().ToString()));
+                }
+                continue;
+            }
             if (!drivechain::GetBmmRequest(*parent) && !is_treasury(*parent)) continue;
             if (!drivechain_tx || GetVirtualTransactionSize(tx) > TRUC_CHILD_MAX_VSIZE) {
                 return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "dc-unconfirmed-parent",
@@ -2415,7 +2427,11 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
             const CBlockIndex* genesis{pindex->GetAncestor(0)};
             rebuilt.SetBlockHash(genesis->GetBlockHash());
             if (!RollForwardSidechainDB(rebuilt, genesis, pindex->pprev, pindex->pprev->nHeight - DRIVECHAIN_UNDO_DEPTH)) {
-                LogError("DisconnectBlock(): failure deriving the sidechain database\n");
+                if (m_chainman.m_interrupt) {
+                    LogInfo("DisconnectBlock(): deriving the sidechain database was interrupted");
+                } else {
+                    LogError("DisconnectBlock(): failure deriving the sidechain database\n");
+                }
                 return DISCONNECT_FAILED;
             }
             *scdb = std::move(rebuilt);
@@ -2914,7 +2930,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     // VerifyDB connects the blocks of the chain again, against the record of the mainchain as it is
     // now: if a commitment moved, that is not what the block did when it was connected, which the
     // undo data has to keep to take the block back.
-    if (!verifying && !m_blockman.m_drivechain_db->WriteBlock(block_hash, pindex->nHeight, scdb_undo, scdb_deposits)) {
+    if (!verifying && !m_blockman.m_drivechain_db->WriteBlock(block_hash, pindex->nHeight, scdb_undo, scdb_deposits, *scdb)) {
         return FatalError(m_chainman.GetNotifications(), state, _("Failed to write drivechain undo data."));
     }
 
@@ -3102,6 +3118,7 @@ bool Chainstate::FlushStateToDisk(
                     WriteDrivechainState();
                 }
                 m_last_flushed_block = m_blockman.LookupBlockIndex(CoinsTip().GetBestBlock());
+                EraseDrivechainUndo();
                 full_flush_completed = true;
                 TRACEPOINT(utxocache, flush,
                     int64_t{Ticks<std::chrono::microseconds>(NodeClock::now() - nNow)},
@@ -3249,12 +3266,23 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
         // state is undone in an overlay of its own, merged once all went well, dropped otherwise.
         sidechain::StoreOverlay side_store{SideCache(), /*journal=*/false};
         if (DisconnectBlock(block, pindexDelete, view, &m_scdb, &side_store) != DISCONNECT_OK) {
-            LogError("DisconnectTip(): DisconnectBlock %s failed\n", pindexDelete->GetBlockHash().ToString());
+            if (m_chainman.m_interrupt) {
+                // Interrupted while deriving the sidechain database for a deep reorg: nothing changed.
+                LogInfo("DisconnectTip(): interrupted while disconnecting block %s", pindexDelete->GetBlockHash().ToString());
+            } else {
+                LogError("DisconnectTip(): DisconnectBlock %s failed\n", pindexDelete->GetBlockHash().ToString());
+            }
             if (m_scdb.GetBlockHash() == pindexDelete->pprev->GetBlockHash()) {
+                // The coins stay at the block (the view is dropped): the sidechain database goes back
+                // to it too, by connecting the block again. That must work, it did before; if it does
+                // not, it is taken back to where it was, and the node cannot go on.
                 drivechain::BlockUndo undo;
                 std::string reject_reason;
                 if (!m_scdb.ConnectBlock(block, pindexDelete->nHeight, m_chainman.GetConsensus().drivechain, undo, nullptr, reject_reason)) {
+                    m_scdb.DisconnectBlock(undo);
+                    m_scdb.SetBlockHash(pindexDelete->pprev->GetBlockHash());
                     LogError("DisconnectTip(): the sidechain database cannot be brought back to %s (%s)\n", pindexDelete->GetBlockHash().ToString(), reject_reason);
+                    return FatalError(m_chainman.GetNotifications(), state, _("The sidechain database cannot be brought back to the chain tip."));
                 }
             }
             return false;
@@ -3262,6 +3290,9 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
         view.Flush(/*reallocate_cache=*/false); // local CCoinsViewCache goes out of scope
         side_store.MergeInto(SideCache());
         m_blockman.m_drivechain_db->EraseBlockDeposits(pindexDelete->GetBlockHash());
+        // The blocks connected next, at this height and above, keep their undo data until a flush
+        // puts them deep enough (a reorg deeper than DRIVECHAIN_UNDO_DEPTH gets here).
+        m_drivechain_undo_erased_height = std::min(m_drivechain_undo_erased_height, pindexDelete->nHeight - 1);
     }
     LogDebug(BCLog::BENCH, "- Disconnect block: %.2fms\n",
              Ticks<MillisecondsDouble>(SteadyClock::now() - time_start));
@@ -3360,10 +3391,8 @@ bool Chainstate::ConnectTip(
             LogError("%s: ConnectBlock %s failed, %s\n", __func__, pindexNew->GetBlockHash().ToString(), state.ToString());
             return false;
         }
-        // The block now at DRIVECHAIN_UNDO_DEPTH no reorg takes back: its sidechain undo data goes.
-        if (pindexNew->nHeight >= DRIVECHAIN_UNDO_DEPTH) {
-            m_blockman.m_drivechain_db->EraseBlockUndo(pindexNew->GetAncestor(pindexNew->nHeight - DRIVECHAIN_UNDO_DEPTH)->GetBlockHash());
-        }
+        // (The sidechain undo data of blocks no reorg takes back goes when the chainstate is
+        // flushed: see EraseDrivechainUndo.)
         time_3 = SteadyClock::now();
         m_chainman.time_connect_total += time_3 - time_2;
         assert(m_chainman.num_blocks_total > 0);
@@ -3526,6 +3555,10 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex&
             // This is likely a fatal error, but keep the mempool consistent,
             // just in case. Only remove from the mempool in this case.
             MaybeUpdateMempoolForReorg(disconnectpool, false);
+
+            // A deep reorg derives the sidechain database from the blocks, which a shutdown
+            // interrupts: the node stays on the tip it has, and goes on from there next time.
+            if (m_chainman.m_interrupt) return false;
 
             // If we're unable to disconnect a block during normal operation,
             // then that is a failure of our local system -- we should abort
@@ -5162,20 +5195,54 @@ void Chainstate::ResetDrivechainState()
     m_scdb = drivechain::SidechainDB{};
 }
 
+void Chainstate::EraseDrivechainUndo()
+{
+    AssertLockHeld(::cs_main);
+    const CBlockIndex* flushed{m_last_flushed_block};
+    if (!flushed || !m_chain.Contains(*flushed)) return;
+    const int last{flushed->nHeight - DRIVECHAIN_UNDO_DEPTH};
+    std::vector<uint256> hashes;
+    for (int height{std::max(0, m_drivechain_undo_erased_height + 1)}; height <= last; ++height) {
+        hashes.push_back(m_chain[height]->GetBlockHash());
+        // In batches: after a long initial sync without a flush there can be many.
+        if (hashes.size() >= 10'000) {
+            m_blockman.m_drivechain_db->EraseBlockUndo(hashes);
+            hashes.clear();
+        }
+    }
+    if (!hashes.empty()) m_blockman.m_drivechain_db->EraseBlockUndo(hashes);
+    m_drivechain_undo_erased_height = std::max(m_drivechain_undo_erased_height, last);
+}
+
 util::Result<void> Chainstate::LoadDrivechainState()
 {
     AssertLockHeld(::cs_main);
     const CBlockIndex* tip{m_chain.Tip()};
     if (!tip) return {};
+    // The tip is the flushed block: the undo data below it out of reach was erased then (or is
+    // erased below by the roll forward).
+    m_drivechain_undo_erased_height = tip->nHeight - DRIVECHAIN_UNDO_DEPTH;
 
     drivechain::Database& db{*m_blockman.m_drivechain_db};
     sidechain::StoreOverlay& cache{SideCache()};
     // Laid out another way (by an older version, before the sidechain state had a store of its own
-    // say): everything goes, the state of this chain as a sidechain with it, and is derived again
-    // from the blocks below.
-    const bool old_format{!db.IsCurrentFormat()};
-    if (old_format) {
+    // say), or derived under other drivechain parameters (an activation height that moved: the
+    // snapshot, the undo data, the events and the deposit index may all differ under these):
+    // everything goes, the state of this chain as a sidechain with it, and is derived again from
+    // the blocks below.
+    const drivechain::Database::Format format{db.CheckFormat()};
+    const bool old_format{format != drivechain::Database::Format::CURRENT};
+    switch (format) {
+    case drivechain::Database::Format::CURRENT:
+        break;
+    case drivechain::Database::Format::OTHER_VERSION:
         LogInfo("The sidechain database is in an older format; it is rebuilt from the blocks");
+        break;
+    case drivechain::Database::Format::OTHER_PARAMS:
+        LogInfo("The sidechain database was derived under other drivechain parameters; it is rebuilt from the blocks");
+        break;
+    }
+    if (old_format) {
         db.Wipe();
         m_side_db->Reset();
         cache.Clear();
@@ -5239,8 +5306,8 @@ util::Result<void> Chainstate::LoadDrivechainState()
     for (const CBlockIndex* block{tip}; block != pindex; block = block->pprev) {
         if (!(block->nStatus & BLOCK_HAVE_DATA)) {
             if (old_format) {
-                return util::Error{_("The sidechain state of this node is in a format an earlier version wrote, and has to be derived again from "
-                                     "the blocks, which this node pruned. Restart with -reindex to download them again.")};
+                return util::Error{_("The sidechain state of this node is in a format an earlier version wrote, or was derived under other drivechain "
+                                     "parameters, and has to be derived again from the blocks, which this node pruned. Restart with -reindex to download them again.")};
             }
             return util::Error{strprintf(_("The sidechain state of this node is as of block %d, and the blocks it has to be brought forward with "
                                            "are pruned (block %d is missing). Restart with -reindex to download them again."), pindex->nHeight, block->nHeight)};
@@ -5250,7 +5317,18 @@ util::Result<void> Chainstate::LoadDrivechainState()
 
     // Roll forward along the chain, with undo data for the blocks a reorg can still take back.
     const CBlockIndex* stopped{nullptr};
-    if (auto result{RollForwardSidechainDB(scdb, pindex, tip, tip->nHeight - DRIVECHAIN_UNDO_DEPTH, &cache, m_from_snapshot_blockhash ? nullptr : &stopped)}; !result) return result;
+    if (auto result{RollForwardSidechainDB(scdb, pindex, tip, tip->nHeight - DRIVECHAIN_UNDO_DEPTH, &cache, m_from_snapshot_blockhash ? nullptr : &stopped)}; !result) {
+        if (m_chainman.m_interrupt && !scdb.GetBlockHash().IsNull()) {
+            // Interrupted (a shutdown): what was derived so far is kept, the store with it, and the
+            // next start goes on from there rather than from the beginning (the snapshot of a block
+            // of the active chain is rolled forward from).
+            LogInfo("Interrupted while bringing the sidechain database to the chain tip; it goes on from block %s next time", scdb.GetBlockHash().ToString());
+            db.WriteState(DrivechainStateName(), scdb, m_side_db.get(), &cache.Changes());
+            cache.Clear();
+            db.WriteFormatVersion();
+        }
+        return result;
+    }
     if (stopped) {
         // A block that fails against the record of the mainchain as it is now (the record changed
         // while this node was down, say), or that waits for it: the chain goes back to the block
@@ -5326,7 +5404,7 @@ util::Result<void> Chainstate::RollForwardSidechainDB(drivechain::SidechainDB& s
             }
             return util::Error{strprintf(_("Block %s breaks the drivechain rules (%s). Restart with -reindex."), next->GetBlockHash().ToString(), reject_reason)};
         }
-        db.WriteBlock(next->GetBlockHash(), height, undo, deposits, /*keep_undo=*/height > keep_undo_above);
+        db.WriteBlock(next->GetBlockHash(), height, undo, deposits, scdb, /*keep_undo=*/height > keep_undo_above);
         if (block_store) block_store->MergeInto(*side_store);
         // What the store holds in memory stays small: written out as it goes, with the database
         // it matches.
@@ -6348,6 +6426,13 @@ util::Result<CBlockIndex*> ChainstateManager::ActivateSnapshot(
 
         if (this->CurrentChainstate().m_from_snapshot_blockhash) {
             return util::Error{Untranslated("Can't activate a snapshot-based chainstate more than once")};
+        }
+        // A UTXO snapshot does not hold the drivechain state (sidechains, escrows, bundles): the
+        // chainstate made from it would start with an empty sidechain database and judge the blocks
+        // after the snapshot by it. Only regtest, whose upstream tests use snapshots at heights
+        // before any sidechain, takes them.
+        if (GetConsensus().drivechain.max_sidechains > 0 && GetParams().GetChainType() != ChainType::REGTEST) {
+            return util::Error{Untranslated("UTXO snapshots are not supported with drivechains: the snapshot does not hold the drivechain state")};
         }
         if (!GetParams().AssumeutxoForBlockhash(base_blockhash).has_value()) {
             auto available_heights = GetParams().GetAvailableSnapshotHeights();
