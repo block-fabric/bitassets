@@ -893,13 +893,13 @@ RPCMethod addliquidity()
             {"asset_a", RPCArg::Type::STR, RPCArg::Optional::NO, bitassets::ASSET_ARG_HELP},
             {"amount_a", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "How much of it"},
             {"asset_b", RPCArg::Type::STR, RPCArg::Optional::NO, bitassets::ASSET_ARG_HELP},
-{"amount_b", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED, "How much of it: needed for a new pool, or an abandoned one"},
+            {"amount_b", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED, "How much of it: needed for a new pool, or an abandoned one. Into a pool someone provides liquidity to, the amounts are the most to put in: only what the pool's price takes goes in"},
             {"slippage", RPCArg::Type::NUM, RPCArg::Default{1}, "How many fewer shares than quoted, in percent, it may give if the pool moves first"},
         },
         RPCResult{RPCResult::Type::OBJ, "", "",
         {
             {RPCResult::Type::STR_HEX, "txid", "The transaction"},
-            {RPCResult::Type::NUM, "amount_a", "What goes in of the first asset"},
+            {RPCResult::Type::NUM, "amount_a", "What goes in of the first asset (at the pool's price, into a pool someone provides liquidity to)"},
             {RPCResult::Type::NUM, "amount_b", "And of the second"},
             {RPCResult::Type::NUM, "shares", "The shares it gives if nothing moves the pool first"},
             {RPCResult::Type::BOOL, "sets_price", "Whether the amounts set the pool's price: a new pool, or an abandoned one reopened"},
@@ -912,7 +912,7 @@ RPCMethod addliquidity()
     const AssetInfo a{ParseAsset(*pwallet, request.params[0])};
     const AssetInfo b{ParseAsset(*pwallet, request.params[2])};
     if (a.id == b.id) throw JSONRPCError(RPC_INVALID_PARAMETER, "Two different assets make a pool");
-    const uint64_t amount_a{bitassets::ParseUnits(request.params[1], a.decimals)};
+    uint64_t amount_a{bitassets::ParseUnits(request.params[1], a.decimals)};
     const uint64_t slippage{Slippage(request.params[4], 1)};
     const auto pool{pwallet->chain().getBitAssetsPool(bitassets::PoolId(a.id, b.id))};
     // A new pool, or one nobody provides liquidity to: the amounts set its price. What an abandoned
@@ -935,6 +935,18 @@ RPCMethod addliquidity()
     bitassets::Pool current;
     if (pool) current = *pool;
     const bool a_first{pool ? pool->asset0 == a.id : a.id < b.id};
+    // Into a pool someone provides liquidity to, a deposit gets the shares of the side that gives
+    // fewer, and the rest of the other side would be given away to the pool's providers: only what
+    // the pool's price takes of it goes in (rounded up, so that it gives no fewer shares).
+    if (pool && !sets_price && current.reserve0 > 0 && current.reserve1 > 0) {
+        const uint64_t ra{a_first ? current.reserve0 : current.reserve1}, rb{a_first ? current.reserve1 : current.reserve0};
+        const unsigned __int128 sa{static_cast<unsigned __int128>(amount_a) * current.shares / ra};
+        const unsigned __int128 sb{static_cast<unsigned __int128>(amount_b) * current.shares / rb};
+        const unsigned __int128 fewer{std::min(sa, sb)};
+        const auto worth{[&](uint64_t reserve) { return static_cast<uint64_t>((fewer * reserve + current.shares - 1) / current.shares); }};
+        if (sa < sb) amount_b = worth(rb);
+        if (sb < sa) amount_a = worth(ra);
+    }
     uint64_t shares{bitassets::amm::SharesFor(current, a_first ? amount_a : amount_b, a_first ? amount_b : amount_a)};
     if (current.shares == 0) shares = shares > bitassets::MIN_LIQUIDITY ? shares - bitassets::MIN_LIQUIDITY : 0;
     if (shares == 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "Too little: it makes no shares (a new pool needs the product of the amounts, in units, above a million)");

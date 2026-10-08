@@ -174,6 +174,16 @@ class BitAssetsTest(SidechainTest):
         more = other.addliquidity("GOLD", 100, "CHN")
         assert_equal(more["amount_b"], Decimal("0.05000000"))
         self.mine_txs()
+        # Amounts off the pool's price: only what its price takes goes in, not the excess, which would
+        # be given away to its providers.
+        clamped = other.addliquidity("GOLD", 10, "CHN", 1)
+        assert_equal(clamped["amount_a"], Decimal("10.00"))
+        # What the shares 10 GOLD gives are worth: a few satoshis under 0.005 CHN, rounded down shares.
+        assert Decimal("0.00499900") < clamped["amount_b"] <= Decimal("0.00500000")
+        self.mine_txs()
+        clamped = other.addliquidity("GOLD", 1000, "CHN", "0.005")
+        assert_equal((clamped["amount_a"], clamped["amount_b"]), (Decimal("10.00"), Decimal("0.00500000")))
+        self.mine_txs()
 
         self.log.info("Trade in it")
         quote = other.quoteswap("CHN", "0.1", "GOLD")
