@@ -10,6 +10,7 @@
 #include <crypto/sha256.h>
 #include <qt/clientmodel.h>
 #include <qt/guiutil.h>
+#include <qt/itemviews.h>
 #include <util/chaintype.h>
 #include <util/strencodings.h>
 
@@ -107,7 +108,7 @@ SidechainNodesDialog::SidechainNodesDialog(NodeRpc::WalletNameFn wallet_name, QW
     m_notice->setWordWrap(true);
     layout->addWidget(m_notice);
 
-    m_table = new QTableWidget(0, 7, this);
+    m_table = new ItemViews::Table(0, 7, this);
     m_table->setObjectName("sidechainNodes");
     m_table->setHorizontalHeaderLabels({tr("Sidechain"), tr("Slot"), tr("Node"), tr("Blocks"), tr("Follows this node"), tr("Mining"), tr("Programs")});
     m_table->setSelectionBehavior(QAbstractItemView::SelectRows);

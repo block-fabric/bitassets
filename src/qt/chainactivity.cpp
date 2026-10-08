@@ -5,6 +5,7 @@
 #include <qt/chainactivity.h>
 
 #include <qt/clientmodel.h>
+#include <qt/itemviews.h>
 #include <qt/noderpc.h>
 
 #include <QDateTime>
@@ -30,7 +31,7 @@ constexpr int REFRESH_DELAY_MS{1000};
 
 QTableWidget* Table(const QStringList& headers, QWidget* parent, const char* name)
 {
-    auto* table{new QTableWidget(0, headers.size(), parent)};
+    auto* table{new ItemViews::Table(0, headers.size(), parent)};
     table->setObjectName(name);
     table->setHorizontalHeaderLabels(headers);
     table->setSelectionBehavior(QAbstractItemView::SelectRows);

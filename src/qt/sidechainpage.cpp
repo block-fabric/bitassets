@@ -11,6 +11,7 @@
 #include <qt/bitcoinunits.h>
 #include <qt/clientmodel.h>
 #include <qt/guiutil.h>
+#include <qt/itemviews.h>
 #include <qt/optionsmodel.h>
 #include <qt/platformstyle.h>
 #include <qt/walletmodel.h>
@@ -74,11 +75,10 @@ SidechainPage::SidechainPage(const PlatformStyle* platform_style, QWidget* paren
 
 QTableWidget* SidechainPage::createTable(const QStringList& headers, QWidget* parent)
 {
-    auto* table{new QTableWidget(0, headers.size(), parent)};
+    auto* table{new ItemViews::Table(0, headers.size(), parent)};
     table->setHorizontalHeaderLabels(headers);
     table->setSelectionBehavior(QAbstractItemView::SelectRows);
     table->setSelectionMode(QAbstractItemView::SingleSelection);
-    table->setEditTriggers(QAbstractItemView::NoEditTriggers);
     table->setAlternatingRowColors(true);
     table->verticalHeader()->hide();
     table->horizontalHeader()->setStretchLastSection(true);
