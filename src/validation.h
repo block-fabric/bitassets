@@ -851,9 +851,14 @@ public:
      * `keep_undo_above`. On a sidechain, the state of this chain as a sidechain is brought forward
      * with it in `side_store`, which is required there (the chainstate's own store is also written
      * out as it goes).
+     *
+     * @param[out] stopped_at  if given: a block that fails against the record of the mainchain (which
+     *                         may change), or that waits for it to be filled in, stops it there; the
+     *                         database is left at the block before, and this set to the block. Without
+     *                         it, that is an error.
      */
     util::Result<void> RollForwardSidechainDB(drivechain::SidechainDB& scdb, const CBlockIndex* from, const CBlockIndex* to, int keep_undo_above,
-                                              sidechain::StoreOverlay* side_store = nullptr) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+                                              sidechain::StoreOverlay* side_store = nullptr, const CBlockIndex** stopped_at = nullptr) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /** Name under which the sidechain database of this chainstate is stored. */
     std::string DrivechainStateName() const;
