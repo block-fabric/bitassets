@@ -203,6 +203,8 @@ public:
     virtual std::optional<bitassets::Auction> getBitAssetsAuction(const Txid& txid) = 0;
     //! BitAssets: the height of the next block.
     virtual int getBitAssetsHeight() = 0;
+    //! BitAssets: whether the next block is under the rules of the second audit (bitassets_audit2_height).
+    virtual bool getBitAssetsAudit2() = 0;
     //! BitAssets: whether an asset is dead and can be retired.
     virtual bool getBitAssetReleasable(const bitassets::AssetId& asset) = 0;
     //! The merged-mining request (BIP301 M8) in the mempool for a sidechain slot, if any: the sidechain

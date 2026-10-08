@@ -125,7 +125,7 @@ UniValue AssetToJSON(Chainstate& chainstate, const bitassets::State& state, cons
     obj.pushKV("registration", record.registration.GetHex());
     const auto data{height ? state.DataAt(asset, *height) : std::optional{record.Current()}};
     if (data) obj.pushKV("data", bitassets::DataToJSON(*data));
-    const bool releasable{state.Releasable(asset)};
+    const bool releasable{state.Releasable(asset, nullptr, chainstate.m_chain.Height() + 1 >= chainstate.m_chainman.GetConsensus().sidechain.bitassets_audit2_height)};
     obj.pushKV("releasable", releasable);
     if (releasable) {
         CAmount fee{0};

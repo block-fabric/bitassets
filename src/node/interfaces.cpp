@@ -745,12 +745,18 @@ public:
     bool getBitAssetReleasable(const bitassets::AssetId& asset) override
     {
         LOCK(::cs_main);
-        return chainman().ActiveChainstate().SideState().BitAssets().Releasable(asset);
+        const int next{chainman().ActiveChain().Height() + 1};
+        return chainman().ActiveChainstate().SideState().BitAssets().Releasable(asset, nullptr, next >= chainman().GetConsensus().sidechain.bitassets_audit2_height);
     }
     int getBitAssetsHeight() override
     {
         LOCK(::cs_main);
         return chainman().ActiveChain().Height() + 1;
+    }
+    bool getBitAssetsAudit2() override
+    {
+        LOCK(::cs_main);
+        return chainman().ActiveChain().Height() + 1 >= chainman().GetConsensus().sidechain.bitassets_audit2_height;
     }
     std::optional<BmmRequestInfo> getMempoolBmmRequest(uint32_t slot) override
     {

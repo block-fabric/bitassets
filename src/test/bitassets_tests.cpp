@@ -49,15 +49,15 @@ public:
         m_store = std::move(store);
         return *this;
     }
-    bool ApplyTx(const CTransaction& tx, int height, TUndo& undo, std::vector<CTxOut>& payouts, std::string& reason, int pool_rules_height = 0, CAmount* released = nullptr, int release_height = 0, int audit_height = 0)
+    bool ApplyTx(const CTransaction& tx, int height, TUndo& undo, std::vector<CTxOut>& payouts, std::string& reason, int pool_rules_height = 0, CAmount* released = nullptr, int release_height = 0, int audit_height = 0, int audit2_height = 0)
     {
-        const bool ok{bitassets::State{*m_store}.ApplyTx(tx, height, payouts, reason, pool_rules_height, released, release_height, audit_height)};
+        const bool ok{bitassets::State{*m_store}.ApplyTx(tx, height, payouts, reason, pool_rules_height, released, release_height, audit_height, audit2_height)};
         undo.parts.push_back(m_store->TakeUndo());
         return ok;
     }
-    bool CheckTx(const CTransaction& tx, int height, std::string& reason, std::vector<Result>* results = nullptr, int pool_rules_height = 0, int release_height = 0, int audit_height = 0) const
+    bool CheckTx(const CTransaction& tx, int height, std::string& reason, std::vector<Result>* results = nullptr, int pool_rules_height = 0, int release_height = 0, int audit_height = 0, int audit2_height = 0) const
     {
-        return View().CheckTx(tx, height, reason, results, pool_rules_height, release_height, audit_height);
+        return View().CheckTx(tx, height, reason, results, pool_rules_height, release_height, audit_height, audit2_height);
     }
     void Revert(const TUndo& undo)
     {
@@ -73,7 +73,7 @@ public:
         m_store->ForEach(prefix, [&](const sidechain::StoreBytes&, const sidechain::StoreBytes&) { ++n; return true; });
         return n;
     }
-    bool Releasable(const AssetId& asset, std::string* why = nullptr) const { return View().Releasable(asset, why); }
+    bool Releasable(const AssetId& asset, std::string* why = nullptr, bool audit2 = true) const { return View().Releasable(asset, why, audit2); }
     std::optional<AssetId> AssetOfSeq(uint32_t seq) const { return View().AssetOfSeq(seq); }
     uint32_t NextSeq() const { return View().NextSeq(); }
     std::optional<Pool> FindPool(const AssetId& a, const AssetId& b) const { return View().FindPool(a, b); }
@@ -118,6 +118,14 @@ CTransaction MakeTx(const std::vector<COutPoint>& inputs, std::optional<Operatio
     return CTransaction{tx};
 }
 
+/** A reservation of `commitment`, carried by an output of `script`. */
+CTransaction MakeReserve(const uint256& commitment, const CScript& script = HOLDER)
+{
+    CMutableTransaction tx{MakeTx({}, Reserve{commitment}, {Token{Token::Kind::RESERVATION, uint256{}, 1}})};
+    tx.vout[0].scriptPubKey = script;
+    return CTransaction{tx};
+}
+
 Token Asset(const AssetId& id, uint64_t amount) { return Token{Token::Kind::ASSET, id, amount}; }
 Token Unit(Token::Kind kind, const uint256& id) { return Token{kind, id, 1}; }
 
@@ -126,11 +134,13 @@ struct Fixture {
     TUndo undo;
     std::vector<CTxOut> payouts;
     int height{100};
+    //! The second audit's rules: from 0, as on a new chain.
+    int audit2_height{0};
 
     bool Apply(const CTransaction& tx, std::string* reason = nullptr)
     {
         std::string r;
-        const bool ok{state.ApplyTx(tx, height, undo, payouts, r)};
+        const bool ok{state.ApplyTx(tx, height, undo, payouts, r, 0, nullptr, 0, 0, audit2_height)};
         if (reason) *reason = r;
         return ok;
     }
@@ -138,7 +148,7 @@ struct Fixture {
     {
         std::string r;
         const TState before{state};
-        BOOST_CHECK(!state.ApplyTx(tx, height, undo, payouts, r));
+        BOOST_CHECK(!state.ApplyTx(tx, height, undo, payouts, r, 0, nullptr, 0, 0, audit2_height));
         BOOST_CHECK(state == before);
         return r;
     }
@@ -147,7 +157,7 @@ struct Fixture {
     {
         const AssetId id{HashName(name)};
         const uint256 nonce{HashName("nonce " + name)};
-        const CTransaction reserve{MakeTx({}, Reserve{ReservationCommitment(id, nonce)}, {Unit(Token::Kind::RESERVATION, uint256{})})};
+        const CTransaction reserve{MakeReserve(height >= audit2_height ? ReservationCommitment(id, nonce, HOLDER) : ReservationCommitment(id, nonce))};
         BOOST_REQUIRE(Apply(reserve));
         bitassets::Register reg;
         reg.name = id;
@@ -253,8 +263,10 @@ BOOST_AUTO_TEST_CASE(oldest_reservation_reveals)
 {
     // Someone sees a registration in the mempool, which reveals the name and nonce of a reservation,
     // makes a reservation of the same commitment and tries to register first: refused, the oldest
-    // reservation of a commitment is the one that reveals it.
+    // reservation of a commitment is the one that reveals it. (Before the second audit's rules, which
+    // bind a reservation to its output's script: see reservation_bound_to_script.)
     Fixture f;
+    f.audit2_height = 1000;
     const TState empty{f.state};
     const uint256 nonce{HashName("secret")};
     const uint256 commitment{ReservationCommitment(GOLD, nonce)};
@@ -281,11 +293,64 @@ BOOST_AUTO_TEST_CASE(oldest_reservation_reveals)
     const CTransaction a{MakeTx({}, Reserve{commitment}, {Unit(Token::Kind::RESERVATION, uint256{})})};
     const CTransaction b{MakeTx({}, Reserve{commitment}, {Unit(Token::Kind::RESERVATION, uint256{})})};
     std::string r;
-    BOOST_REQUIRE(before.state.ApplyTx(a, 100, before.undo, before.payouts, r, 0, nullptr, 0, /*audit_height=*/1000));
-    BOOST_REQUIRE(before.state.ApplyTx(b, 100, before.undo, before.payouts, r, 0, nullptr, 0, /*audit_height=*/1000));
-    BOOST_CHECK_MESSAGE(before.state.ApplyTx(MakeTx({COutPoint{b.GetHash(), 0}}, reg, {Unit(Token::Kind::CONTROL, GOLD)}), 100, before.undo, before.payouts, r, 0, nullptr, 0, /*audit_height=*/1000), r);
+    BOOST_REQUIRE(before.state.ApplyTx(a, 100, before.undo, before.payouts, r, 0, nullptr, 0, /*audit_height=*/1000, /*audit2_height=*/1000));
+    BOOST_REQUIRE(before.state.ApplyTx(b, 100, before.undo, before.payouts, r, 0, nullptr, 0, /*audit_height=*/1000, /*audit2_height=*/1000));
+    BOOST_CHECK_MESSAGE(before.state.ApplyTx(MakeTx({COutPoint{b.GetHash(), 0}}, reg, {Unit(Token::Kind::CONTROL, GOLD)}), 100, before.undo, before.payouts, r, 0, nullptr, 0, /*audit_height=*/1000, /*audit2_height=*/1000), r);
 }
 
+BOOST_AUTO_TEST_CASE(reservation_bound_to_script)
+{
+    // The second audit: anyone could copy a reservation from the mempool with a higher fee; the copy,
+    // older, made the maker's registration fail (not the oldest) and could not register either (the
+    // nonce unknown). Bound to the script of its output, a reservation registers whatever copies exist.
+    Fixture f;
+    const CScript mine{HOLDER};
+    const CScript theirs{GetScriptForDestination(WitnessV0KeyHash{uint160{std::vector<unsigned char>(20, 7)}})};
+    const uint256 nonce{HashName("secret")};
+    const uint256 commitment{ReservationCommitment(GOLD, nonce, mine)};
+    BOOST_CHECK(commitment != ReservationCommitment(GOLD, nonce));
+    BOOST_CHECK(commitment != ReservationCommitment(GOLD, nonce, theirs));
+    // The copy goes first, then the maker's.
+    const CTransaction copy{MakeReserve(commitment, theirs)};
+    BOOST_REQUIRE(f.Apply(copy));
+    const CTransaction reservation{MakeReserve(commitment, mine)};
+    BOOST_REQUIRE(f.Apply(reservation));
+    BOOST_CHECK(f.state.View().GetReservationOrigin(reservation.GetHash()) == (ReservationOrigin{mine, f.height}));
+    bitassets::Register reg;
+    reg.name = GOLD;
+    reg.nonce = nonce;
+    reg.text = "GOLD";
+    // The copier, once the nonce is out: their reservation commits to their script, not to the name with it.
+    BOOST_CHECK_EQUAL(f.Reject(MakeTx({COutPoint{copy.GetHash(), 0}}, reg, {Unit(Token::Kind::CONTROL, GOLD)})), "bad-ba-no-reservation");
+    // The maker, though younger.
+    std::string reason;
+    BOOST_CHECK_MESSAGE(f.Apply(MakeTx({COutPoint{reservation.GetHash(), 0}}, reg, {Unit(Token::Kind::CONTROL, GOLD)}), &reason), reason);
+    BOOST_CHECK(f.state.Assets().contains(GOLD));
+    BOOST_CHECK(!f.state.View().GetReservationOrigin(reservation.GetHash()));
+
+    // A commitment to the name alone, made under the new rules, registers nothing.
+    Fixture g;
+    const CTransaction unbound{MakeReserve(ReservationCommitment(GOLD, nonce))};
+    BOOST_REQUIRE(g.Apply(unbound));
+    BOOST_CHECK_EQUAL(g.Reject(MakeTx({COutPoint{unbound.GetHash(), 0}}, reg, {Unit(Token::Kind::CONTROL, GOLD)})), "bad-ba-no-reservation");
+
+    // One made before them still does, after them, under the oldest-reservation rule: a copy of it
+    // made after the rules is younger, and itself registers nothing.
+    Fixture h;
+    h.audit2_height = 150;
+    const CTransaction old{MakeReserve(ReservationCommitment(GOLD, nonce))};
+    BOOST_REQUIRE(h.Apply(old));
+    h.height = 150;
+    const CTransaction later_copy{MakeReserve(ReservationCommitment(GOLD, nonce), theirs)};
+    BOOST_REQUIRE(h.Apply(later_copy));
+    BOOST_CHECK_EQUAL(h.Reject(MakeTx({COutPoint{later_copy.GetHash(), 0}}, reg, {Unit(Token::Kind::CONTROL, GOLD)})), "bad-ba-no-reservation");
+    BOOST_CHECK_MESSAGE(h.Apply(MakeTx({COutPoint{old.GetHash(), 0}}, reg, {Unit(Token::Kind::CONTROL, GOLD)}), &reason), reason);
+
+    // Undone, the reservations and where they were made are back as they were.
+    TState reverted{f.state};
+    reverted.Revert(f.undo);
+    BOOST_CHECK(reverted == TState{});
+}
 
 BOOST_AUTO_TEST_CASE(pools)
 {

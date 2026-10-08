@@ -287,6 +287,24 @@ class BitAssetsTest(SidechainTest):
         assert_equal(side.getasset("DEAD")["supply"], 5)
         assert_equal([a["label"] for a in side.listassets()].count("DEAD"), 1)
 
+        self.log.info("A copy of a reservation, made from the mempool, does not stop its registration")
+        reserved = side.reserveasset("COPIED")
+        self.sync_mempools()
+        raw = other.getrawtransaction(reserved["txid"], True)
+        marker = bytes.fromhex(next(o for o in raw["vout"] if o["scriptPubKey"]["hex"].startswith("6a"))["scriptPubKey"]["hex"])
+        # OP_RETURN, then one push: its data.
+        assert_equal(marker[0], 0x6a)
+        data = marker[2:] if marker[1] < 0x4c else marker[3:]
+        assert_equal(len(data), marker[1] if marker[1] < 0x4c else marker[2])
+        copy = other.createrawtransaction([], [{other.getnewaddress(): 0}, {"data": data.hex()}])
+        copy = other.fundrawtransaction(copy, {"changePosition": 2, "fee_rate": 100})["hex"]
+        copy_txid = other.sendrawtransaction(other.signrawtransactionwithwallet(copy)["hex"])
+        self.mine_txs()
+        assert_equal(other.gettransaction(copy_txid)["confirmations"], 1)
+        side.registerasset("COPIED", 7)
+        self.mine_txs()
+        assert_equal(side.getasset("COPIED")["supply"], 7)
+
         self.log.info("Undoing blocks undoes the assets")
         tip = side.getbestblockhash()
         pool = side.getpool("GOLD", "CHN")

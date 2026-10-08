@@ -246,6 +246,13 @@ uint256 ReservationCommitment(const AssetId& name, const uint256& nonce)
     return commitment;
 }
 
+uint256 ReservationCommitment(const AssetId& name, const uint256& nonce, const CScript& script)
+{
+    uint256 commitment;
+    CHMAC_SHA256(nonce.data(), nonce.size()).Write(name.data(), name.size()).Write(script.data(), script.size()).Finalize(commitment.data());
+    return commitment;
+}
+
 uint256 PoolId(const AssetId& a, const AssetId& b)
 {
     HashWriter writer{};
@@ -496,6 +503,7 @@ struct State::Plan {
     //! Entries of the history of assets' data, added (keys and values).
     std::vector<std::pair<sidechain::StoreBytes, sidechain::StoreBytes>> history;
     std::optional<std::pair<Txid, uint256>> reservation_made;
+    ReservationOrigin reservation_origin;
     std::vector<Txid> reservations_gone;
     std::optional<std::pair<uint32_t, AssetId>> seq;
     std::optional<std::pair<uint256, Pool>> pool;
@@ -524,6 +532,7 @@ constexpr uint8_t TOKENS_BY_ID{0x39};
 constexpr uint8_t POOLS_BY_ASSET{0x3a};
 constexpr uint8_t AUCTIONS_BY_ASSET{0x3b};
 constexpr uint8_t BY_COMMITMENT{0x3c};
+const sidechain::Table<uint256, ReservationOrigin> ORIGINS{0x3d};
 constexpr uint8_t HISTORY{0x3e};
 //! Missing: the layout before it was written down (1).
 const sidechain::Cell<uint32_t> LAYOUT{0x3f, 1};
@@ -615,6 +624,7 @@ bool StoreLayoutCurrent(const sidechain::StoreView& view)
     return true;
 }
 std::optional<uint256> State::GetReservation(const Txid& id) const { return RESERVATIONS.Get(*m_view, id.ToUint256()); }
+std::optional<ReservationOrigin> State::GetReservationOrigin(const Txid& id) const { return ORIGINS.Get(*m_view, id.ToUint256()); }
 std::optional<Pool> State::GetPool(const uint256& id) const { return POOLS.Get(*m_view, id); }
 std::optional<Auction> State::GetAuction(const Txid& id) const { return AUCTIONS.Get(*m_view, id.ToUint256()); }
 uint32_t State::NextSeq() const { return NEXT_SEQ.Get(*m_view); }
@@ -758,7 +768,7 @@ std::optional<AssetId> State::AssetOfSeq(uint32_t seq) const
     return asset;
 }
 
-bool State::Releasable(const AssetId& asset, std::string* why) const
+bool State::Releasable(const AssetId& asset, std::string* why, bool audit2) const
 {
     const auto no{[&](const char* reason) {
         if (why) *why = reason;
@@ -792,9 +802,10 @@ bool State::Releasable(const AssetId& asset, std::string* why) const
     return true;
 }
 
-std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, std::string& reject_reason, int pool_rules_height, int release_height, int audit_height) const
+std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, std::string& reject_reason, int pool_rules_height, int release_height, int audit_height, int audit2_height) const
 {
     const bool pool_rules{height >= pool_rules_height};
+    const bool audit2{height >= audit2_height};
     const auto invalid{[&](const char* reason) -> std::optional<Plan> {
         reject_reason = reason;
         return std::nullopt;
@@ -855,21 +866,38 @@ std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, s
     if (const auto* reserve{op ? std::get_if<Reserve>(op) : nullptr}) {
         credit(Token::Kind::RESERVATION, txid.ToUint256(), 1);
         plan.reservation_made = std::make_pair(txid, reserve->commitment);
+        // Where it is made: the output that carries it (the books below hold it to exactly one).
+        plan.reservation_origin.height = height;
+        for (const auto& [n, token] : explicit_outputs) {
+            if (token.kind == Token::Kind::RESERVATION && token.id == txid.ToUint256()) plan.reservation_origin.script = tx.vout[n].scriptPubKey;
+        }
     } else if (const auto* reg{op ? std::get_if<Register>(op) : nullptr}) {
         // Assets registered before, in this block included, are taken.
         if (HasAsset(reg->name)) return invalid("bad-ba-name-taken");
         const uint256 implied{ReservationCommitment(reg->name, reg->nonce)};
         std::optional<Txid> reservation;
+        // Under the second audit's rules, a reservation bound to the script of its output: nobody but
+        // its maker can have made it, so it reveals the name whatever other reservations there are.
+        bool bound{false};
         for (const auto& [n, token] : spent) {
             if (token.kind != Token::Kind::RESERVATION) continue;
-            const auto found{GetReservation(Txid::FromUint256(token.id))};
-            if (found && *found == implied) {
-                reservation = Txid::FromUint256(token.id);
-                break;
+            const Txid id{Txid::FromUint256(token.id)};
+            const auto found{GetReservation(id)};
+            if (!found) continue;
+            if (audit2) {
+                const auto origin{GetReservationOrigin(id)};
+                if (origin && *found == ReservationCommitment(reg->name, reg->nonce, origin->script)) {
+                    reservation = id;
+                    bound = true;
+                    break;
+                }
+                // A commitment to the name alone, only from a reservation made before these rules.
+                if (origin && origin->height >= audit2_height) continue;
             }
+            if (*found == implied && !reservation) reservation = id;
         }
         if (!reservation) return invalid("bad-ba-no-reservation");
-        if (height >= audit_height) {
+        if (!bound && height >= audit_height) {
             // Only the oldest reservation of a commitment reveals it: a copy of someone else's, made to
             // register the asset first once they reveal it, is younger.
             // The index of reservations by commitment has them oldest first: the first one says.
@@ -1082,7 +1110,7 @@ std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, s
     if (const auto* release{op ? std::get_if<ReleaseAsset>(op) : nullptr}) {
         if (height < release_height) return invalid("bad-ba-release-not-active");
         std::string why;
-        if (!Releasable(release->asset, &why)) return invalid("bad-ba-release-alive");
+        if (!Releasable(release->asset, &why, audit2)) return invalid("bad-ba-release-alive");
         plan.asset_gone = release->asset;
         std::map<AssetId, AssetRecord> others;
         // Its pools, in the order of their ids, through the index of pools by asset.
@@ -1147,24 +1175,30 @@ std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, s
     return plan;
 }
 
-bool State::CheckTx(const CTransaction& tx, int height, std::string& reject_reason, std::vector<Result>* results, int pool_rules_height, int release_height, int audit_height) const
+bool State::CheckTx(const CTransaction& tx, int height, std::string& reject_reason, std::vector<Result>* results, int pool_rules_height, int release_height, int audit_height, int audit2_height) const
 {
-    auto plan{MakePlan(tx, height, reject_reason, pool_rules_height, release_height, audit_height)};
+    auto plan{MakePlan(tx, height, reject_reason, pool_rules_height, release_height, audit_height, audit2_height)};
     if (!plan) return false;
     if (results) *results = std::move(plan->results);
     return true;
 }
 
-bool State::ApplyTx(const CTransaction& tx, int height, std::vector<CTxOut>& payouts, std::string& reject_reason, int pool_rules_height, CAmount* released, int release_height, int audit_height)
+bool State::ApplyTx(const CTransaction& tx, int height, std::vector<CTxOut>& payouts, std::string& reject_reason, int pool_rules_height, CAmount* released, int release_height, int audit_height, int audit2_height)
 {
-    const auto plan{MakePlan(tx, height, reject_reason, pool_rules_height, release_height, audit_height)};
+    const auto plan{MakePlan(tx, height, reject_reason, pool_rules_height, release_height, audit_height, audit2_height)};
     if (!plan) return false;
     sidechain::StoreOverlay& out{Writable()};
     // In the order the rules have always applied a plan in.
     for (const COutPoint& outpoint : plan->spent) SetToken(outpoint, std::nullopt);
     for (const auto& [outpoint, token] : plan->created) SetToken(outpoint, token);
-    if (plan->reservation_made) SetReservation(plan->reservation_made->first, plan->reservation_made->second);
-    for (const Txid& id : plan->reservations_gone) SetReservation(id, std::nullopt);
+    if (plan->reservation_made) {
+        SetReservation(plan->reservation_made->first, plan->reservation_made->second);
+        ORIGINS.Put(out, plan->reservation_made->first.ToUint256(), plan->reservation_origin);
+    }
+    for (const Txid& id : plan->reservations_gone) {
+        SetReservation(id, std::nullopt);
+        ORIGINS.Erase(out, id.ToUint256());
+    }
     // The order of reservations, for the rule that the oldest of a commitment reveals it.
     if (plan->reservation_made && height >= audit_height) {
         const uint64_t next{NextReservationOrder()};

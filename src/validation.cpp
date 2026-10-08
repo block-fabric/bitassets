@@ -819,7 +819,7 @@ bool MemPoolAccept::DrivechainChecks(Workspace& ws)
             }
         }
         const int height{m_active_chainstate.m_chain.Height() + 1};
-        if (!side.BitAssets().CheckTx(tx, height, reject_reason, nullptr, side_params.bitassets_pool_rules_height, side_params.bitassets_release_height, side_params.bitassets_audit_height)) {
+        if (!side.BitAssets().CheckTx(tx, height, reject_reason, nullptr, side_params.bitassets_pool_rules_height, side_params.bitassets_release_height, side_params.bitassets_audit_height, side_params.bitassets_audit2_height)) {
             return ws.m_state.Invalid(TxValidationResult::TX_CONSENSUS, reject_reason);
         }
         // One registration of an asset at a time: the second could never be mined.
@@ -4992,7 +4992,7 @@ void Chainstate::RemoveStaleDrivechainTxs()
         std::string reject_reason;
         for (const Txid& txid : m_mempool->m_bitassets_txs) {
             const CTransactionRef tx{m_mempool->get(txid)};
-            if (tx && !SideState().BitAssets().CheckTx(*tx, tip->nHeight + 1, reject_reason, nullptr, m_chainman.GetConsensus().sidechain.bitassets_pool_rules_height, m_chainman.GetConsensus().sidechain.bitassets_release_height, m_chainman.GetConsensus().sidechain.bitassets_audit_height)) stale.push_back(tx);
+            if (tx && !SideState().BitAssets().CheckTx(*tx, tip->nHeight + 1, reject_reason, nullptr, m_chainman.GetConsensus().sidechain.bitassets_pool_rules_height, m_chainman.GetConsensus().sidechain.bitassets_release_height, m_chainman.GetConsensus().sidechain.bitassets_audit_height, m_chainman.GetConsensus().sidechain.bitassets_audit2_height)) stale.push_back(tx);
         }
     }
 

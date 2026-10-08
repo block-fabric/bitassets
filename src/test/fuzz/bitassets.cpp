@@ -107,6 +107,13 @@ void CheckIndexes(const sidechain::StoreView& view)
         return true;
     });
     const sidechain::Table<uint256, uint64_t> order{0x36};
+    // Each reservation, and nothing else, has where it was made.
+    std::set<sidechain::StoreBytes> origins;
+    sidechain::Table<uint256, uint256>{0x32}.ForEach(view, [&](const uint256& id, const uint256&) {
+        origins.insert(sidechain::TableKey(0x3d, id));
+        return true;
+    });
+    assert(KeysUnder(view, 0x3d) == origins);
     sidechain::Table<uint256, uint256>{0x32}.ForEach(view, [&](const uint256& id, const uint256& commitment) {
         sidechain::StoreBytes key{0x3c};
         sidechain::KeyCodec<uint256>::Encode(key, commitment);
@@ -154,6 +161,7 @@ FUZZ_TARGET(bitassets_state, .init = initialize_bitassets)
     const int pool_rules_height{fdp.ConsumeIntegralInRange<int>(0, 10)};
     const int release_height{fdp.ConsumeIntegralInRange<int>(0, 10)};
     const int audit_height{fdp.ConsumeIntegralInRange<int>(0, 10)};
+    const int audit2_height{fdp.ConsumeIntegralInRange<int>(0, 20)};
     const std::vector<AssetId> names{HashName("GOLD"), HashName("SILVER"), HashName("LEAD")};
 
     sidechain::EmptyStore empty;
@@ -185,7 +193,8 @@ FUZZ_TARGET(bitassets_state, .init = initialize_bitassets)
             std::vector<std::optional<Token>> outs;
             switch (fdp.ConsumeIntegralInRange<int>(0, 12)) {
             case 0:
-                op = Reserve{ReservationCommitment(a, nonce)};
+                // Bound to the script of its output (the second audit's rules), or to the name alone.
+                op = Reserve{fdp.ConsumeBool() ? ReservationCommitment(a, nonce, HOLDER) : ReservationCommitment(a, nonce)};
                 outs.push_back(Token{Token::Kind::RESERVATION, uint256{}, 1});
                 break;
             case 1: {
@@ -244,7 +253,7 @@ FUZZ_TARGET(bitassets_state, .init = initialize_bitassets)
             std::vector<CTxOut> payouts;
             std::string reason;
             CAmount released{0};
-            if (!state.ApplyTx(tx, height, payouts, reason, pool_rules_height, &released, release_height, audit_height)) {
+            if (!state.ApplyTx(tx, height, payouts, reason, pool_rules_height, &released, release_height, audit_height, audit2_height)) {
                 assert(!reason.empty());
                 assert(sidechain::StoreHash(block) == before_tx);
             }

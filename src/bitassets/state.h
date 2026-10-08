@@ -213,7 +213,8 @@ struct MarkerOutput {
 
 struct Reserve {
     static constexpr uint8_t KIND{1};
-    //! ReservationCommitment(name, nonce).
+    //! ReservationCommitment(name, nonce, script of the reservation's output); before the second
+    //! audit's rules, ReservationCommitment(name, nonce).
     uint256 commitment;
     SERIALIZE_METHODS(Reserve, obj) { READWRITE(obj.commitment); }
     friend bool operator==(const Reserve&, const Reserve&) = default;
@@ -371,8 +372,15 @@ std::optional<Marker> GetMarker(const CTransaction& tx, std::string* error = nul
 
 /** The hash of the name of an asset. */
 AssetId HashName(const std::string& name);
-/** What a reservation commits to: HMAC-SHA256 with the nonce as key, of the name hash. */
+/** What a reservation committed to before the second audit's rules: HMAC-SHA256 with the nonce as key, of the name hash. */
 uint256 ReservationCommitment(const AssetId& name, const uint256& nonce);
+/**
+ * What a reservation commits to: HMAC-SHA256 with the nonce as key, of the name hash then the script
+ * of the output that carries the reservation when it is made. Bound to that script, a copy of it made
+ * by anyone else, with an output of their own, commits to nothing they can reveal; one with an output
+ * of the maker's script is the maker's to spend.
+ */
+uint256 ReservationCommitment(const AssetId& name, const uint256& nonce, const CScript& script);
 /** The pool of two assets: the same whatever their order. */
 uint256 PoolId(const AssetId& a, const AssetId& b);
 /** Whether a name can be published: 1 to MAX_NAME_TEXT_SIZE printable ASCII characters, no space at either end. */
@@ -405,6 +413,14 @@ static_assert(DATA_FIELDS == 6, "AssetRecord serializes each count");
  * An asset as it is now. Every value each field of its data has had is kept apart, one entry per
  * value (State::GetHistory), so that a change to it reads and writes a record of fixed size.
  */
+/** Where a reservation was made: the script of its output then, and the height. */
+struct ReservationOrigin {
+    CScript script;
+    int32_t height{0};
+    SERIALIZE_METHODS(ReservationOrigin, obj) { READWRITE(obj.script, obj.height); }
+    friend bool operator==(const ReservationOrigin&, const ReservationOrigin&) = default;
+};
+
 struct AssetRecord {
     uint32_t seq{0};
     Txid registration;
@@ -556,7 +572,8 @@ struct Result {
 /**
  * The assets, on the store of the sidechain state (sidechain/store.h), one entry per key. Tables:
  * 0x30 what outputs carry, 0x31 assets, 0x32 reservations not revealed yet, 0x33 assets by number,
- * 0x34 pools, 0x35 auctions, 0x36 the order of reservations, 0x3e the history of the data of the
+ * 0x34 pools, 0x35 auctions, 0x36 the order of reservations, 0x3d where reservations were made
+ * (ReservationOrigin), 0x3e the history of the data of the
  * assets (by asset, field, then position); single values 0x37 the next number, 0x38 the next
  * order, 0x3f the layout of these tables (STORE_LAYOUT). Indexes, so that no rule reads a table
  * whole: 0x39 outputs by what they carry (its id, then its kind), 0x3a pools by asset, 0x3b
@@ -577,11 +594,14 @@ public:
      * changes nothing.
      * @param[out] released  CHN freed by retiring an asset (ReleaseAsset), for mainchain miners
      */
-    [[nodiscard]] bool ApplyTx(const CTransaction& tx, int height, std::vector<CTxOut>& payouts, std::string& reject_reason, int pool_rules_height = 0, CAmount* released = nullptr, int release_height = 0, int audit_height = 0);
-    /** Whether an asset is dead and can be retired; if not, why (`why`). */
-    bool Releasable(const AssetId& asset, std::string* why = nullptr) const;
+    [[nodiscard]] bool ApplyTx(const CTransaction& tx, int height, std::vector<CTxOut>& payouts, std::string& reject_reason, int pool_rules_height = 0, CAmount* released = nullptr, int release_height = 0, int audit_height = 0, int audit2_height = 0);
+    /**
+     * Whether an asset is dead and can be retired; if not, why (`why`). `audit2`: under the second
+     * audit's rules (see Consensus::SidechainParams::bitassets_audit2_height).
+     */
+    bool Releasable(const AssetId& asset, std::string* why = nullptr, bool audit2 = true) const;
     /** Whether ApplyTx would accept the transaction now; `results`, if given, gets what it would pay out. */
-    [[nodiscard]] bool CheckTx(const CTransaction& tx, int height, std::string& reject_reason, std::vector<Result>* results = nullptr, int pool_rules_height = 0, int release_height = 0, int audit_height = 0) const;
+    [[nodiscard]] bool CheckTx(const CTransaction& tx, int height, std::string& reject_reason, std::vector<Result>* results = nullptr, int pool_rules_height = 0, int release_height = 0, int audit_height = 0, int audit2_height = 0) const;
     /** What the inputs of a transaction carry, in the order of the inputs. */
     std::vector<std::pair<uint32_t, Token>> SpentTokens(const CTransaction& tx) const;
 
@@ -593,6 +613,7 @@ public:
     std::optional<AssetData> DataAt(const AssetId& asset, int height) const;
     bool HasAsset(const AssetId& asset) const;
     std::optional<uint256> GetReservation(const Txid& id) const;
+    std::optional<ReservationOrigin> GetReservationOrigin(const Txid& id) const;
     std::optional<Pool> GetPool(const uint256& id) const;
     std::optional<Auction> GetAuction(const Txid& id) const;
     std::optional<AssetId> AssetOfSeq(uint32_t seq) const;
@@ -615,7 +636,7 @@ public:
 
 private:
     struct Plan;
-    std::optional<Plan> MakePlan(const CTransaction& tx, int height, std::string& reject_reason, int pool_rules_height, int release_height, int audit_height) const;
+    std::optional<Plan> MakePlan(const CTransaction& tx, int height, std::string& reject_reason, int pool_rules_height, int release_height, int audit_height, int audit2_height) const;
 
     // Writes, with the indexes kept in step.
     sidechain::StoreOverlay& Writable() const;
@@ -633,7 +654,8 @@ private:
  * The layout of the tables of the assets in the store. A store of another layout (one written by an
  * earlier version) is not read: the node derives the state again from the blocks (StoreLayoutCurrent).
  *  1: the history of an asset's data in its record; outputs indexed by id only; closed auctions indexed.
- *  2: the history apart (0x3e); outputs indexed by id then kind; closed auctions out of the index.
+ *  2: the history apart (0x3e); outputs indexed by id then kind; closed auctions out of the index;
+ *     where each reservation was made (0x3d).
  */
 inline constexpr uint32_t STORE_LAYOUT{2};
 /** Whether the assets in a store are in the layout of this version, or there are none yet. */

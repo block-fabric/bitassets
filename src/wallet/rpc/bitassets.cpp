@@ -276,7 +276,11 @@ std::optional<std::pair<COutPoint, uint256>> FindReservation(CWallet& wallet, co
         const auto commitment{wallet.chain().getBitAssetsReservation(Txid::FromUint256(owned.token.id))};
         if (!commitment) continue;
         const uint256 nonce{ReservationNonce(wallet, owned.dest, name)};
-        if (bitassets::ReservationCommitment(name, nonce) == *commitment) return std::make_pair(owned.outpoint, nonce);
+        // Bound to the script of its output (the second audit's rules), or, made before, to the name alone.
+        if (bitassets::ReservationCommitment(name, nonce, GetScriptForDestination(owned.dest)) == *commitment ||
+            bitassets::ReservationCommitment(name, nonce) == *commitment) {
+            return std::make_pair(owned.outpoint, nonce);
+        }
     }
     return std::nullopt;
 }
@@ -333,7 +337,12 @@ RPCMethod reserveasset()
     if (pwallet->chain().getBitAsset(asset)) throw JSONRPCError(RPC_INVALID_PARAMETER, "An asset of this name is registered");
     const CTxDestination dest{NewDestination(*pwallet, ReservationLabel(name))};
     Token reservation{UnitToken(Token::Kind::RESERVATION, uint256{})};
-    const CTransactionRef tx{Send(*pwallet, bitassets::Reserve{bitassets::ReservationCommitment(asset, ReservationNonce(*pwallet, dest, asset))}, {{dest, reservation}}, {})};
+    const uint256 nonce{ReservationNonce(*pwallet, dest, asset)};
+    // Under the second audit's rules, the commitment binds the reservation to the script of its
+    // output: a copy of it, made by someone who saw it, can never reveal the name before this one.
+    const uint256 commitment{pwallet->chain().getBitAssetsAudit2() ? bitassets::ReservationCommitment(asset, nonce, GetScriptForDestination(dest))
+                                                                    : bitassets::ReservationCommitment(asset, nonce)};
+    const CTransactionRef tx{Send(*pwallet, bitassets::Reserve{commitment}, {{dest, reservation}}, {})};
     UniValue result(UniValue::VOBJ);
     result.pushKV("txid", tx->GetHash().GetHex());
     result.pushKV("asset", asset.GetHex());

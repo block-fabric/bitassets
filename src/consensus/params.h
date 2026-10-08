@@ -114,6 +114,16 @@ struct SidechainParams {
      */
     int bitassets_audit_height{0};
     /**
+     * From this height, the rules of the second audit of October 2026 (bitassets/state.h): a
+     * reservation commits to the name and to the script of its output, and registers without the
+     * oldest-reservation rule (reservations made before keep it); an auction that quotes an asset and
+     * took nothing in does not keep the asset from being retired, nor pays a later asset of its name;
+     * an auction starts within MAX_AUCTION_DELAY blocks; a name that reads as another asset (CHN, a
+     * number, "0x") is refused; liquidity can be taken out when one side rounds to nothing; CHN
+     * results below MIN_CHN_PAYOUT are not paid out by the coinbase.
+     */
+    int bitassets_audit2_height{0};
+    /**
      * From this height, no withdrawal is refunded, and no bundle started, while a bundle of this
      * sidechain is pending on the mainchain. It may hold any withdrawal: one committed on another
      * branch of this chain, after a reorg, holds withdrawals this branch thinks are free; paid,
