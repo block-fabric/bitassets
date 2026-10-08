@@ -91,6 +91,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "quoteswap", 3, "exact_out" },
     { "listauctions", 0, "include_closed" },
     { "quotebid", 1, "amount" },
+    { "syncmainchain", 0, "allowdeepreorg" },
     { "setbmm", 0, "mine" },
     { "setbmm", 2, "always" },
     { "setbmm", 3, "amount" },
