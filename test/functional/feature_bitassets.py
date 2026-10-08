@@ -36,6 +36,16 @@ class BitAssetsTest(SidechainTest):
                 total += out["value"]
         return total
 
+    def marker_data(self, node, txid):
+        """The data the marker of a transaction pushes."""
+        raw = node.getrawtransaction(txid, True)
+        marker = bytes.fromhex(next(o for o in raw["vout"] if o["scriptPubKey"]["hex"].startswith("6a"))["scriptPubKey"]["hex"])
+        # OP_RETURN, then one push: its data.
+        assert_equal(marker[0], 0x6a)
+        data = marker[2:] if marker[1] < 0x4c else marker[3:]
+        assert_equal(len(data), marker[1] if marker[1] < 0x4c else marker[2])
+        return data
+
     def run_sidechain_test(self):
         main = self.main
         side, other = self.nodes
@@ -299,8 +309,21 @@ class BitAssetsTest(SidechainTest):
         assert_greater_than(fee, 0)
         withdrawals = len(side.listwithdrawals())
         dead_number = dead["seq"]
-        side.releaseasset("DEAD")
+        release = side.releaseasset("DEAD")["txid"]
         assert_raises_rpc_error(-4, "being retired already", side.releaseasset, "DEAD")
+        # Anyone's release competes with the one waiting, under the replacement rules: one paying
+        # less is refused, one paying more replaces it (a cheap release cannot hold the asset).
+        self.sync_mempools()
+        data = self.marker_data(other, release)
+        def release_paying(fee_rate):
+            raw = other.createrawtransaction([], [{"data": data.hex()}])
+            raw = other.fundrawtransaction(raw, {"changePosition": 1, "fee_rate": fee_rate})["hex"]
+            return other.signrawtransactionwithwallet(raw)["hex"]
+        assert_raises_rpc_error(-26, "insufficient fee", other.sendrawtransaction, release_paying(1))
+        replacement = other.sendrawtransaction(release_paying(100))
+        self.sync_mempools()
+        assert release not in side.getrawmempool()
+        assert replacement in side.getrawmempool()
         self.mine_txs()
         assert_raises_rpc_error(-8, "No such asset", side.getasset, "DEAD")
         # Its number names no asset now: never the asset whose name the number is.
@@ -324,12 +347,7 @@ class BitAssetsTest(SidechainTest):
         self.log.info("A copy of a reservation, made from the mempool, does not stop its registration")
         reserved = side.reserveasset("COPIED")
         self.sync_mempools()
-        raw = other.getrawtransaction(reserved["txid"], True)
-        marker = bytes.fromhex(next(o for o in raw["vout"] if o["scriptPubKey"]["hex"].startswith("6a"))["scriptPubKey"]["hex"])
-        # OP_RETURN, then one push: its data.
-        assert_equal(marker[0], 0x6a)
-        data = marker[2:] if marker[1] < 0x4c else marker[3:]
-        assert_equal(len(data), marker[1] if marker[1] < 0x4c else marker[2])
+        data = self.marker_data(other, reserved["txid"])
         copy = other.createrawtransaction([], [{other.getnewaddress(): 0}, {"data": data.hex()}])
         copy = other.fundrawtransaction(copy, {"changePosition": 2, "fee_rate": 100})["hex"]
         copy_txid = other.sendrawtransaction(other.signrawtransactionwithwallet(copy)["hex"])

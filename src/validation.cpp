@@ -835,7 +835,8 @@ bool MemPoolAccept::DrivechainChecks(Workspace& ws)
                     return ws.m_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "ba-registration-in-mempool");
                 }
             }
-            // One release of an asset at a time: the second could never be mined.
+            // One release of an asset at a time: the second could never be mined. Another competes
+            // with the one waiting under the replacement rules (PreChecks put it in the conflicts).
             if (const auto* release{std::get_if<bitassets::ReleaseAsset>(&*marker->operation)}) {
                 if (const auto other{m_pool.m_bitassets_releases.find(release->asset)}; other != m_pool.m_bitassets_releases.end() && !ws.m_conflicts.contains(other->second)) {
                     return ws.m_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "ba-release-in-mempool");
@@ -960,6 +961,23 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
                     return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "bip125-replacement-disallowed");
                 }
                 ws.m_conflicts.insert(other->second);
+            }
+        }
+    }
+
+    // Releases of an asset (BitAssets): anyone may retire a dead asset, and the outcome is the same
+    // whoever does, so a release waiting in the mempool competes with another of the same asset
+    // under the replacement rules, as BMM requests do. Otherwise a release paying the least fee
+    // that relays would hold the asset, and its name, until it is mined or expires.
+    if (!m_pool.m_bitassets_releases.empty()) {
+        if (const auto marker{bitassets::GetMarker(tx)}; marker && marker->operation) {
+            if (const auto* release{std::get_if<bitassets::ReleaseAsset>(&*marker->operation)}) {
+                if (const auto other{m_pool.m_bitassets_releases.find(release->asset)}; other != m_pool.m_bitassets_releases.end() && other->second != hash) {
+                    if (!args.m_allow_replacement) {
+                        return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "bip125-replacement-disallowed");
+                    }
+                    ws.m_conflicts.insert(other->second);
+                }
             }
         }
     }
