@@ -170,6 +170,7 @@ BASE_SCRIPTS = [
     'feature_reindex.py',
     'feature_sidechain.py',
     'feature_sidechain_network.py',
+    'feature_sidechain_follower.py',
     'rpc_setgenerate.py',
     'feature_reindex_readonly.py',
     'wallet_labels.py',
