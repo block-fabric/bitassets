@@ -421,6 +421,14 @@ std::pair<uint64_t, uint64_t> Withdraw(const Pool& pool, uint64_t shares)
     return {static_cast<uint64_t>(static_cast<unsigned __int128>(pool.reserve0) * shares / pool.shares),
             static_cast<uint64_t>(static_cast<unsigned __int128>(pool.reserve1) * shares / pool.shares)};
 }
+
+std::pair<uint64_t, uint64_t> WithdrawPaid(const Pool& pool, uint64_t shares)
+{
+    auto [out0, out1]{Withdraw(pool, shares)};
+    if (pool.asset0.IsNull() && out0 < MIN_CHN_PAYOUT) out0 = 0;
+    if (pool.asset1.IsNull() && out1 < MIN_CHN_PAYOUT) out1 = 0;
+    return {out0, out1};
+}
 } // namespace amm
 
 bool Spendable(const CScript& script)
@@ -1040,6 +1048,7 @@ std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, s
         uint64_t& reserve_out{zero_in ? pool.reserve1 : pool.reserve0};
         const uint64_t out{amm::SwapOut(reserve_in, reserve_out, swap->amount_in)};
         if (out == 0 || out < swap->min_out || out >= reserve_out) return invalid("bad-ba-swap-price");
+        if (audit2 && swap->asset_out.IsNull() && out < MIN_CHN_PAYOUT) return invalid("bad-ba-chn-dust");
         const auto new_in{Add(reserve_in, swap->amount_in)};
         if (!new_in) return invalid("bad-ba-swap");
         reserve_in = *new_in;
@@ -1093,16 +1102,19 @@ std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, s
         Pool pool{*found};
         // The shares nobody holds stay.
         if (remove->shares > pool.shares - std::min(pool.shares, MIN_LIQUIDITY)) return invalid("bad-ba-liquidity");
-        const auto [out0, out1]{amm::Withdraw(pool, remove->shares)};
+        // Under the second audit's rules, a side that rounds to nothing (or to CHN dust, which stays in
+        // the pool) is left out, so that a small provider can still leave; one side must give something.
+        const auto [out0, out1]{audit2 ? amm::WithdrawPaid(pool, remove->shares) : amm::Withdraw(pool, remove->shares)};
         const bool a_first{pool.asset0 == remove->asset_a};
         const uint64_t out_a{a_first ? out0 : out1}, out_b{a_first ? out1 : out0};
-        if (out_a == 0 || out_b == 0 || out_a < remove->min_a || out_b < remove->min_b) return invalid("bad-ba-liquidity-price");
+        if (audit2 ? (out_a == 0 && out_b == 0) : (out_a == 0 || out_b == 0)) return invalid("bad-ba-liquidity-price");
+        if (out_a < remove->min_a || out_b < remove->min_b) return invalid("bad-ba-liquidity-price");
         pool.reserve0 -= out0;
         pool.reserve1 -= out1;
         pool.shares -= remove->shares;
         debit(Token::Kind::LP, id, remove->shares);
-        plan.results.push_back({remove->asset_a, out_a});
-        plan.results.push_back({remove->asset_b, out_b});
+        if (out_a > 0) plan.results.push_back({remove->asset_a, out_a});
+        if (out_b > 0) plan.results.push_back({remove->asset_b, out_b});
         plan.pool = std::make_pair(id, pool);
     } else if (const auto* create{op ? std::get_if<CreateAuction>(op) : nullptr}) {
         if (!tradable(create->base) || !tradable(create->quote)) return invalid("bad-ba-asset-unknown");
@@ -1138,6 +1150,7 @@ std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, s
         }
         const uint64_t bought{auction.BuysAt(height, bid->quote_amount)};
         if (bought == 0 || bought > auction.remaining || bought < bid->min_base) return invalid("bad-ba-bid-price");
+        if (audit2 && auction.base.IsNull() && bought < MIN_CHN_PAYOUT) return invalid("bad-ba-chn-dust");
         const auto proceeds{Add(auction.proceeds, bid->quote_amount)};
         if (!proceeds) return invalid("bad-ba-bid");
         auction.remaining -= bought;
@@ -1152,8 +1165,10 @@ std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, s
         Auction auction{*found};
         if (!auction.CollectableAt(height)) return invalid("bad-ba-auction-running");
         debit(Token::Kind::RECEIPT, collect->auction.ToUint256(), 1);
-        if (auction.remaining > 0) plan.results.push_back({auction.base, auction.remaining});
-        if (auction.proceeds > 0) plan.results.push_back({auction.quote, auction.proceeds});
+        // Under the second audit's rules, CHN dust is not paid out: it was burned when it went in.
+        const auto paid{[&](const AssetId& asset, uint64_t amount) { return amount > 0 && !(audit2 && asset.IsNull() && amount < MIN_CHN_PAYOUT); }};
+        if (paid(auction.base, auction.remaining)) plan.results.push_back({auction.base, auction.remaining});
+        if (paid(auction.quote, auction.proceeds)) plan.results.push_back({auction.quote, auction.proceeds});
         auction.remaining = 0;
         auction.proceeds = 0;
         auction.closed = true;

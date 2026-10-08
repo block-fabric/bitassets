@@ -542,7 +542,8 @@ RPCMethod quoteswap()
     UniValue impact_value;
     impact_value.setNumStr(strprintf("%.4f", bitassets::amm::PriceImpact(reserve_in, reserve_out, amount_in, amount_out)));
     result.pushKV("price_impact", impact_value);
-    result.pushKV("fee", AmountToJSON(amount_in * bitassets::SWAP_FEE_PER_MILLE / 1000, di));
+    // In 128 bits: amount_in times 3 overflows 64 above about 6e18.
+    result.pushKV("fee", AmountToJSON(static_cast<uint64_t>(static_cast<unsigned __int128>(amount_in) * bitassets::SWAP_FEE_PER_MILLE / 1000), di));
     result.pushKV("abandoned", bitassets::amm::Abandoned(*pool));
     return result;
 },

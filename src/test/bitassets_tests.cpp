@@ -561,6 +561,73 @@ BOOST_AUTO_TEST_CASE(names_that_read_as_others)
     BOOST_CHECK_EQUAL(try_register("CHAIN", true, 0), "");
 }
 
+BOOST_AUTO_TEST_CASE(small_providers_and_dust)
+{
+    // The second audit: a provider whose shares round to nothing on one side could not leave; CHN
+    // results of a few satoshis each took a place in the coinbase's payout queue.
+    Fixture f;
+    const auto [gc, gold]{f.Issue("GOLD", 20'000'000)};
+    const auto [sc, silver]{f.Issue("SILVER", 2'000)};
+    const CTransaction added{MakeTx({gold, silver}, AddLiquidity{GOLD, SILVER, 10'000'000, 2'000, 1}, {Asset(GOLD, 10'000'000), std::nullopt})};
+    std::string reason;
+    BOOST_REQUIRE_MESSAGE(f.Apply(added, &reason), reason);
+    const COutPoint lp{added.GetHash(), 1};
+    const uint64_t held{f.state.Tokens().at(lp).amount};
+    const uint256 id{PoolId(GOLD, SILVER)};
+    // 10 shares take 707 GOLD and no SILVER.
+    const auto [out0, out1]{amm::Withdraw(f.state.Pools().at(id), 10)};
+    const bool gold_first{f.state.Pools().at(id).asset0 == GOLD};
+    BOOST_CHECK_EQUAL(gold_first ? out1 : out0, 0u);
+    const uint64_t gold_out{gold_first ? out0 : out1};
+    BOOST_CHECK(gold_out > 0);
+    const CTransaction leave{MakeTx({lp}, RemoveLiquidity{GOLD, SILVER, 10, 1, 0, CScript{}}, {Token{Token::Kind::LP, id, held - 10}, std::nullopt})};
+    {
+        // Before the rules: refused.
+        TState before{f.state};
+        BOOST_CHECK(!before.CheckTx(leave, f.height, reason, nullptr, 0, 0, 0, f.height + 1));
+        BOOST_CHECK_EQUAL(reason, "bad-ba-liquidity-price");
+    }
+    BOOST_REQUIRE_MESSAGE(f.Apply(leave, &reason), reason);
+    BOOST_CHECK(f.state.Tokens().at(COutPoint{leave.GetHash(), 1}) == Asset(GOLD, gold_out));
+    // Asking for something of the side that gives nothing: refused.
+    BOOST_CHECK_EQUAL(f.Reject(MakeTx({COutPoint{leave.GetHash(), 0}}, RemoveLiquidity{GOLD, SILVER, 10, 1, 1, CScript{}}, {Token{Token::Kind::LP, id, held - 20}, std::nullopt})), "bad-ba-liquidity-price");
+
+    // With CHN: dust stays in the pool.
+    const CTransaction chn_pool{MakeTx({COutPoint{added.GetHash(), 0}}, AddLiquidity{GOLD, CHN, 100'000, 50'000'000, 1}, {Asset(GOLD, 9'900'000), std::nullopt}, 50'000'000)};
+    BOOST_REQUIRE_MESSAGE(f.Apply(chn_pool, &reason), reason);
+    const uint256 chn_id{PoolId(GOLD, CHN)};
+    const COutPoint chn_lp{chn_pool.GetHash(), 1};
+    const uint64_t chn_held{f.state.Tokens().at(chn_lp).amount};
+    // 40 shares: 894 sat of CHN (stays) and 1 GOLD.
+    BOOST_CHECK(amm::Withdraw(f.state.Pools().at(chn_id), 40) == std::make_pair(uint64_t{894}, uint64_t{1}));
+    BOOST_CHECK(amm::WithdrawPaid(f.state.Pools().at(chn_id), 40) == std::make_pair(uint64_t{0}, uint64_t{1}));
+    const uint64_t chn_before{f.state.Pools().at(chn_id).reserve0};
+    f.payouts.clear();
+    const CTransaction out_gold{MakeTx({chn_lp}, RemoveLiquidity{GOLD, CHN, 40, 1, 0, HOLDER}, {Token{Token::Kind::LP, chn_id, chn_held - 40}, std::nullopt})};
+    BOOST_REQUIRE_MESSAGE(f.Apply(out_gold, &reason), reason);
+    BOOST_CHECK(f.payouts.empty());
+    BOOST_CHECK_EQUAL(f.state.Pools().at(chn_id).reserve0, chn_before);
+    // 10 shares: nothing on either side worth paying: refused.
+    BOOST_CHECK_EQUAL(f.Reject(MakeTx({COutPoint{out_gold.GetHash(), 0}}, RemoveLiquidity{GOLD, CHN, 10, 0, 0, HOLDER}, {Token{Token::Kind::LP, chn_id, chn_held - 50}})), "bad-ba-liquidity-price");
+
+    // A swap or a bid paying CHN dust: refused.
+    const COutPoint some_gold{chn_pool.GetHash(), 0};
+    BOOST_CHECK(amm::SwapOut(100'000, chn_before, 1) < MIN_CHN_PAYOUT);
+    BOOST_CHECK_EQUAL(f.Reject(MakeTx({some_gold}, Swap{GOLD, 1, CHN, 1, HOLDER}, {Asset(GOLD, 9'899'999)})), "bad-ba-chn-dust");
+    BOOST_CHECK(f.Apply(MakeTx({some_gold}, Swap{GOLD, 10, CHN, 1, HOLDER}, {Asset(GOLD, 9'899'990)})));
+
+    // Collecting CHN dust from an auction: not paid out.
+    Fixture g;
+    const auto [c, coins]{g.Issue("GOLD", 100)};
+    const CTransaction auction{MakeTx({coins}, CreateAuction{GOLD, 10, CHN, 100, 100, g.height, 2}, {Asset(GOLD, 90), Unit(Token::Kind::RECEIPT, uint256{})})};
+    BOOST_REQUIRE(g.Apply(auction));
+    BOOST_REQUIRE(g.Apply(MakeTx({}, Bid{auction.GetHash(), 10, 1, CScript{}}, {std::nullopt}, 10)));
+    g.height += 2;
+    g.payouts.clear();
+    BOOST_REQUIRE_MESSAGE(g.Apply(MakeTx({COutPoint{auction.GetHash(), 1}}, Collect{auction.GetHash(), HOLDER}, {std::nullopt}), &reason), reason);
+    BOOST_CHECK(g.payouts.empty());
+}
+
 BOOST_AUTO_TEST_CASE(swap_math_exact)
 {
     // The swap math against a 256 bit reference, where amount * 997 * reserve does not fit in 128 bits.

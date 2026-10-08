@@ -80,6 +80,13 @@ inline constexpr uint64_t SWAP_FEE_PER_MILLE{3};
 inline constexpr int32_t MAX_AUCTION_DURATION{1'000'000};
 /** Latest an auction may start, in blocks after the one that makes it (the second audit's rules): about a year. */
 inline constexpr int32_t MAX_AUCTION_DELAY{52'560};
+/**
+ * Least CHN a pool or an auction pays out (the second audit's rules). A payout takes a place in the
+ * coinbase's queue, which pays a bounded number per block: dust payouts would delay everyone's. Less
+ * from a swap or a bid is refused; less taken out of a pool stays in it, for its providers; less
+ * from collecting an auction is not paid (the CHN were burned when they went in).
+ */
+inline constexpr uint64_t MIN_CHN_PAYOUT{1'000};
 /** Most tokens one burn names. */
 inline constexpr size_t MAX_BURNS{16};
 
@@ -539,6 +546,8 @@ std::optional<uint64_t> SwapIn(uint64_t reserve_in, uint64_t reserve_out, uint64
 uint64_t SharesFor(const Pool& pool, uint64_t amount0, uint64_t amount1);
 /** What `shares` take out of a pool. */
 std::pair<uint64_t, uint64_t> Withdraw(const Pool& pool, uint64_t shares);
+/** The same under the second audit's rules: CHN below MIN_CHN_PAYOUT is not taken out, it stays in the pool. */
+std::pair<uint64_t, uint64_t> WithdrawPaid(const Pool& pool, uint64_t shares);
 /**
  * How much worse, in percent, a trade's price is than the pool's price before it (the fee
  * included). Not a rule: what wallets warn about.

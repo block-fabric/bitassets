@@ -780,6 +780,9 @@ RPCMethod swapasset()
     const bool zero_in{pool->asset0 == in.id};
     const uint64_t quote{bitassets::amm::SwapOut(zero_in ? pool->reserve0 : pool->reserve1, zero_in ? pool->reserve1 : pool->reserve0, amount_in)};
     if (quote == 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "Too little: it buys nothing");
+    if (out.id.IsNull() && quote < bitassets::MIN_CHN_PAYOUT && pwallet->chain().getBitAssetsAudit2()) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("Too little: the least CHN paid out is %s", FormatMoney(bitassets::MIN_CHN_PAYOUT)));
+    }
     const double max_impact{request.params[4].isNull() ? 10.0 : request.params[4].get_real()};
     if (!(max_impact >= 0 && max_impact <= 100)) throw JSONRPCError(RPC_INVALID_PARAMETER, "max_impact is a percentage, from 0 to 100");
     // A pool nobody provides liquidity to holds only dust: whatever goes in buys almost nothing.
@@ -917,10 +920,13 @@ RPCMethod removeliquidity()
     if (held == 0) NotHeld(*pwallet, Token::Kind::LP, id, "shares of this pool");
     const uint64_t shares{percent >= 100 ? held : static_cast<uint64_t>(static_cast<long double>(held) * percent / 100)};
     if (shares == 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "That is no share at all");
-    const auto [out0, out1]{bitassets::amm::Withdraw(*pool, shares)};
+    // Under the second audit's rules, a side that rounds to nothing, or to CHN dust (which stays in
+    // the pool), is left out; before, both had to give something.
+    const bool audit2{pwallet->chain().getBitAssetsAudit2()};
+    const auto [out0, out1]{audit2 ? bitassets::amm::WithdrawPaid(*pool, shares) : bitassets::amm::Withdraw(*pool, shares)};
     const bool a_first{pool->asset0 == a.id};
     const uint64_t out_a{a_first ? out0 : out1}, out_b{a_first ? out1 : out0};
-    if (out_a == 0 || out_b == 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "Too few shares: they take nothing out of one of the assets");
+    if (audit2 ? (out_a == 0 && out_b == 0) : (out_a == 0 || out_b == 0)) throw JSONRPCError(RPC_INVALID_PARAMETER, "Too few shares: they take nothing out of one of the assets");
     const auto [inputs, total]{Select(*pwallet, Token::Kind::LP, id, shares, "shares of this pool")};
     std::vector<Out> outs;
     if (total > shares) {
@@ -928,8 +934,13 @@ RPCMethod removeliquidity()
         change.amount = total - shares;
         outs.push_back({ChangeDestination(*pwallet), change});
     }
-    ResultOuts(*pwallet, {a.id, b.id}, outs);
-    bitassets::RemoveLiquidity remove{a.id, b.id, shares, std::max<uint64_t>(1, LessSlippage(out_a, slippage)), std::max<uint64_t>(1, LessSlippage(out_b, slippage)), ChnTo(*pwallet, {a.id, b.id})};
+    std::vector<AssetId> results;
+    if (out_a > 0) results.push_back(a.id);
+    if (out_b > 0) results.push_back(b.id);
+    ResultOuts(*pwallet, results, outs);
+    // A side left out asks for nothing; one that gives something, for at least 1 (it must not be left out).
+    const auto least{[&](uint64_t out) { return out == 0 ? uint64_t{0} : std::max<uint64_t>(1, LessSlippage(out, slippage)); }};
+    bitassets::RemoveLiquidity remove{a.id, b.id, shares, least(out_a), least(out_b), ChnTo(*pwallet, results)};
     const CTransactionRef tx{Send(*pwallet, remove, outs, inputs)};
     UniValue result(UniValue::VOBJ);
     result.pushKV("txid", tx->GetHash().GetHex());
@@ -1040,6 +1051,9 @@ RPCMethod bidauction()
     const uint64_t buys{auction->BuysAt(height, amount)};
     if (buys == 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "Too little: it buys nothing at the price of the next block");
     if (buys > auction->remaining) throw JSONRPCError(RPC_INVALID_PARAMETER, "Too much: it buys more than is left (see buy_all)");
+    if (auction->base.IsNull() && buys < bitassets::MIN_CHN_PAYOUT && pwallet->chain().getBitAssetsAudit2()) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("Too little: the least CHN paid out is %s", FormatMoney(bitassets::MIN_CHN_PAYOUT)));
+    }
     const AssetInfo quote{auction->quote, std::nullopt, dq, LabelOfAsset(*pwallet, auction->quote)};
     std::vector<COutPoint> inputs;
     std::vector<Out> outs;
@@ -1079,9 +1093,12 @@ RPCMethod collectauction()
         throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("The auction is running, with bids: it can be collected after height %d, or once sold out", auction->EndHeight()));
     }
     const auto [inputs, total]{Select(*pwallet, Token::Kind::RECEIPT, id.ToUint256(), 1, "the receipt of this auction")};
+    // Under the second audit's rules, CHN dust is not paid out (it is burned).
+    const bool audit2{pwallet->chain().getBitAssetsAudit2()};
+    const auto paid{[&](const AssetId& asset, uint64_t amount) { return amount > 0 && !(audit2 && asset.IsNull() && amount < bitassets::MIN_CHN_PAYOUT); }};
     std::vector<AssetId> results;
-    if (auction->remaining > 0) results.push_back(auction->base);
-    if (auction->proceeds > 0) results.push_back(auction->quote);
+    if (paid(auction->base, auction->remaining)) results.push_back(auction->base);
+    if (paid(auction->quote, auction->proceeds)) results.push_back(auction->quote);
     std::vector<Out> outs;
     ResultOuts(*pwallet, results, outs);
     return TxResult(Send(*pwallet, bitassets::Collect{id, ChnTo(*pwallet, results)}, outs, inputs));
