@@ -237,6 +237,9 @@ public:
         // TODO for a new sidechain: its slot, its own message, magic bytes, port and address prefix.
         MakeSidechain({.slot = 0, .genesis_message = "Sidechain template, main network", .genesis_time = 1790900000,
                        .message_start = {0x5c, 0x1d, 0xec, 0x01}, .default_port = 9655, .bech32_hrp = "sc"});
+        // Set when the slot activates on the mainchain: the height of the block that activated it.
+        consensus.sidechain.main_activation_height = 0;
+        consensus.sidechain.audit2_height = 0;
         consensus.coinbase_maturity = 0; // what a block pays (deposits, fees) can be spent in the next
     }
 };
@@ -340,6 +343,9 @@ public:
         consensus.sidechain.bundle_retry_delay = 20;
         // The test network ran without it until then; see SidechainParams.
         consensus.sidechain.single_bundle_height = 1'000'000;
+        // The height of the mainchain block that activated the slot; nothing is left out at 0.
+        consensus.sidechain.main_activation_height = 0;
+        consensus.sidechain.audit2_height = 999999999; // AUDIT2_TESTNET: set at deploy
         consensus.coinbase_maturity = 0; // what a block pays (deposits, fees) can be spent in the next
     }
 };
@@ -448,6 +454,8 @@ public:
         // This chain is a sidechain of the Chains signet. Its own blocks are not signed.
         MakeSidechain({.slot = 0, .genesis_message = "Sidechain template, signet", .genesis_time = 1790900000,
                        .message_start = {0x5c, 0x1d, 0xec, 0x03}, .default_port = 39655, .bech32_hrp = "tsc"});
+        consensus.sidechain.main_activation_height = 0;
+        consensus.sidechain.audit2_height = 0;
         consensus.coinbase_maturity = 0; // what a block pays (deposits, fees) can be spent in the next
     }
 };
@@ -507,6 +515,7 @@ public:
             consensus.sidechain.enabled = true;
             consensus.sidechain.slot = *opts.sidechain_slot;
             consensus.sidechain.bundle_retry_delay = 5;
+            consensus.sidechain.audit2_height = 0;
             // A sidechain has no sidechains of its own.
             consensus.drivechain.max_sidechains = 0;
             consensus.coinbase_maturity = 0;
