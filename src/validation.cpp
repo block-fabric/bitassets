@@ -5144,6 +5144,21 @@ bool Chainstate::PrepareDrivechainDB(const CBlockIndex* rebuild_from, bilingual_
     const drivechain::Database::Format format{db.CheckFormat()};
     if (format == drivechain::Database::Format::CURRENT) return true;
 
+    // Rebuilt from the blocks: those must all be there before anything is wiped (a pruned node no
+    // longer has the old ones), or the node would be left with neither the old data nor the new.
+    if (rebuild_from && m_blockman.m_have_pruned) {
+        for (const CBlockIndex* pindex{rebuild_from}; pindex->pprev; pindex = pindex->pprev) {
+            if (!(pindex->nStatus & BLOCK_HAVE_DATA)) {
+                LogError("The sidechain database has to be rebuilt from the blocks, and block %s at height %d was pruned", pindex->GetBlockHash().ToString(), pindex->nHeight);
+                error = strprintf(_("The sidechain database has to be rebuilt from the blocks (it is %s), and this pruned node no longer has block %d. Nothing was changed: "
+                                    "restart with -reindex to download the blocks again, or go back to the former version"),
+                                  format == drivechain::Database::Format::OTHER_PARAMS ? _("derived under other drivechain parameters") : _("in an older format"),
+                                  pindex->nHeight);
+                return false;
+            }
+        }
+    }
+
     switch (format) {
     case drivechain::Database::Format::CURRENT:
         break;
