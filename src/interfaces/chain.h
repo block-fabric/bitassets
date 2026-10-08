@@ -207,6 +207,14 @@ public:
     virtual bool getBitAssetsAudit2() = 0;
     //! BitAssets: whether an asset is dead and can be retired.
     virtual bool getBitAssetReleasable(const bitassets::AssetId& asset) = 0;
+    //! BitAssets: the asset a number names (its number in the order of registration), if any.
+    virtual std::optional<bitassets::AssetId> getBitAssetOfSeq(uint32_t seq) = 0;
+    //! BitAssets: the height from which the rules of the second audit apply (bitassets_audit2_height).
+    virtual int getBitAssetsAudit2Height() = 0;
+    //! BitAssets: how deep a reservation is before a registration reveals it, under those rules (bitassets_reveal_depth).
+    virtual int getBitAssetsRevealDepth() = 0;
+    //! BitAssets: the height of the block that made a reservation not revealed yet, if it is in one.
+    virtual std::optional<int> getBitAssetsReservationHeight(const Txid& txid) = 0;
     //! The merged-mining request (BIP301 M8) in the mempool for a sidechain slot, if any: the sidechain
     //! block it asks for, the mainchain block it is for, and the fee it pays.
     struct BmmRequestInfo {

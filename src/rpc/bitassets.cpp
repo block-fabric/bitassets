@@ -219,6 +219,7 @@ std::vector<RPCResult> AuctionResults()
         {RPCResult::Type::NUM, "end_price", "The price of all of it at the end"},
         {RPCResult::Type::NUM, "unit_price", "What one whole unit of it costs in the next block"},
         {RPCResult::Type::NUM, "price", "What all of it costs in the next block"},
+        {RPCResult::Type::NUM, "cost_of_remaining", "What a bid for all that is left pays in the next block (see quotebid)"},
         {RPCResult::Type::NUM, "start_height", "The first block that takes bids"},
         {RPCResult::Type::NUM, "end_height", "The last block that takes bids"},
         {RPCResult::Type::NUM, "bids", "How many bids it took"},
@@ -241,6 +242,14 @@ std::string AuctionStatus(const bitassets::Auction& auction, int height)
     return "open";
 }
 
+/** What buys all that is left of an auction at the price of all of it `price`: ceil(remaining * price / base_amount). */
+uint64_t CostOfRemaining(const bitassets::Auction& auction, uint64_t price)
+{
+    if (auction.base_amount == 0) return 0;
+    const unsigned __int128 cost{(static_cast<unsigned __int128>(auction.remaining) * price + auction.base_amount - 1) / auction.base_amount};
+    return static_cast<uint64_t>(std::min<unsigned __int128>(cost, bitassets::MAX_AMOUNT));
+}
+
 UniValue AuctionToJSON(Chainstate& chainstate, const bitassets::State& state, const Txid& id, const bitassets::Auction& auction, int height) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
 {
     const uint8_t db{DecimalsOf(state, auction.base)}, dq{DecimalsOf(state, auction.quote)};
@@ -258,6 +267,7 @@ UniValue AuctionToJSON(Chainstate& chainstate, const bitassets::State& state, co
     const uint64_t price{auction.PriceAt(std::max(height, auction.start_height))};
     obj.pushKV("unit_price", PriceToJSON(auction.base_amount, db, price, dq));
     obj.pushKV("price", AmountToJSON(price, dq));
+    obj.pushKV("cost_of_remaining", AmountToJSON(CostOfRemaining(auction, price), dq));
     obj.pushKV("start_height", auction.start_height);
     obj.pushKV("end_height", auction.EndHeight());
     obj.pushKV("bids", auction.bids);
@@ -406,6 +416,8 @@ RPCMethod getbitassetsinfo()
             {RPCResult::Type::NUM, "pools", "Pools"},
             {RPCResult::Type::NUM, "auctions", "Auctions not closed"},
             {RPCResult::Type::NUM, "height", "The height of the next block, which the prices are for"},
+            {RPCResult::Type::NUM, "reveal_depth", "How many blocks after the block that made a reservation a block may take its registration, from the next block on (1 before the second audit's rules)"},
+            {RPCResult::Type::NUM, "audit2_height", "The height from which the rules of the second audit apply"},
         }},
         RPCExamples{HelpExampleCli("getbitassetsinfo", "")},
         [&](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
@@ -424,6 +436,9 @@ RPCMethod getbitassetsinfo()
     result.pushKV("pools", state.PoolCount());
     result.pushKV("auctions", open_auctions);
     result.pushKV("height", chainman.ActiveChain().Height() + 1);
+    const Consensus::SidechainParams& params{chainman.GetConsensus().sidechain};
+    result.pushKV("reveal_depth", chainman.ActiveChain().Height() + 1 >= params.bitassets_audit2_height ? params.bitassets_reveal_depth : 1);
+    result.pushKV("audit2_height", params.bitassets_audit2_height);
     return result;
 },
     };
@@ -636,9 +651,7 @@ RPCMethod quotebid()
     UniValue result(UniValue::VOBJ);
     result.pushKV("buys", AmountToJSON(std::min(auction.BuysAt(at, amount), auction.remaining), db));
     result.pushKV("remaining", AmountToJSON(auction.remaining, db));
-    // Ceil(remaining * price / base_amount), which buys all of it.
-    const unsigned __int128 cost{(static_cast<unsigned __int128>(auction.remaining) * auction.PriceAt(at) + auction.base_amount - 1) / auction.base_amount};
-    result.pushKV("cost_of_remaining", AmountToJSON(static_cast<uint64_t>(std::min<unsigned __int128>(cost, bitassets::MAX_AMOUNT)), dq));
+    result.pushKV("cost_of_remaining", AmountToJSON(CostOfRemaining(auction, auction.PriceAt(at)), dq));
     result.pushKV("open", auction.OpenAt(height));
     return result;
 },

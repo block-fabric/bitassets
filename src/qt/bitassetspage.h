@@ -99,6 +99,8 @@ private:
     QLabel* m_summary{nullptr};
     bool m_busy{false};
     int m_height{0};
+    //! How many blocks after the block of a reservation its registration can be in (getbitassetsinfo).
+    int m_reveal_depth{1};
 
     // My assets.
     QListWidget* m_mine{nullptr};
@@ -130,6 +132,9 @@ private:
     QLineEdit* m_lq_amount_b{nullptr};
     QLabel* m_lq_line{nullptr};
     QTimer* m_lq_timer{nullptr};
+    //! Whether the form shows a pool whose price the amounts set (none yet, or abandoned): both are
+    //! typed in. If that changed by the time Add is clicked, the amounts are asked for again.
+    bool m_lq_sets_price{true};
 
     // Auctions.
     QTableWidget* m_auctions{nullptr};

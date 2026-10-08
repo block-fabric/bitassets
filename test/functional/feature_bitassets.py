@@ -59,7 +59,16 @@ class BitAssetsTest(SidechainTest):
         reserved = side.reserveasset("GOLD")
         self.mine_txs()
         assert_equal(side.getbitassetsinfo()["reservations"], 1)
-        assert_equal(side.listmyassets()["reservations"][0]["name"], "GOLD")
+        reservation = side.listmyassets()["reservations"][0]
+        assert_equal(reservation["name"], "GOLD")
+        # Revealed only once deep enough (2 blocks on regtest), so that whoever makes a block cannot
+        # reserve the name itself and register it first, in its own block.
+        assert_equal(side.getbitassetsinfo()["reveal_depth"], 2)
+        assert_equal(reservation["registers_from"], reservation["height"] + 2)
+        assert_equal(reservation["wait"], 1)
+        assert_raises_rpc_error(-4, "too recent", side.registerasset, "GOLD", 1000000, 2)
+        self.mine_txs()
+        assert_equal(side.listmyassets()["reservations"][0]["wait"], 0)
         registered = side.registerasset("GOLD", 1000000, 2, {"info": "One gram of gold"})
         assert_equal(registered["asset"], reserved["asset"])
         self.mine_txs()
@@ -84,6 +93,7 @@ class BitAssetsTest(SidechainTest):
         self.log.info("An asset without supply yet, and a private one")
         side.reserveasset("SILVER")
         other.reserveasset("SECRET")
+        self.mine_txs()
         self.mine_txs()
         side.registerasset("SILVER", 0)
         other.registerasset("SECRET", 5, 0, {}, False)
@@ -112,7 +122,8 @@ class BitAssetsTest(SidechainTest):
 
         self.log.info("Mint, burn, change data: only with the control coin")
         assert_raises_rpc_error(-6, "does not hold the control coin", other.mintasset, "GOLD", 10)
-        side.mintasset("GOLD", 1000)
+        # By its number, as the node's commands take it.
+        side.mintasset(side.getasset("GOLD")["seq"], 1000)
         side.mintasset("SILVER", 500)
         self.mine_txs()
         assert_equal(side.getasset("GOLD")["supply"], Decimal("1001000.00"))
@@ -201,6 +212,9 @@ class BitAssetsTest(SidechainTest):
         auction = side.getauction(auction["auction"])
         assert_equal(auction["remaining"], Decimal("75.00"))
         assert_equal(auction["proceeds"], Decimal("2.50000000"))
+        # What all that is left costs: not the price of all the auction sold.
+        assert_equal(auction["cost_of_remaining"], side.quotebid(auction["auction"], 1)["cost_of_remaining"])
+        assert auction["cost_of_remaining"] < auction["price"]
         assert_raises_rpc_error(-8, "running", side.collectauction, auction["auction"])
         # The price fell: all that is left, for less.
         assert_raises_rpc_error(-8, "more than is left", other.bidauction, auction["auction"], 100)
@@ -251,9 +265,22 @@ class BitAssetsTest(SidechainTest):
         assert_equal(side.getpool("GOLD", "CHN")["abandoned"], True)
         assert_equal(side.listpools()[0]["abandoned"], True)
         assert_raises_rpc_error(-8, "Nobody provides liquidity", side.swapasset, "CHN", "0.001", "GOLD")
+        # Reopened as a new pool is made: both amounts, which set its price, not the price it was left at.
+        assert_raises_rpc_error(-8, "Give both amounts", side.addliquidity, "GOLD", 100, "CHN")
+        reopened = side.addliquidity("GOLD", 1000, "CHN", 2)
+        assert_equal(reopened["sets_price"], True)
+        self.mine_txs()
+        assert_equal(side.getpool("GOLD", "CHN")["abandoned"], False)
+        assert_equal(other.addliquidity("GOLD", 10, "CHN")["sets_price"], False)
+        self.mine_txs()
+        side.removeliquidity("GOLD", "CHN")
+        other.removeliquidity("GOLD", "CHN")
+        self.mine_txs()
+        assert_equal(side.getpool("GOLD", "CHN")["abandoned"], True)
 
         self.log.info("A dead asset is retired: its pools' CHN go to mainchain miners")
         side.reserveasset("DEAD")
+        self.mine_txs()
         self.mine_txs()
         side.registerasset("DEAD", 1000)
         self.mine_txs()
@@ -285,6 +312,7 @@ class BitAssetsTest(SidechainTest):
         # The name is free: it can be an asset again.
         other.reserveasset("DEAD")
         self.mine_txs()
+        self.mine_txs()
         other.registerasset("DEAD", 5)
         self.mine_txs()
         assert_equal(side.getasset("DEAD")["supply"], 5)
@@ -304,6 +332,7 @@ class BitAssetsTest(SidechainTest):
         copy_txid = other.sendrawtransaction(other.signrawtransactionwithwallet(copy)["hex"])
         self.mine_txs()
         assert_equal(other.gettransaction(copy_txid)["confirmations"], 1)
+        self.mine_txs()
         side.registerasset("COPIED", 7)
         self.mine_txs()
         assert_equal(side.getasset("COPIED")["supply"], 7)

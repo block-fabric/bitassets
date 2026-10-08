@@ -748,6 +748,20 @@ public:
         const int next{chainman().ActiveChain().Height() + 1};
         return chainman().ActiveChainstate().SideState().BitAssets().Releasable(asset, nullptr, next >= chainman().GetConsensus().sidechain.bitassets_audit2_height);
     }
+    std::optional<bitassets::AssetId> getBitAssetOfSeq(uint32_t seq) override
+    {
+        LOCK(::cs_main);
+        return chainman().ActiveChainstate().SideState().BitAssets().AssetOfSeq(seq);
+    }
+    int getBitAssetsAudit2Height() override { return chainman().GetConsensus().sidechain.bitassets_audit2_height; }
+    int getBitAssetsRevealDepth() override { return chainman().GetConsensus().sidechain.bitassets_reveal_depth; }
+    std::optional<int> getBitAssetsReservationHeight(const Txid& txid) override
+    {
+        LOCK(::cs_main);
+        const auto origin{chainman().ActiveChainstate().SideState().BitAssets().GetReservationOrigin(txid)};
+        if (!origin) return std::nullopt;
+        return origin->height;
+    }
     int getBitAssetsHeight() override
     {
         LOCK(::cs_main);

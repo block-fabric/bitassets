@@ -161,7 +161,8 @@ struct AssetInfo {
 AssetInfo ParseAsset(CWallet& wallet, const UniValue& value)
 {
     AssetInfo info;
-    info.id = bitassets::ParseAssetArg(value);
+    // By its number too, as the node's commands take it.
+    info.id = bitassets::ParseAssetArg(value, [&](uint32_t seq) { return wallet.chain().getBitAssetOfSeq(seq); });
     if (info.id.IsNull()) {
         info.decimals = bitassets::CHN_DECIMALS;
         info.label = "CHN";
@@ -268,21 +269,59 @@ CScript ChnTo(CWallet& wallet, const std::vector<AssetId>& results)
     return chn ? GetScriptForDestination(NewDestination(wallet, "bitassets payout")) : CScript{};
 }
 
+/**
+ * How many blocks before the second audit's rules a reservation is already bound to the script of its
+ * output. A reservation of the name alone mined from those rules on registers nothing; one made just
+ * before them may wait for a block that long, and be mined after.
+ */
+constexpr int BIND_AHEAD{100};
+
+struct OwnReservation {
+    COutPoint outpoint;
+    Txid id;
+    uint256 nonce;
+    //! Bound to the script of its output (the second audit's rules): it registers only under them.
+    bool bound{false};
+};
+
+/** Whether a reservation of the wallet, carried by `dest`, is of `name`; if so, its nonce and whether it is bound. */
+std::optional<std::pair<uint256, bool>> ReservationOf(const CWallet& wallet, const CTxDestination& dest, const uint256& commitment, const AssetId& name)
+{
+    if (!std::holds_alternative<WitnessV0KeyHash>(dest)) return std::nullopt;
+    const uint256 nonce{ReservationNonce(wallet, dest, name)};
+    // Bound to the script of its output (the second audit's rules), or, made before, to the name alone.
+    if (bitassets::ReservationCommitment(name, nonce, GetScriptForDestination(dest)) == commitment) return std::make_pair(nonce, true);
+    if (bitassets::ReservationCommitment(name, nonce) == commitment) return std::make_pair(nonce, false);
+    return std::nullopt;
+}
+
 /** The reservation of this wallet for a name, and its nonce. */
-std::optional<std::pair<COutPoint, uint256>> FindReservation(CWallet& wallet, const AssetId& name)
+std::optional<OwnReservation> FindReservation(CWallet& wallet, const AssetId& name)
 {
     for (const OwnedToken& owned : OwnedTokens(wallet)) {
         if (owned.token.kind != Token::Kind::RESERVATION || !std::holds_alternative<WitnessV0KeyHash>(owned.dest)) continue;
-        const auto commitment{wallet.chain().getBitAssetsReservation(Txid::FromUint256(owned.token.id))};
+        const Txid id{Txid::FromUint256(owned.token.id)};
+        const auto commitment{wallet.chain().getBitAssetsReservation(id)};
         if (!commitment) continue;
-        const uint256 nonce{ReservationNonce(wallet, owned.dest, name)};
-        // Bound to the script of its output (the second audit's rules), or, made before, to the name alone.
-        if (bitassets::ReservationCommitment(name, nonce, GetScriptForDestination(owned.dest)) == *commitment ||
-            bitassets::ReservationCommitment(name, nonce) == *commitment) {
-            return std::make_pair(owned.outpoint, nonce);
-        }
+        if (const auto found{ReservationOf(wallet, owned.dest, *commitment, name)}) return OwnReservation{owned.outpoint, id, found->first, found->second};
     }
     return std::nullopt;
+}
+
+/**
+ * The first height from which a block may take the registration of a reservation made in the block
+ * at `made`, it and every block after it: under the second audit's rules, a reservation is revealed
+ * only `reveal_depth` blocks after the block that made it, and a bound one only under those rules.
+ * A registration sent before the rules and mined after them waits as they say.
+ */
+int RevealHeight(CWallet& wallet, int made, bool bound)
+{
+    const int audit2{wallet.chain().getBitAssetsAudit2Height()};
+    int from{wallet.chain().getBitAssetsHeight()};
+    if (bound) from = std::max(from, audit2);
+    const int64_t deep{int64_t{made} + wallet.chain().getBitAssetsRevealDepth()};
+    if (deep > from && deep > audit2) from = static_cast<int>(deep);
+    return from;
 }
 
 UniValue TxResult(const CTransactionRef& tx)
@@ -340,8 +379,11 @@ RPCMethod reserveasset()
     const uint256 nonce{ReservationNonce(*pwallet, dest, asset)};
     // Under the second audit's rules, the commitment binds the reservation to the script of its
     // output: a copy of it, made by someone who saw it, can never reveal the name before this one.
-    const uint256 commitment{pwallet->chain().getBitAssetsAudit2() ? bitassets::ReservationCommitment(asset, nonce, GetScriptForDestination(dest))
-                                                                    : bitassets::ReservationCommitment(asset, nonce)};
+    // Bound already when the rules are near: a reservation of the name alone mined under them would
+    // register nothing (it then registers from the block they start at).
+    const bool bound{int64_t{pwallet->chain().getBitAssetsHeight()} + BIND_AHEAD >= pwallet->chain().getBitAssetsAudit2Height()};
+    const uint256 commitment{bound ? bitassets::ReservationCommitment(asset, nonce, GetScriptForDestination(dest))
+                                   : bitassets::ReservationCommitment(asset, nonce)};
     const CTransactionRef tx{Send(*pwallet, bitassets::Reserve{commitment}, {{dest, reservation}}, {})};
     UniValue result(UniValue::VOBJ);
     result.pushKV("txid", tx->GetHash().GetHex());
@@ -355,8 +397,10 @@ RPCMethod registerasset()
 {
     return RPCMethod{
         "registerasset",
-        "Register an asset reserved with reserveasset, once the reservation is in a block: create its initial supply\n"
-        "and its control coin, which mints more and changes its data." + HELP_REQUIRING_PASSPHRASE,
+        "Register an asset reserved with reserveasset, once the reservation is deep enough: create its initial supply\n"
+        "and its control coin, which mints more and changes its data. A registration reveals a reservation only in a\n"
+        "block some blocks after the one that made it (revealdepth in getbitassetsinfo; listmyassets says from which\n"
+        "block each reservation registers)." + HELP_REQUIRING_PASSPHRASE,
         {
             {"name", RPCArg::Type::STR, RPCArg::Optional::NO, "The name"},
             {"supply", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "The initial supply, in whole assets (0 for none yet)"},
@@ -383,16 +427,29 @@ RPCMethod registerasset()
     const uint64_t supply{bitassets::ParseUnits(request.params[1], decimals, /*allow_zero=*/true)};
     const auto reservation{FindReservation(*pwallet, asset)};
     if (!reservation) throw JSONRPCError(RPC_INVALID_PARAMETER, "This wallet has no reservation of the name in a block (see reserveasset)");
+    // Not before the rules let it be revealed: the registration would not be taken.
+    if (const auto made{pwallet->chain().getBitAssetsReservationHeight(reservation->id)}) {
+        const int next{pwallet->chain().getBitAssetsHeight()};
+        const int from{RevealHeight(*pwallet, *made, reservation->bound)};
+        if (from > next) {
+            const int audit2{pwallet->chain().getBitAssetsAudit2Height()};
+            if (reservation->bound && from == audit2) {
+                throw JSONRPCError(RPC_WALLET_ERROR, strprintf("The reservation is bound to its output, as the rules from block %d have it: it registers the name from that block, in %d blocks", audit2, from - next));
+            }
+            throw JSONRPCError(RPC_WALLET_ERROR, strprintf("The reservation is too recent: a registration reveals it only in a block %d blocks after the one that made it (%d), so that whoever makes a block cannot take the name first. Try again from block %d, in %d blocks",
+                                                           pwallet->chain().getBitAssetsRevealDepth(), *made, from, from - next));
+        }
+    }
     bitassets::Register reg;
     reg.name = asset;
-    reg.nonce = reservation->second;
+    reg.nonce = reservation->nonce;
     reg.supply = supply;
     reg.decimals = decimals;
     if (!request.params[3].isNull()) reg.data = bitassets::ParseData(request.params[3]);
     if (request.params[4].isNull() || request.params[4].get_bool()) reg.text = name;
     std::vector<Out> outs{{ChangeDestination(*pwallet), UnitToken(Token::Kind::CONTROL, asset)}};
     if (supply > 0) outs.push_back({ChangeDestination(*pwallet), AssetToken(asset, supply)});
-    const CTransactionRef tx{Send(*pwallet, reg, outs, {reservation->first})};
+    const CTransactionRef tx{Send(*pwallet, reg, outs, {reservation->outpoint})};
     UniValue result(UniValue::VOBJ);
     result.pushKV("txid", tx->GetHash().GetHex());
     result.pushKV("asset", asset.GetHex());
@@ -418,10 +475,10 @@ RPCMethod releaseassetreservation()
     const AssetId asset{bitassets::HashName(request.params[0].get_str())};
     const auto reservation{FindReservation(*pwallet, asset)};
     if (!reservation) throw JSONRPCError(RPC_INVALID_PARAMETER, "This wallet has no reservation of the name in a block");
-    const auto token{pwallet->chain().getBitAssetsToken(reservation->first)};
+    const auto token{pwallet->chain().getBitAssetsToken(reservation->outpoint)};
     bitassets::Burn burn;
     burn.tokens.push_back(*token);
-    return TxResult(Send(*pwallet, burn, {}, {reservation->first}));
+    return TxResult(Send(*pwallet, burn, {}, {reservation->outpoint}));
 },
     };
 }
@@ -452,6 +509,9 @@ RPCMethod listmyassets()
                 {RPCResult::Type::STR_HEX, "txid", "The reservation"},
                 {RPCResult::Type::STR, "name", /*optional=*/true, "The name, if reserved with this wallet"},
                 {RPCResult::Type::BOOL, "taken", "Whether an asset of this name is registered (by another): the reservation can only be released"},
+                {RPCResult::Type::NUM, "height", /*optional=*/true, "The block that made it"},
+                {RPCResult::Type::NUM, "registers_from", /*optional=*/true, "The first block that may take its registration (see registerasset), if reserved with this wallet"},
+                {RPCResult::Type::NUM, "wait", /*optional=*/true, "How many blocks until then: 0 if it can be registered now"},
             }}}},
             {RPCResult::Type::ARR, "liquidity", "Shares of pools", {{RPCResult::Type::OBJ, "", "",
             {
@@ -506,12 +566,24 @@ RPCMethod listmyassets()
             obj.pushKV("txid", owned.token.id.GetHex());
             const auto label{LabelOf(*pwallet, owned.dest)};
             bool taken{false};
+            const Txid id{Txid::FromUint256(owned.token.id)};
+            const auto made{pwallet->chain().getBitAssetsReservationHeight(id)};
+            std::optional<int> from;
             if (label && label->starts_with("bitasset:")) {
                 const std::string name{label->substr(9)};
                 obj.pushKV("name", name);
-                taken = pwallet->chain().getBitAsset(bitassets::HashName(name)).has_value();
+                const AssetId asset{bitassets::HashName(name)};
+                taken = pwallet->chain().getBitAsset(asset).has_value();
+                const auto commitment{pwallet->chain().getBitAssetsReservation(id)};
+                const auto mine{commitment ? ReservationOf(*pwallet, owned.dest, *commitment, asset) : std::nullopt};
+                if (made && mine) from = RevealHeight(*pwallet, *made, mine->second);
             }
             obj.pushKV("taken", taken);
+            if (made) obj.pushKV("height", *made);
+            if (from) {
+                obj.pushKV("registers_from", *from);
+                obj.pushKV("wait", std::max(0, *from - pwallet->chain().getBitAssetsHeight()));
+            }
             reservations.push_back(std::move(obj));
             break;
         }
@@ -814,12 +886,14 @@ RPCMethod addliquidity()
     return RPCMethod{
         "addliquidity",
         "Put two assets in their pool, for shares of it; this makes the pool if there is none, at the price the amounts\n"
-        "set. Into a pool there is, the second amount is worked out from the first at the pool's price, unless given." + HELP_REQUIRING_PASSPHRASE,
+        "set. Into a pool there is, the second amount is worked out from the first at the pool's price, unless given.\n"
+        "A pool nobody provides liquidity to any more (abandoned) is reopened as a new pool is made: both amounts are\n"
+        "needed, and they set its price (what it holds is the dust it keeps for good, at a price anyone could set)." + HELP_REQUIRING_PASSPHRASE,
         {
             {"asset_a", RPCArg::Type::STR, RPCArg::Optional::NO, bitassets::ASSET_ARG_HELP},
             {"amount_a", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "How much of it"},
             {"asset_b", RPCArg::Type::STR, RPCArg::Optional::NO, bitassets::ASSET_ARG_HELP},
-            {"amount_b", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED, "How much of it: needed for a new pool"},
+{"amount_b", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED, "How much of it: needed for a new pool, or an abandoned one"},
             {"slippage", RPCArg::Type::NUM, RPCArg::Default{1}, "How many fewer shares than quoted, in percent, it may give if the pool moves first"},
         },
         RPCResult{RPCResult::Type::OBJ, "", "",
@@ -828,6 +902,7 @@ RPCMethod addliquidity()
             {RPCResult::Type::NUM, "amount_a", "What goes in of the first asset"},
             {RPCResult::Type::NUM, "amount_b", "And of the second"},
             {RPCResult::Type::NUM, "shares", "The shares it gives if nothing moves the pool first"},
+            {RPCResult::Type::BOOL, "sets_price", "Whether the amounts set the pool's price: a new pool, or an abandoned one reopened"},
         }},
         RPCExamples{HelpExampleCli("addliquidity", "\"GOLD\" 100 \"CHN\" 5")},
         [&](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
@@ -840,11 +915,16 @@ RPCMethod addliquidity()
     const uint64_t amount_a{bitassets::ParseUnits(request.params[1], a.decimals)};
     const uint64_t slippage{Slippage(request.params[4], 1)};
     const auto pool{pwallet->chain().getBitAssetsPool(bitassets::PoolId(a.id, b.id))};
+    // A new pool, or one nobody provides liquidity to: the amounts set its price. What an abandoned
+    // pool holds is the dust every pool keeps for good, at whatever price the last trade or the last
+    // provider left it: anyone can set it, and nobody should deposit at it unawares.
+    const bool sets_price{!pool || bitassets::amm::Abandoned(*pool)};
     uint64_t amount_b;
     if (!request.params[3].isNull()) {
         amount_b = bitassets::ParseUnits(request.params[3], b.decimals);
     } else {
         if (!pool || pool->shares == 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "There is no pool yet: give both amounts, which set its price");
+        if (sets_price) throw JSONRPCError(RPC_INVALID_PARAMETER, "Nobody provides liquidity to this pool any more: its price is what anyone left it at. Give both amounts, which set its price, as for a new pool");
         const bool a_first{pool->asset0 == a.id};
         const uint64_t ra{a_first ? pool->reserve0 : pool->reserve1}, rb{a_first ? pool->reserve1 : pool->reserve0};
         // At the pool's price, rounded up so that the first amount is the one that counts.
@@ -877,6 +957,7 @@ RPCMethod addliquidity()
     result.pushKV("amount_a", bitassets::AmountToJSON(amount_a, a.decimals));
     result.pushKV("amount_b", bitassets::AmountToJSON(amount_b, b.decimals));
     result.pushKV("shares", shares);
+    result.pushKV("sets_price", sets_price);
     return result;
 },
     };

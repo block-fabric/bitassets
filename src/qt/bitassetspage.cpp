@@ -330,6 +330,7 @@ void BitAssetsPage::refreshInfo()
     const auto info{call("getbitassetsinfo", UniValue{UniValue::VARR}, false, true)};
     if (!info) return;
     m_height = (*info)["height"].getInt<int>();
+    if ((*info).exists("reveal_depth")) m_reveal_depth = (*info)["reveal_depth"].getInt<int>();
     m_summary->setText(tr("%1 assets · %2 pools · %3 auctions · next block %4")
                            .arg(Text((*info)["assets"]), Text((*info)["pools"]), Text((*info)["auctions"]), QString::number(m_height)));
 }
@@ -470,7 +471,9 @@ void BitAssetsPage::refreshMine()
     for (const UniValue& r : (*mine)["reservations"].getValues()) {
         const QString name{r.exists("name") ? Text(r["name"]) : tr("(a reservation)")};
         shown << name;
-        add(QStringLiteral("reservation:") + Text(r["txid"]), r["taken"].isTrue() ? tr("%1 — taken by another").arg(name) : tr("%1 — registering…").arg(name), r["taken"].isTrue() ? RED : ORANGE, name);
+        const int wait{r.exists("wait") ? r["wait"].getInt<int>() : 0};
+        const QString state{r["taken"].isTrue() ? tr("%1 — taken by another").arg(name) : wait > 0 ? tr("%1 — registering in %n block(s)", "", wait).arg(name) : tr("%1 — registering…").arg(name)};
+        add(QStringLiteral("reservation:") + Text(r["txid"]), state, r["taken"].isTrue() ? RED : ORANGE, name);
     }
     for (const QString& name : pending) {
         if (!shown.contains(name)) add(QStringLiteral("pending:") + name, tr("%1 — being created…").arg(name), ORANGE, name);
@@ -677,9 +680,10 @@ void BitAssetsPage::showCreatePanel()
     create->setEnabled(false);
     layout->addWidget(create, 0, Qt::AlignLeft);
     layout->addWidget(Heading(tr("How it works"), panel));
-    layout->addWidget(Dim(tr("1. A reservation hides the name, so that nobody can see it coming and take it first. 2. After the next block, this "
-                             "page registers it with its supply. 3. After the block after that, it is in your assets. Keep this page open "
-                             "meanwhile, or come back to it."), panel));
+    layout->addWidget(Dim(tr("1. A reservation hides the name, so that nobody can see it coming and take it first. 2. Once the reservation is "
+                             "%n block(s) deep, this page registers it with its supply: not sooner, so that whoever makes a block cannot take "
+                             "the name first. 3. After the block after that, it is in your assets. Keep this page open meanwhile, or come back "
+                             "to it.", "", m_reveal_depth), panel));
     layout->addStretch();
 
     auto* check{new QTimer(panel)};
@@ -718,7 +722,7 @@ void BitAssetsPage::showCreatePanel()
         QStringList pending{settings.value(PendingKey(*wallet)).toStringList()};
         pending << QString::fromStdString(entry.write());
         settings.setValue(PendingKey(*wallet), pending);
-        say(tr("%1 is reserved: it is registered by itself after the next block.").arg(text));
+        say(tr("%1 is reserved: it is registered by itself once the reservation is %n block(s) deep.", "", m_reveal_depth).arg(text));
         m_mine_listed.clear();
         m_mine_shown = QStringLiteral("pending:") + text;
         refresh();
@@ -750,6 +754,8 @@ void BitAssetsPage::registerPending()
                 say(tr("%1 was registered by someone else first: release the reservation in My assets.").arg(QString::fromStdString(name)), true);
                 continue;
             }
+            // Not deep enough yet: a registration now would not be taken. Waited for, without a word.
+            if (r.exists("wait") && r["wait"].getInt<int>() > 0) continue;
             // In a block: register it. Its reservation is then spent, and not listed again.
             UniValue data(UniValue::VOBJ);
             if (!obj["info"].get_str().empty()) data.pushKV("info", obj["info"]);
@@ -950,8 +956,12 @@ void BitAssetsPage::showReservationPanel(const UniValue& reservation)
     if (reservation["taken"].isTrue()) {
         layout->addWidget(Dim(tr("Someone registered %1 first. The reservation can only be released.").arg(name), panel));
     } else {
-        layout->addWidget(Dim(tr("Being created: reserved, it is registered by itself after the next block, then in your assets after the one after. "
-                                 "Keep this page open meanwhile."), panel));
+        const int wait{reservation.exists("wait") ? reservation["wait"].getInt<int>() : 0};
+        layout->addWidget(Dim(wait > 0 ? tr("Being created: reserved, it is registered by itself in %n block(s), once the reservation is deep enough "
+                                            "that whoever makes a block cannot take the name first; then it is in your assets after the block after. "
+                                            "Keep this page open meanwhile.", "", wait)
+                                       : tr("Being created: reserved, it is registered by itself with the next block, then in your assets after the "
+                                            "one after. Keep this page open meanwhile."), panel));
     }
     if (reservation.exists("txid") && reservation.exists("name")) {
         auto* release{new QPushButton(tr("Release this reservation"), panel)};
@@ -1103,7 +1113,7 @@ QWidget* BitAssetsPage::createTradeTab()
     auto* lq_layout{new QVBoxLayout(lq_card)};
     lq_layout->addWidget(Heading(tr("Add liquidity"), lq_card));
     lq_layout->addWidget(Dim(tr("Put two assets in their pool and earn 0.3% of every trade. A new pool takes the price your amounts set, and opens with at least "
-                                "0.01 CHN on its CHN side. A pool everyone leaves closes until someone adds liquidity again."), lq_card));
+                                "0.01 CHN on its CHN side. A pool everyone leaves closes until someone reopens it, at the price their amounts set."), lq_card));
     m_lq_a = new QComboBox(lq_card);
     m_lq_a->setMinimumWidth(120);
     m_lq_amount_a = AmountEdit(tr("Amount"), lq_card);
@@ -1167,12 +1177,26 @@ QWidget* BitAssetsPage::createTradeTab()
         const QString a_arg{ArgOf(m_lq_a)}, b_arg{ArgOf(m_lq_b)};
         if (a_arg == b_arg || m_lq_amount_a->text().isEmpty()) return say(tr("Pick two different assets and an amount."), true);
         UniValue args{Args({a_arg.toStdString(), m_lq_amount_a->text().toStdString(), b_arg.toStdString()})};
-        // Into a pool there is, the wallet works the second amount out at the pool's price.
-        const bool exists{call("getpool", Args({a_arg.toStdString(), b_arg.toStdString()}), false, true).has_value()};
-        if (!exists) {
-            if (m_lq_amount_b->text().isEmpty()) return say(tr("A new pool: give both amounts, which set its price."), true);
+        // Into a pool someone provides liquidity to, the wallet works the second amount out at the
+        // pool's price. A new pool, or one nobody provides liquidity to any more (what it holds is
+        // dust, at a price anyone could have set), takes both amounts, which set its price.
+        const auto pool{call("getpool", Args({a_arg.toStdString(), b_arg.toStdString()}), false, true)};
+        const bool abandoned{pool && (*pool)["abandoned"].isTrue()};
+        const bool sets_price{!pool || abandoned};
+        // The pool changed since the form was filled in (made, reopened or left meanwhile): the
+        // amounts typed were for another case. Shown again, and asked for again.
+        if (sets_price != m_lq_sets_price) {
+            updateLiquidityQuote();
+            return say(sets_price ? tr("Nobody provides liquidity to this pool any more since you typed the amounts: give both amounts, which set its price, and click Add again.")
+                                  : tr("A pool of these assets was made meanwhile: its price sets the second amount now. Check the amounts and click Add again."), true);
+        }
+        if (sets_price) {
+            if (m_lq_amount_b->text().isEmpty()) return say(abandoned ? tr("Nobody provides liquidity to this pool: give both amounts, which set its price.") : tr("A new pool: give both amounts, which set its price."), true);
             args.push_back(m_lq_amount_b->text().toStdString());
-            if (!confirm(tr("Make a pool"), tr("Make the %1 / %2 pool with %3 %1 and %4 %2? Its price starts at what these amounts set.").arg(a, b, m_lq_amount_a->text(), m_lq_amount_b->text()))) return;
+            const QString question{abandoned ? tr("Reopen the %1 / %2 pool with %3 %1 and %4 %2? Nobody provides liquidity to it: these amounts set its price, "
+                                                  "whatever price it was left at. Check it is the price you want.")
+                                             : tr("Make the %1 / %2 pool with %3 %1 and %4 %2? Its price starts at what these amounts set.")};
+            if (!confirm(abandoned ? tr("Reopen a pool") : tr("Make a pool"), question.arg(a, b, m_lq_amount_a->text(), m_lq_amount_b->text()), abandoned)) return;
         }
         if (const auto r{call("addliquidity", args, true)}) {
             say(tr("Adding %1 %2 and %3 %4 to their pool with the next block.").arg(Num((*r)["amount_a"]), a, Num((*r)["amount_b"]), b));
@@ -1250,14 +1274,26 @@ void BitAssetsPage::updateLiquidityQuote()
     const QString a_arg{ArgOf(m_lq_a)}, b_arg{ArgOf(m_lq_b)};
     if (a_arg.isEmpty() || b_arg.isEmpty() || a_arg == b_arg) return m_lq_line->setText(tr("Pick two different assets."));
     const auto pool{call("getpool", Args({a_arg.toStdString(), b_arg.toStdString()}), false, true)};
-    if (!pool) {
+    const bool abandoned{pool && (*pool)["abandoned"].isTrue()};
+    if (!pool || abandoned) {
+        // Typed in when the form changes from a pool there is: what it showed there was its price.
+        if (!m_lq_sets_price) m_lq_amount_b->clear();
+        m_lq_sets_price = true;
         m_lq_amount_b->setReadOnly(false);
         m_lq_amount_b->setPlaceholderText(tr("Amount"));
         const double qa{m_lq_amount_a->text().toDouble()}, qb{m_lq_amount_b->text().toDouble()};
-        m_lq_line->setText(qa > 0 && qb > 0 ? tr("A new pool, at 1 %1 = %2 %3.").arg(a, QString::number(qb / qa, 'g', 10), b) : tr("A new pool: your amounts set its price."));
+        const QString price{qa > 0 && qb > 0 ? tr("at 1 %1 = %2 %3").arg(a, QString::number(qb / qa, 'g', 10), b) : QString{}};
+        if (abandoned) {
+            m_lq_line->setText(tr("<span style='color:%1'><b>Nobody provides liquidity to this pool any more.</b></span> It holds only the dust every pool "
+                                  "keeps, at whatever price it was left at (anyone can set it): your amounts set its price, as for a new pool. %2")
+                                   .arg(QLatin1String(ORANGE), price.isEmpty() ? tr("Give both amounts.") : tr("It reopens %1.").arg(price)));
+        } else {
+            m_lq_line->setText(price.isEmpty() ? tr("A new pool: your amounts set its price.") : tr("A new pool, %1.").arg(price));
+        }
         return;
     }
     // The second amount follows from the first, at the pool's price.
+    m_lq_sets_price = false;
     m_lq_amount_b->setReadOnly(true);
     m_lq_amount_b->setPlaceholderText(tr("Worked out from the pool's price"));
     const double price{(*pool)["price"].get_real()};
@@ -1467,8 +1503,11 @@ void BitAssetsPage::showAuctionDetail()
                 amount->clear();
             }
         });
-        connect(all, &QPushButton::clicked, this, [this, id, base, quote, auction] {
-            if (!confirm(tr("Buy all"), tr("Pay about %1 %2 for the %3 %4 left?").arg(Num((*auction)["price"]), quote, Num((*auction)["remaining"]), base))) return;
+        connect(all, &QPushButton::clicked, this, [this, id, base, quote] {
+            // What is left now, and what all of it costs in the next block: not the price of all the auction sold.
+            const auto now{call("getauction", Args({id.toStdString()}), false)};
+            if (!now) return;
+            if (!confirm(tr("Buy all"), tr("Pay about %1 %2 for the %3 %4 left?").arg(Num((*now)["cost_of_remaining"]), quote, Num((*now)["remaining"]), base))) return;
             if (const auto r{call("bidauction", Args({id.toStdString(), UniValue{}, true}), true)}) {
                 say(tr("Bidding %1 %2 for the %3 %4 left, with the next block.").arg(Num((*r)["pays"]), quote, Num((*r)["buys"]), base));
             }
