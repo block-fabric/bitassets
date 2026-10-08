@@ -124,10 +124,12 @@ struct DrivechainParams {
      *    for (to stall the withdrawals and refunds of a sidechain, whose software waits on what is
      *    pending) has to keep upvoting it to keep it, rather than wait for the idle expiry;
      *  - a failed bundle is forgotten withdrawal_period blocks after it failed, so that proposals
-     *    nobody votes for do not add to the state forever (see SidechainDB::ForgetFailedBundles).
+     *    nobody votes for do not add to the state forever (see SidechainDB::ForgetFailedBundles);
+     *    one that no block ever upvoted, unvoted_forget_blocks blocks after it failed.
      */
     int audit2_height{0};
     int upvote_expiry_blocks{144};
+    int unvoted_forget_blocks{1008};
 };
 
 /**

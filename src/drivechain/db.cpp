@@ -30,7 +30,7 @@ constexpr uint8_t DB_FORMAT_VERSION{'v'};
 constexpr uint8_t DB_CLOSURE{'C'};
 
 //! Version of the snapshot of the sidechain database; a snapshot of another one is not read.
-constexpr uint32_t STATE_VERSION{4};
+constexpr uint32_t STATE_VERSION{5};
 
 //! Size of the batches Wipe erases with.
 constexpr size_t WIPE_BATCH_BYTES{1 << 20};

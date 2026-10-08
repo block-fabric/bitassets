@@ -84,6 +84,17 @@ replaying every proposal and closure since its slot activated.
   again, as a new bundle that needs all its votes again. By then the sidechain has had a whole
   withdrawal period to refund its withdrawals, and paying it out again would take the same majority
   of the hashrate, upvoting for as long, as paying out any bundle nobody vouches for.
+  A failed bundle that no block ever upvoted is forgotten sooner, `unvoted_forget_blocks` after it
+  failed (1008 on mainnet, 60 on the test network, 20 on regtest; never later than a withdrawal
+  period). Those are what a miner adds to the state by proposing bundles nobody votes for, one per
+  sidechain per block: remembered for a whole period (129600 blocks on mainnet) they would let it
+  grow the state by up to that many entries per sidechain, for as long as it keeps at it; now by
+  1008. Forgetting them sooner gives nothing away: proposed again, such a bundle starts where it
+  started the first time, from the score of a new bundle, and needs every one of its votes from
+  miners whose sidechain node does not vouch for it (the sidechain refunded it); its failure stays
+  on record for good outside the state (`getsidechainevents`, the closure index behind
+  `getwithdrawalbundle`, and the miner's own record), so no node takes it for a new one. A bundle
+  that some block upvoted, which some miner did back, keeps the whole period.
   `getwithdrawalbundle` keeps answering "failed" (from the index of the blocks that closed each
   bundle, kept for good), and `getsidechainevents` keeps saying it failed.
 * The miner of a node keeps, with each bundle a sidechain node handed it (`drivechain_miner.dat`),

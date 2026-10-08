@@ -236,6 +236,7 @@ public:
         consensus.drivechain.idle_expiry_blocks = 30;
         consensus.drivechain.audit2_height = 9437; // audit 2 rules on the test network: moved out while the third audit's fixes are made
         consensus.drivechain.upvote_expiry_blocks = 30;
+        consensus.drivechain.unvoted_forget_blocks = 60;
         consensus.fPowAllowMinDifficultyBlocks = true;
         consensus.enforce_BIP94 = false; // aserti3 is not subject to the timewarp attack
         consensus.fPowNoRetargeting = false;
@@ -426,6 +427,7 @@ public:
         consensus.drivechain.withdrawal_period = 60;
         consensus.drivechain.withdrawal_min_score = 30;
         consensus.drivechain.upvote_expiry_blocks = 20;
+        consensus.drivechain.unvoted_forget_blocks = 20;
         for (const auto& [name, value] : opts.drivechain_params) {
             auto& dc{consensus.drivechain};
             if (name == "max_sidechains") {
@@ -452,6 +454,8 @@ public:
                 dc.audit2_height = value;
             } else if (name == "upvote_expiry_blocks") {
                 dc.upvote_expiry_blocks = value;
+            } else if (name == "unvoted_forget_blocks") {
+                dc.unvoted_forget_blocks = value;
             } else {
                 throw std::runtime_error(strprintf("Invalid name (%s) for -testdrivechainparam=name@value.", name));
             }

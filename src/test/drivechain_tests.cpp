@@ -1472,6 +1472,49 @@ BOOST_AUTO_TEST_CASE(miner_drops_bundles_never_proposed)
     BOOST_CHECK(miner.GetBundle(1, *new_bundle));
 }
 
+BOOST_AUTO_TEST_CASE(unvoted_failed_bundles_are_forgotten_sooner)
+{
+    // From audit2_height, a failed bundle no block upvoted is forgotten unvoted_forget_blocks after it
+    // failed; one that was upvoted, a withdrawal period after.
+    for (const bool active : {false, true}) {
+        TestChain chain;
+        chain.params.audit2_height = active ? 0 : 1000;
+        chain.params.upvote_expiry_blocks = 3;
+        chain.params.unvoted_forget_blocks = 5;
+        chain.Activate(MakeSidechain(1));
+        const uint256 unvoted{0xd1}, upvoted{0xd2};
+        BOOST_REQUIRE(chain.Connect({BundleScript(1, unvoted)}));
+        BOOST_REQUIRE(chain.Connect({BundleScript(1, upvoted)}));
+        BOOST_REQUIRE(chain.Connect({Votes({1})}));
+        // Both fail: three blocks without an upvote (the downvotes take them to 0 meanwhile).
+        int failed{0}, failed_upvoted{0};
+        while (chain.scdb.GetSlot(1)->bundles.size() > 0) {
+            BOOST_REQUIRE(chain.Connect({Votes({VOTE_DOWNVOTE})}));
+            if (!failed && chain.scdb.IsClosed(1, unvoted)) failed = chain.height;
+            if (!failed_upvoted && chain.scdb.IsClosed(1, upvoted)) failed_upvoted = chain.height;
+        }
+        BOOST_REQUIRE(chain.scdb.GetClosed(1, unvoted) && !chain.scdb.GetClosed(1, unvoted)->upvoted);
+        BOOST_REQUIRE(chain.scdb.GetClosed(1, upvoted) && chain.scdb.GetClosed(1, upvoted)->upvoted);
+        while (chain.height < failed + chain.params.unvoted_forget_blocks - 1) BOOST_REQUIRE(chain.Connect());
+        BOOST_CHECK(chain.scdb.IsClosed(1, unvoted));
+        BOOST_REQUIRE(chain.Connect());
+        BOOST_CHECK_EQUAL(chain.scdb.IsClosed(1, unvoted), !active);
+        BOOST_CHECK(chain.scdb.IsClosed(1, upvoted));
+        // The snapshot keeps them apart: read back, it forgets the same.
+        DataStream stream{};
+        stream << chain.scdb;
+        SidechainDB read;
+        stream >> read;
+        BOOST_CHECK(read == chain.scdb);
+        chain.scdb = read;
+        while (chain.height < failed_upvoted + chain.params.withdrawal_period - 1) BOOST_REQUIRE(chain.Connect());
+        BOOST_CHECK(chain.scdb.IsClosed(1, upvoted));
+        BOOST_REQUIRE(chain.Connect());
+        BOOST_CHECK_EQUAL(chain.scdb.IsClosed(1, upvoted), !active);
+        BOOST_CHECK_EQUAL(chain.scdb.IsClosed(1, unvoted), !active);
+    }
+}
+
 BOOST_AUTO_TEST_CASE(state_snapshot_and_index)
 {
     // The failed bundles by height are rebuilt when a snapshot is read: what is forgotten next is the same.

@@ -60,7 +60,7 @@ public:
     Database(const DBParams& params, const uint256& params_fingerprint);
 
     /** Version of the way the data is laid out; a database of another version is wiped and built anew from the blocks. */
-    static constexpr uint32_t FORMAT_VERSION{6};
+    static constexpr uint32_t FORMAT_VERSION{7};
     enum class Format {
         CURRENT,
         //! Laid out another way (by an older version of this software), or not marked at all.
