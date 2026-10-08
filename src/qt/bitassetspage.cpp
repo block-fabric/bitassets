@@ -5,6 +5,7 @@
 #include <qt/bitassetspage.h>
 
 #include <qt/clientmodel.h>
+#include <qt/itemviews.h>
 #include <qt/qrimagewidget.h>
 
 #include <QClipboard>
@@ -18,7 +19,6 @@
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QHeaderView>
-#include <QInputMethodEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -48,29 +48,6 @@ const char* const GREY{"#6b7280"};
 const char* const PURPLE{"#8b5cf6"};
 const char* const BLUE{"#3b82f6"};
 const char* const RED{"#ef4444"};
-
-/**
- * Item views that leave input method events to their editors. Under Wayland (WSL), an input method
- * event that reaches a view starts an edit, the edit moves the focus, and moving the focus sends
- * the view another such event: the program runs out of stack.
- */
-class Table : public QTableWidget
-{
-public:
-    using QTableWidget::QTableWidget;
-
-protected:
-    void inputMethodEvent(QInputMethodEvent* event) override { event->ignore(); }
-};
-
-class List : public QListWidget
-{
-public:
-    using QListWidget::QListWidget;
-
-protected:
-    void inputMethodEvent(QInputMethodEvent* event) override { event->ignore(); }
-};
 
 QLabel* Dim(const QString& text, QWidget* parent)
 {
@@ -113,23 +90,19 @@ QLineEdit* AmountEdit(const QString& placeholder, QWidget* parent)
 
 QListWidget* PickList(QWidget* parent)
 {
-    auto* list{new List(parent)};
+    auto* list{new ItemViews::List(parent)};
     list->setObjectName("pickList");
-    list->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    list->setAttribute(Qt::WA_InputMethodEnabled, false);
     return list;
 }
 
 QTableWidget* ViewTable(const QStringList& headers, QWidget* parent)
 {
-    auto* table{new Table(0, headers.size(), parent)};
+    auto* table{new ItemViews::Table(0, headers.size(), parent)};
     table->setHorizontalHeaderLabels(headers);
     table->verticalHeader()->hide();
     table->setSelectionBehavior(QAbstractItemView::SelectRows);
     table->setSelectionMode(QAbstractItemView::SingleSelection);
-    table->setEditTriggers(QAbstractItemView::NoEditTriggers);
     table->setAlternatingRowColors(true);
-    table->setAttribute(Qt::WA_InputMethodEnabled, false);
     table->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
     table->horizontalHeader()->setStretchLastSection(true);
     return table;
