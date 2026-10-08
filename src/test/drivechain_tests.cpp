@@ -1415,7 +1415,7 @@ BOOST_AUTO_TEST_CASE(database_records)
 {
     // The drivechain database on its own: what each block keeps, the snapshot and its version, the
     // deposit index.
-    Database db{DBParams{.path = m_path_root / "drivechain_db", .cache_bytes = 1 << 20, .memory_only = true}};
+    Database db{DBParams{.path = m_path_root / "drivechain_db", .cache_bytes = 1 << 20, .memory_only = true}, ParamsFingerprint(TestParams())};
     // A new database is in the current format; one with data and no version is an older one.
     BOOST_CHECK(db.IsCurrentFormat());
 
@@ -1506,6 +1506,44 @@ BOOST_AUTO_TEST_CASE(database_records)
     BOOST_CHECK(!db.ReadState("", read));
     BOOST_CHECK(!db.ReadBlockEvents(blocks[0].first, events));
     BOOST_CHECK(!db.ListDeposits(1, txids[0], 0));
+}
+
+BOOST_AUTO_TEST_CASE(database_params_fingerprint)
+{
+    // What was derived under other drivechain parameters is not used: not the format marker, not the snapshot.
+    const Consensus::DrivechainParams params{TestParams()};
+    const uint256 fingerprint{ParamsFingerprint(params)};
+    const auto changed{[&](auto change) {
+        Consensus::DrivechainParams other{params};
+        change(other);
+        return ParamsFingerprint(other);
+    }};
+    BOOST_CHECK(changed([](auto& p) { ++p.audit2_height; }) != fingerprint);
+    BOOST_CHECK(changed([](auto& p) { ++p.single_payout_height; }) != fingerprint);
+    BOOST_CHECK(changed([](auto& p) { ++p.idle_expiry_height; }) != fingerprint);
+    BOOST_CHECK(changed([](auto& p) { ++p.withdrawal_period; }) != fingerprint);
+    BOOST_CHECK(changed([](auto& p) { --p.max_sidechains; }) != fingerprint);
+    BOOST_CHECK(changed([](auto&) {}) == fingerprint);
+    const uint256 other{changed([](auto& p) { ++p.audit2_height; })};
+
+    const fs::path path{m_path_root / "drivechain_fingerprint"};
+    TestChain chain;
+    {
+        Database db{DBParams{.path = path, .cache_bytes = 1 << 20}, fingerprint};
+        BOOST_CHECK(db.CheckFormat() == Database::Format::CURRENT);
+        BOOST_REQUIRE(db.WriteState("", chain.scdb));
+        SidechainDB read;
+        BOOST_CHECK(db.ReadState("", read));
+    }
+    {
+        Database db{DBParams{.path = path, .cache_bytes = 1 << 20}, other};
+        BOOST_CHECK(db.CheckFormat() == Database::Format::OTHER_PARAMS);
+        SidechainDB read;
+        BOOST_CHECK(!db.ReadState("", read));
+        db.Wipe();
+        db.WriteFormatVersion();
+        BOOST_CHECK(db.IsCurrentFormat());
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

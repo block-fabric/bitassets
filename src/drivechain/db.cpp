@@ -28,7 +28,7 @@ constexpr uint8_t DB_DEPOSIT_TXID{'T'};
 constexpr uint8_t DB_FORMAT_VERSION{'v'};
 
 //! Version of the snapshot of the sidechain database; a snapshot of another one is not read.
-constexpr uint32_t STATE_VERSION{3};
+constexpr uint32_t STATE_VERSION{4};
 
 //! Size of the batches Wipe erases with.
 constexpr size_t WIPE_BATCH_BYTES{1 << 20};
@@ -82,9 +82,10 @@ struct BlockRecord {
     SERIALIZE_METHODS(BlockRecord, obj) { READWRITE(obj.events.closed, obj.events.proposed, obj.deposits, obj.events.pending); }
 };
 
-/** The snapshot of a sidechain database, with the version of its format. */
+/** The snapshot of a sidechain database, with the version of its format and the parameters it was derived under. */
 struct StateRecord {
     SidechainDB& scdb;
+    const uint256& params_fingerprint;
 
     template <typename Stream>
     void Unserialize(Stream& s)
@@ -92,15 +93,27 @@ struct StateRecord {
         uint32_t version;
         s >> version;
         if (version != STATE_VERSION) throw std::ios_base::failure("unknown version of the sidechain database");
+        uint256 fingerprint;
+        s >> fingerprint;
+        if (fingerprint != params_fingerprint) throw std::ios_base::failure("sidechain database derived under other drivechain parameters");
         s >> scdb;
     }
 };
 
 struct StateWriteRecord {
     const SidechainDB& scdb;
+    const uint256& params_fingerprint;
 
     template <typename Stream>
-    void Serialize(Stream& s) const { s << STATE_VERSION << scdb; }
+    void Serialize(Stream& s) const { s << STATE_VERSION << params_fingerprint << scdb; }
+};
+
+/** What marks the format of the database: its version, and the parameters its data was derived under. */
+struct FormatRecord {
+    uint32_t version{0};
+    uint256 params_fingerprint;
+
+    SERIALIZE_METHODS(FormatRecord, obj) { READWRITE(obj.version, obj.params_fingerprint); }
 };
 
 /** A key as it is, whatever it holds: it reads all that is left. */
@@ -119,21 +132,23 @@ struct RawKey {
 
 } // namespace
 
-Database::Database(const DBParams& params) : m_db{params}
+Database::Database(const DBParams& params, const uint256& params_fingerprint) : m_db{params}, m_params_fingerprint{params_fingerprint}
 {
     // A new database is in the current format (an older one, which has data, is not marked as such).
     if (m_db.IsEmpty()) WriteFormatVersion();
 }
 
-bool Database::IsCurrentFormat() const
+Database::Format Database::CheckFormat() const
 {
-    uint32_t version{0};
-    return m_db.Read(DB_FORMAT_VERSION, version) && version == FORMAT_VERSION;
+    // The record of an older version (a version number alone) does not read as one.
+    FormatRecord record;
+    if (!m_db.Read(DB_FORMAT_VERSION, record) || record.version != FORMAT_VERSION) return Format::OTHER_VERSION;
+    return record.params_fingerprint == m_params_fingerprint ? Format::CURRENT : Format::OTHER_PARAMS;
 }
 
 void Database::WriteFormatVersion()
 {
-    m_db.Write(DB_FORMAT_VERSION, FORMAT_VERSION, /*fSync=*/true);
+    m_db.Write(DB_FORMAT_VERSION, FormatRecord{FORMAT_VERSION, m_params_fingerprint}, /*fSync=*/true);
 }
 
 void Database::Wipe()
@@ -229,14 +244,14 @@ bool Database::EraseBlockDeposits(const uint256& block_hash)
 
 bool Database::WriteState(const std::string& chainstate, const SidechainDB& scdb)
 {
-    m_db.Write(std::make_pair(DB_STATE, chainstate), StateWriteRecord{scdb}, /*fSync=*/true);
+    m_db.Write(std::make_pair(DB_STATE, chainstate), StateWriteRecord{scdb, m_params_fingerprint}, /*fSync=*/true);
     return true;
 }
 
 bool Database::ReadState(const std::string& chainstate, SidechainDB& scdb) const
 {
     SidechainDB read;
-    StateRecord record{read};
+    StateRecord record{read, m_params_fingerprint};
     if (!m_db.Read(std::make_pair(DB_STATE, chainstate), record)) {
         // Whatever was read before the failure is not left behind.
         scdb = SidechainDB{};

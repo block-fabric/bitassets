@@ -19,6 +19,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <unordered_map>
 #include <vector>
 
@@ -157,6 +158,8 @@ public:
         DeploymentOptions dep_opts{};
         bool fastprune{false};
         bool enforce_bip94{false};
+        //! Drivechain parameters to set, by the name of their field in Consensus::DrivechainParams.
+        std::vector<std::pair<std::string, int>> drivechain_params{};
     };
 
     struct MainNetOptions {

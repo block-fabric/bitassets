@@ -23,6 +23,13 @@
 
 namespace drivechain {
 
+/**
+ * A hash of the drivechain parameters that decide what the sidechain database becomes for a chain
+ * of blocks: all of them. Whatever was derived under other parameters (another activation height,
+ * say) is derived anew.
+ */
+uint256 ParamsFingerprint(const Consensus::DrivechainParams& params);
+
 /** What became of a bundle that is no longer pending. */
 struct ClosedBundle {
     //! Whether it was paid out; if not, it failed.

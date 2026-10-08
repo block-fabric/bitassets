@@ -119,6 +119,12 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
 {
     if (auto value = args.GetBoolArg("-fastprune")) options.fastprune = *value;
     if (HasTestOption(args, "bip94")) options.enforce_bip94 = true;
+    for (const std::string& arg : args.GetArgs("-testdrivechainparam")) {
+        const auto found{arg.find('@')};
+        const auto value{found == std::string::npos ? std::nullopt : ToIntegral<int32_t>(arg.substr(found + 1))};
+        if (!value || *value < 0) throw std::runtime_error(strprintf("Invalid format (%s) for -testdrivechainparam=name@value.", arg));
+        options.drivechain_params.emplace_back(arg.substr(0, found), *value);
+    }
 
     HandleDeploymentArgs(args, options.dep_opts);
 }

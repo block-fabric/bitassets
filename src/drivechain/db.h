@@ -41,11 +41,24 @@ struct BlockEvents {
 class Database
 {
 public:
-    explicit Database(const DBParams& params);
+    /**
+     * @param[in] params_fingerprint  ParamsFingerprint() of the drivechain parameters of the chain: all
+     *                                of the data is derived under them
+     */
+    Database(const DBParams& params, const uint256& params_fingerprint);
 
     /** Version of the way the data is laid out; a database of another version is wiped and built anew from the blocks. */
-    static constexpr uint32_t FORMAT_VERSION{4};
-    bool IsCurrentFormat() const;
+    static constexpr uint32_t FORMAT_VERSION{5};
+    enum class Format {
+        CURRENT,
+        //! Laid out another way (by an older version of this software), or not marked at all.
+        OTHER_VERSION,
+        //! Derived under other drivechain parameters (another activation height, say).
+        OTHER_PARAMS,
+    };
+    Format CheckFormat() const;
+    bool IsCurrentFormat() const { return CheckFormat() == Format::CURRENT; }
+    /** Mark the database as being of the current format, derived under the current parameters. */
     void WriteFormatVersion();
     /** Erase everything, a batch at a time. */
     void Wipe();
@@ -67,7 +80,10 @@ public:
 
     /** Store the sidechain database of the chainstate named `chainstate`. */
     bool WriteState(const std::string& chainstate, const SidechainDB& scdb);
-    /** Read it; false, with `scdb` empty, if there is none or it cannot be read (in an unknown format, say). */
+    /**
+     * Read it; false, with `scdb` empty, if there is none or it cannot be read (in an unknown format, say),
+     * or if it was derived under other drivechain parameters.
+     */
     bool ReadState(const std::string& chainstate, SidechainDB& scdb) const;
 
     /**
@@ -83,6 +99,7 @@ public:
 
 private:
     mutable CDBWrapper m_db;
+    const uint256 m_params_fingerprint;
 };
 
 } // namespace drivechain

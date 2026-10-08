@@ -4967,10 +4967,20 @@ bool Chainstate::LoadDrivechainState()
     if (!tip) return true;
 
     drivechain::Database& db{*m_blockman.m_drivechain_db};
-    if (!db.IsCurrentFormat()) {
+    switch (db.CheckFormat()) {
+    case drivechain::Database::Format::CURRENT:
+        break;
+    case drivechain::Database::Format::OTHER_VERSION:
         // Laid out another way (by an older version): built anew from the blocks below.
         LogInfo("The sidechain database is in an older format; it is rebuilt from the blocks");
         db.Wipe();
+        break;
+    case drivechain::Database::Format::OTHER_PARAMS:
+        // Derived under other drivechain parameters (an activation height that moved, say): the
+        // snapshot, the undo data, the events and the deposit index may all differ under these.
+        LogInfo("The sidechain database was derived under other drivechain parameters; it is rebuilt from the blocks");
+        db.Wipe();
+        break;
     }
 
     drivechain::SidechainDB scdb;

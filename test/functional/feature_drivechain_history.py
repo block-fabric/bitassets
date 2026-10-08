@@ -6,6 +6,7 @@
 
 - getsidechainevents reports, for every block, the bundles pending after it with their score: the
   same at any later time, after a reorg, a restart and a rebuild of the database.
+- A database derived under other drivechain parameters (an activation height that moved) is rebuilt.
 """
 from test_framework.address import address_to_scriptpubkey
 from test_framework.messages import COIN, CTransaction, CTxOut
@@ -60,6 +61,7 @@ class DrivechainHistoryTest(BitcoinTestFramework):
     def run_test(self):
         self.expected = {}
         self.test_pending()
+        self.test_params_change()
 
     def test_pending(self):
         self.log.info("getsidechainevents: the bundles pending after each block, with their score")
@@ -123,7 +125,31 @@ class DrivechainHistoryTest(BitcoinTestFramework):
         self.restart_node(0, extra_args=self.extra_args[0] + ["-reindex"])
         self.wait_until(lambda: n0.getblockcount() == before[-1]["height"])
         assert_equal(self.events(n0), before)
+        self.events_before = before
+
+    def test_params_change(self):
+        self.log.info("A database derived under other drivechain parameters is rebuilt from the blocks")
+        n0 = self.nodes[0]
+        state = n0.getdrivechaininfo()["statehash"]
+        # A parameter this chain's history does not depend on: the state comes out the same.
+        for extra in (["-testdrivechainparam=max_pending_bundles@63"], []):
+            with n0.assert_debug_log(["The sidechain database was derived under other drivechain parameters; it is rebuilt from the blocks",
+                                      "Bringing the sidechain database from height 0 to the chain tip"]):
+                self.restart_node(0, extra_args=self.extra_args[0] + extra)
+            assert_equal(n0.getdrivechaininfo()["statehash"], state)
+            assert_equal(self.events(n0), self.events_before)
+        # Restarted with the same parameters, the snapshot is used.
+        with n0.assert_debug_log([], unexpected_msgs=["it is rebuilt from the blocks", "Bringing the sidechain database"]):
+            self.restart_node(0)
+        assert_equal(n0.getdrivechaininfo()["statehash"], state)
+        # A parameter this chain's history depends on: the same blocks give another state.
+        with n0.assert_debug_log(["derived under other drivechain parameters"]):
+            self.restart_node(0, extra_args=self.extra_args[0] + ["-testdrivechainparam=upvote_expiry_blocks@1000"])
+        assert n0.getdrivechaininfo()["statehash"] != state
+        self.restart_node(0)
+        assert_equal(n0.getdrivechaininfo()["statehash"], state)
         self.connect_nodes(0, 1)
+        self.sync_all()
 
 
 if __name__ == "__main__":

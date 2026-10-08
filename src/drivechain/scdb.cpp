@@ -22,6 +22,18 @@ int Age(int proposed_height, int height) { return height - proposed_height + 1; 
 
 } // namespace
 
+uint256 ParamsFingerprint(const Consensus::DrivechainParams& params)
+{
+    // Every field: a parameter added later has to be added here as well.
+    static_assert(sizeof(Consensus::DrivechainParams) == 12 * sizeof(int32_t), "a new drivechain parameter goes into the fingerprint");
+    HashWriter hasher{};
+    hasher << std::string{"Chains drivechain parameters"} << params.max_sidechains << params.activation_period << params.activation_max_failures
+           << params.replacement_period << params.withdrawal_period << params.withdrawal_min_score << params.max_pending_bundles
+           << params.single_payout_height << params.idle_expiry_height << params.idle_expiry_blocks << params.audit2_height
+           << params.upvote_expiry_blocks;
+    return hasher.GetHash();
+}
+
 const Slot* SidechainDB::GetSlot(SidechainId id) const
 {
     const auto it{m_slots.find(id)};

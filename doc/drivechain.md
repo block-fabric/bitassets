@@ -66,7 +66,11 @@ replaying every proposal and closure since its slot activated.
   another format is not read, and the database is rebuilt from the blocks) written whenever the
   chainstate is flushed. The drivechain data on disk has a format version too: a node that finds
   data of an older version wipes it and rebuilds it from the blocks when it starts (a pruned node,
-  which no longer has them, has to be started with `-reindex`).
+  which no longer has them, has to be started with `-reindex`). The snapshot and the format marker
+  also carry a fingerprint of all the drivechain parameters of the network (`ParamsFingerprint`):
+  activation heights, periods, expiries, limits. A node whose parameters changed (a new release that
+  moves an activation height, say) finds a fingerprint that does not match, and wipes and rebuilds
+  the drivechain data from genesis the same way, rather than keep a state derived under the old rules.
 * Per block, what it did that sidechain software follows (the bundles it closed, paid or failed,
   those it proposed, those pending after it with their scores, and its escrow changes): for good,
   for `getsidechainevents` and `listsidechaindeposits`. The pending bundles cost about 36 bytes per
