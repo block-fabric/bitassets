@@ -234,6 +234,8 @@ public:
         consensus.drivechain.single_payout_height = 7500;
         consensus.drivechain.idle_expiry_height = 7500;
         consensus.drivechain.idle_expiry_blocks = 30;
+        consensus.drivechain.audit2_height = 999999999; // AUDIT2_TESTNET: set at deploy
+        consensus.drivechain.upvote_expiry_blocks = 30;
         consensus.fPowAllowMinDifficultyBlocks = true;
         consensus.enforce_BIP94 = false; // aserti3 is not subject to the timewarp attack
         consensus.fPowNoRetargeting = false;
@@ -423,6 +425,7 @@ public:
         consensus.drivechain.replacement_period = 40;
         consensus.drivechain.withdrawal_period = 60;
         consensus.drivechain.withdrawal_min_score = 30;
+        consensus.drivechain.upvote_expiry_blocks = 20;
         consensus.BIP34Height = 1; // Always active unless overridden
         consensus.BIP34Hash = uint256();
         consensus.BIP65Height = 1;  // Always active unless overridden

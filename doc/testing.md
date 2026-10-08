@@ -67,6 +67,10 @@ one helper, which checks three things for **every** block:
 | `upvote_last_handed_bundle` | A bundle handed before the last is one the sidechain gave up: no upvote. |
 | `vouching` | The sidechain node vouches for its bundle, or for none; the miner's default vote follows. |
 | `idle_bundles_expire` | From `idle_expiry_height`, a bundle at score 0 for `idle_expiry_blocks` fails. |
+| `unvoted_bundles_expire` | From `audit2_height`, a bundle that `upvote_expiry_blocks` blocks in a row did not upvote fails; an upvote, in any form, starts the count again. |
+| `miner_keeps_its_bundle_upvoted` | The bundle the miner's sidechain node vouches for is upvoted from the block after its proposal on, and paid, however short `upvote_expiry_blocks`. |
+| `failed_bundles_are_forgotten` | From `audit2_height`, a failed bundle is forgotten a withdrawal period after it failed (and can be proposed again); a paid one never is. |
+| `state_snapshot_and_index` | The failed bundles by height are rebuilt when a snapshot is read. |
 | `bmm` | Blind merged mining: a request is valid only with the accept for it, on the block it names. |
 | `block_without_coinbase` | A block without a coinbase is refused with a reason, not a crash. |
 | `many_blocks_undo` | A long history is undone block by block, matching every state it went through. |
@@ -84,7 +88,7 @@ one helper, which checks three things for **every** block:
 
 | Test | What it checks |
 |---|---|
-| `feature_drivechain.py` | The whole life of a sidechain on running nodes: <br>• proposal, acks, activation, rejection; <br>• deposits, and the treasury that nobody can take; <br>• a bundle voted through and paid, one that nobody votes for failing; <br>• a payout mined by a miner without the sidechain; <br>• no drivechain transactions in packages; <br>• blind merged mining; a stale BMM request abandoned by the wallet; <br>• `getsidechainevents` with the proposed bundles; <br>• restarts, reindex and reorgs of the sidechain database. |
+| `feature_drivechain.py` | The whole life of a sidechain on running nodes: <br>• proposal, acks, activation, rejection; <br>• deposits, and the treasury that nobody can take; <br>• a bundle voted through and paid, one that nobody upvotes failing after `upvote_expiry_blocks`; <br>• a payout mined by a miner without the sidechain; <br>• no drivechain transactions in packages; <br>• blind merged mining; a stale BMM request abandoned by the wallet; <br>• `getsidechainevents` with the proposed bundles; <br>• restarts, reindex and reorgs of the sidechain database. |
 | `feature_drivechain_rules.py` | <br>• the RPCs refuse what they cannot do, with a reason; <br>• the mempool takes BMM requests only in output 0 and for an active sidechain; <br>• templates carry the drivechain coinbase outputs for pools; <br>• templates have BMM requests only for mining software that puts the drivechain messages in its coinbase (`coinbasetxn`, or `drivechain` in the capabilities or rules), and a block made by software that does not is valid; <br>• `getsidechainevents` near the largest height, `listsidechaindeposits` at most 1000 at a time; <br>• a reorg evicts deposits to a sidechain whose activation is undone, and withdrawals whose bundle lost its score. |
 | `feature_drivechain_forks.py` | Two branches disagree about a bundle and a deposit: <br>• the nodes rejoin on the longer branch; <br>• the bundle is voted again and paid exactly once; <br>• a deep reorg and back, and a reindex, give the same state. |
 

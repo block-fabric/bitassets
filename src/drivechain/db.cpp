@@ -28,7 +28,7 @@ constexpr uint8_t DB_DEPOSIT_TXID{'T'};
 constexpr uint8_t DB_FORMAT_VERSION{'v'};
 
 //! Version of the snapshot of the sidechain database; a snapshot of another one is not read.
-constexpr uint32_t STATE_VERSION{2};
+constexpr uint32_t STATE_VERSION{3};
 
 /** Key of an escrow change; big endian so that the database orders the changes of a sidechain by position in the chain. */
 struct DepositKey {

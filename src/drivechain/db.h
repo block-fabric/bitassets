@@ -42,7 +42,7 @@ public:
     explicit Database(const DBParams& params);
 
     /** Version of the way the data is laid out; a database of another version is wiped and built anew from the blocks. */
-    static constexpr uint32_t FORMAT_VERSION{2};
+    static constexpr uint32_t FORMAT_VERSION{3};
     bool IsCurrentFormat() const;
     void WriteFormatVersion();
     /** Erase everything, a batch at a time. */

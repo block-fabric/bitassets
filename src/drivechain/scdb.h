@@ -17,10 +17,23 @@
 #include <set>
 #include <ios>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
 namespace drivechain {
+
+/** What became of a bundle that is no longer pending. */
+struct ClosedBundle {
+    //! Whether it was paid out; if not, it failed.
+    bool paid{false};
+    //! Height of the block that closed it.
+    int32_t height{0};
+
+    SERIALIZE_METHODS(ClosedBundle, obj) { READWRITE(obj.paid, obj.height); }
+
+    friend bool operator==(const ClosedBundle&, const ClosedBundle&) = default;
+};
 
 /**
  * What a block changed in the sidechain database, in the form needed to revert it: the changes
@@ -74,7 +87,8 @@ struct BlockUndo {
         Bundle bundle;
         //! VOTE: the position of the bundle upvoted, or NO_INDEX.
         uint32_t upvoted{NO_INDEX};
-        //! VOTE: whether the score of that bundle could go no higher.
+        //! VOTE: the last upvote of that bundle before, and whether its score could go no higher.
+        int32_t last_upvote{0};
         bool saturated{false};
         //! VOTE: the positions, in order, of the bundles a downvote left at a score of zero.
         std::vector<uint32_t> at_zero;
@@ -86,7 +100,7 @@ struct BlockUndo {
             switch (type) {
             case Type::ERASE: s << index << bundle; break;
             case Type::APPEND: break;
-            case Type::VOTE: s << upvoted << saturated << at_zero; break;
+            case Type::VOTE: s << upvoted << last_upvote << saturated << at_zero; break;
             }
         }
         template <typename Stream>
@@ -99,7 +113,7 @@ struct BlockUndo {
             switch (type) {
             case Type::ERASE: s >> index >> bundle; break;
             case Type::APPEND: break;
-            case Type::VOTE: s >> upvoted >> saturated >> at_zero; break;
+            case Type::VOTE: s >> upvoted >> last_upvote >> saturated >> at_zero; break;
             }
         }
     };
@@ -126,12 +140,14 @@ struct BlockUndo {
     std::vector<std::pair<uint32_t, Proposal>> removed;
     //! Bundles the block closed, by being paid out or by failing.
     std::vector<Closed> closed;
+    //! Failed bundles the block forgot, as they were remembered.
+    std::vector<std::pair<std::pair<SidechainId, uint256>, ClosedBundle>> forgotten;
     //! Bundles the block proposed (M3) and that became pending.
     std::vector<std::pair<SidechainId, uint256>> proposed;
     //! The votes of the previous block, which this block replaced.
     std::map<SidechainId, Vote> last_votes;
 
-    SERIALIZE_METHODS(BlockUndo, obj) { READWRITE(obj.prev_block_hash, obj.slots, obj.bundle_changes, obj.proposals_added, obj.acked, obj.removed, obj.closed, obj.proposed, obj.last_votes); }
+    SERIALIZE_METHODS(BlockUndo, obj) { READWRITE(obj.prev_block_hash, obj.slots, obj.bundle_changes, obj.proposals_added, obj.acked, obj.removed, obj.closed, obj.forgotten, obj.proposed, obj.last_votes); }
 };
 
 /**
@@ -209,8 +225,10 @@ public:
     std::optional<bool> WasPaid(SidechainId id, const uint256& bundle_hash) const
     {
         const auto it{m_closed.find({id, bundle_hash})};
-        return it == m_closed.end() ? std::nullopt : std::optional<bool>{it->second};
+        return it == m_closed.end() ? std::nullopt : std::optional<bool>{it->second.paid};
     }
+    /** Number of bundles remembered as paid out or failed. */
+    size_t ClosedCount() const { return m_closed.size(); }
 
     /**
      * The active sidechains, in slot order, with their pending bundles. The
@@ -228,11 +246,29 @@ public:
     static std::vector<Bundle>::const_iterator WeakestBundle(const std::vector<Bundle>& bundles);
     /** Number of blocks a bundle has left to reach the minimum work score, as of `height`. */
     static int BlocksLeft(const Bundle& bundle, int height, const Consensus::DrivechainParams& params);
+    /**
+     * Whether a bundle fails in the block at `height` before that block's votes count, for going
+     * too long without an upvote (DrivechainParams::upvote_expiry_blocks).
+     */
+    static bool UpvoteExpired(const Bundle& bundle, int height, const Consensus::DrivechainParams& params);
 
     /** Hash committing to the entire state. */
     uint256 GetHash() const;
 
-    SERIALIZE_METHODS(SidechainDB, obj) { READWRITE(obj.m_block_hash, obj.m_slots, obj.m_proposals, obj.m_closed, obj.m_last_votes); }
+    template <typename Stream>
+    void Serialize(Stream& s) const
+    {
+        s << m_block_hash << m_slots << m_proposals << m_closed << m_last_votes;
+    }
+    template <typename Stream>
+    void Unserialize(Stream& s)
+    {
+        s >> m_block_hash >> m_slots >> m_proposals >> m_closed >> m_last_votes;
+        m_failed_by_height.clear();
+        for (const auto& [key, closed] : m_closed) {
+            if (!closed.paid) m_failed_by_height.emplace(closed.height, key.first, key.second);
+        }
+    }
 
     friend bool operator==(const SidechainDB&, const SidechainDB&) = default;
 
@@ -240,18 +276,30 @@ private:
     /** Remember the value of a slot before its first change in a block. */
     BlockUndo::SlotUndo& SaveSlot(SidechainId id, BlockUndo& undo) const;
     void EraseBundle(Slot& slot, SidechainId id, size_t index, BlockUndo& undo);
-    void CloseBundle(SidechainId id, const uint256& hash, bool paid, BlockUndo& undo);
+    void CloseBundle(SidechainId id, const uint256& hash, bool paid, int height, BlockUndo& undo);
     void RemoveProposal(size_t index, BlockUndo& undo);
+    /**
+     * Forget the bundles that failed withdrawal_period blocks or more before `height` (from
+     * audit2_height). A failed bundle is remembered so that it is not proposed again, which a
+     * sidechain that refunded its withdrawals would not expect; by then it has had a whole
+     * withdrawal period to act on the failure, the bundle is older than any bundle can be while
+     * pending, and paying it out again would take the same majority of the hashrate, upvoting for as
+     * long, as paying out any bundle nobody vouches for. Forgetting bounds what a miner can add to
+     * the state by proposing bundles nobody votes for: one per sidechain per block, for one period.
+     */
+    void ForgetFailedBundles(int height, const Consensus::DrivechainParams& params, BlockUndo& undo);
 
     uint256 m_block_hash;
     //! The active sidechains.
     std::map<SidechainId, Slot> m_slots;
     //! Proposals collecting acks, oldest first.
     std::vector<Proposal> m_proposals;
-    //! Bundles that were paid out (true) or failed (false); they cannot be proposed again.
-    std::map<std::pair<SidechainId, uint256>, bool> m_closed;
+    //! Bundles that were paid out or failed; they cannot be proposed again (until a failed one is forgotten).
+    std::map<std::pair<SidechainId, uint256>, ClosedBundle> m_closed;
     //! The votes the last block cast: an upvote of a bundle or a downvote, per sidechain.
     std::map<SidechainId, Vote> m_last_votes;
+    //! The failed bundles of m_closed by the height they failed at, oldest first; not stored, rebuilt on load.
+    std::set<std::tuple<int32_t, SidechainId, uint256>> m_failed_by_height;
 };
 
 } // namespace drivechain

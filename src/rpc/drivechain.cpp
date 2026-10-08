@@ -122,6 +122,8 @@ RPCMethod getdrivechaininfo()
             {RPCResult::Type::NUM, "withdrawalperiod", "Blocks a withdrawal bundle has to collect its work score"},
             {RPCResult::Type::NUM, "withdrawalminscore", "Work score a withdrawal bundle needs to be paid out"},
             {RPCResult::Type::NUM, "maxpendingbundles", "Maximum number of pending withdrawal bundles per sidechain"},
+            {RPCResult::Type::NUM, "upvoteexpiryblocks", "Blocks in a row without an upvote after which a pending bundle fails (counted from its proposal or its last upvote)"},
+            {RPCResult::Type::NUM, "upvoteexpiryheight", "Height from which that rule, and the forgetting of failed bundles a withdrawal period on, apply"},
             {RPCResult::Type::NUM, "height", "Height of the block the sidechain database belongs to"},
             {RPCResult::Type::NUM, "activesidechains", "Number of active sidechains"},
             {RPCResult::Type::NUM, "proposals", "Number of sidechain proposals collecting acks"},
@@ -155,6 +157,8 @@ RPCMethod getdrivechaininfo()
     obj.pushKV("withdrawalperiod", params.withdrawal_period);
     obj.pushKV("withdrawalminscore", params.withdrawal_min_score);
     obj.pushKV("maxpendingbundles", params.max_pending_bundles);
+    obj.pushKV("upvoteexpiryblocks", params.upvote_expiry_blocks);
+    obj.pushKV("upvoteexpiryheight", params.audit2_height);
     obj.pushKV("height", height);
     obj.pushKV("activesidechains", scdb.GetSlots().size());
     obj.pushKV("proposals", scdb.GetProposals().size());
@@ -566,6 +570,7 @@ RPCMethod listwithdrawalbundles()
                 {RPCResult::Type::NUM, "index", "Position of the bundle among the bundles of its sidechain, as used in vote messages"},
                 {RPCResult::Type::NUM, "height", "Height of the block that proposed the bundle"},
                 {RPCResult::Type::NUM, "score", "The work score of the bundle"},
+                {RPCResult::Type::NUM, "lastupvote", "Height of the last block that upvoted the bundle, or of the block that proposed it"},
                 {RPCResult::Type::NUM, "blocksleft", "Number of blocks before the bundle fails if it is not paid out"},
                 {RPCResult::Type::BOOL, "payable", "Whether the bundle has the score to be paid out"},
                 {RPCResult::Type::BOOL, "known", "Whether this node has the transaction of the bundle, which it needs to pay it out"},
@@ -598,6 +603,7 @@ RPCMethod listwithdrawalbundles()
             obj.pushKV("index", i);
             obj.pushKV("height", bundle.height);
             obj.pushKV("score", bundle.score);
+            obj.pushKV("lastupvote", bundle.last_upvote);
             obj.pushKV("blocksleft", SidechainDB::BlocksLeft(bundle, height, params));
             obj.pushKV("payable", bundle.score >= static_cast<uint32_t>(params.withdrawal_min_score));
             const auto blind{chainman.m_drivechain_miner.GetBundle(id, bundle.hash)};
@@ -631,8 +637,10 @@ RPCMethod getwithdrawalbundle()
         },
         RPCResult{RPCResult::Type::OBJ, "", "",
         {
-            {RPCResult::Type::STR, "status", "\"pending\" while miners vote on the bundle, \"paid\" once it was paid out, \"failed\" if it did not get the votes in time, \"unknown\" if no block proposed it"},
+            {RPCResult::Type::STR, "status", "\"pending\" while miners vote on the bundle, \"paid\" once it was paid out, \"failed\" if it did not get the votes in time, \"unknown\" if no block proposed it\n"
+                                          "(or it failed more than a withdrawal period ago: getsidechainevents tells what became of every bundle for good)"},
             {RPCResult::Type::NUM, "score", /*optional=*/true, "The work score of a pending bundle"},
+            {RPCResult::Type::NUM, "lastupvote", /*optional=*/true, "Height of the last block that upvoted a pending bundle, or of the block that proposed it"},
             {RPCResult::Type::NUM, "blocksleft", /*optional=*/true, "Number of blocks a pending bundle has left to reach the minimum work score"},
             {RPCResult::Type::BOOL, "payable", /*optional=*/true, "Whether a pending bundle has the work score to be paid out"},
             BundlePayoutResults()[0],
@@ -660,6 +668,7 @@ RPCMethod getwithdrawalbundle()
             if (bundle.hash != hash) continue;
             result.pushKV("status", "pending");
             result.pushKV("score", bundle.score);
+            result.pushKV("lastupvote", bundle.last_upvote);
             result.pushKV("blocksleft", SidechainDB::BlocksLeft(bundle, height, params));
             result.pushKV("payable", bundle.score >= static_cast<uint32_t>(params.withdrawal_min_score));
             PushBundlePayouts(result, chainman.m_drivechain_miner.GetBundle(id, hash));

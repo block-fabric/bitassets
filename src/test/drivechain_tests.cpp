@@ -1282,6 +1282,135 @@ BOOST_AUTO_TEST_CASE(undo_holds_changes_not_slots)
     BOOST_CHECK(chain.scdb.GetSlot(1)->bundles.empty());
 }
 
+BOOST_AUTO_TEST_CASE(unvoted_bundles_expire)
+{
+    // From audit2_height, a bundle that upvote_expiry_blocks blocks in a row did not upvote fails.
+    for (const bool active : {false, true}) {
+        TestChain chain;
+        chain.params.withdrawal_period = 100;
+        chain.params.upvote_expiry_blocks = 4;
+        chain.params.audit2_height = active ? 0 : 1000;
+        chain.Activate(MakeSidechain(1));
+        const uint256 junk{0x99};
+        BOOST_REQUIRE(chain.Connect({BundleScript(1, junk)}));
+        const int proposed{chain.height};
+        BOOST_CHECK_EQUAL(chain.scdb.GetSlot(1)->bundles[0].last_upvote, proposed);
+        // Four blocks without an upvote; the fifth finds it expired before its own vote counts.
+        for (int i{0}; i < 4; ++i) {
+            BOOST_REQUIRE(chain.Connect());
+            BOOST_REQUIRE_EQUAL(chain.scdb.GetSlot(1)->bundles.size(), 1U);
+            BOOST_CHECK(!SidechainDB::UpvoteExpired(chain.scdb.GetSlot(1)->bundles[0], chain.height, chain.params));
+        }
+        BOOST_CHECK_EQUAL(SidechainDB::UpvoteExpired(chain.scdb.GetSlot(1)->bundles[0], chain.height + 1, chain.params), active);
+        BOOST_REQUIRE(chain.Connect({Votes({0})}));
+        BOOST_CHECK_EQUAL(chain.scdb.GetSlot(1)->bundles.empty(), active);
+        if (active) BOOST_CHECK(chain.scdb.WasPaid(1, junk) == std::optional<bool>{false});
+    }
+
+    // An upvote starts the count again; a bundle upvoted at least every upvote_expiry_blocks stays,
+    // and one upvoted every block, as the miners that vouch for it do, reaches the score.
+    TestChain chain;
+    chain.params.withdrawal_period = 100;
+    chain.params.withdrawal_min_score = 10;
+    chain.params.upvote_expiry_blocks = 4;
+    chain.Activate(MakeSidechain(1));
+    const uint256 kept{0x98};
+    BOOST_REQUIRE(chain.Connect({BundleScript(1, kept)}));
+    for (int round{0}; round < 5; ++round) {
+        for (int i{0}; i < 3; ++i) BOOST_REQUIRE(chain.Connect());
+        BOOST_REQUIRE(chain.Connect({Votes({0})}));
+        BOOST_REQUIRE_EQUAL(chain.scdb.GetSlot(1)->bundles.size(), 1U);
+        BOOST_CHECK_EQUAL(chain.scdb.GetSlot(1)->bundles[0].last_upvote, chain.height);
+    }
+    // Downvotes do not count as upvotes.
+    for (int i{0}; i < 4; ++i) BOOST_REQUIRE(chain.Connect({Votes({VOTE_DOWNVOTE})}));
+    BOOST_REQUIRE(chain.Connect());
+    BOOST_CHECK(chain.scdb.GetSlot(1)->bundles.empty());
+
+    const uint256 honest{0x97};
+    BOOST_REQUIRE(chain.Connect({BundleScript(1, honest)}));
+    while (chain.scdb.GetSlot(1)->bundles[0].score < 10U) BOOST_REQUIRE(chain.Connect({Votes({0})}));
+    BOOST_CHECK(chain.scdb.GetSlot(1)->bundles[0].hash == honest);
+    // Whatever form the upvote takes: REPEAT_PREVIOUS and LEADING_BY_50 upvote too.
+    for (int i{0}; i < 6; ++i) BOOST_REQUIRE(chain.Connect({VoteScript({VoteForm::REPEAT_PREVIOUS, {}})}));
+    BOOST_REQUIRE_EQUAL(chain.scdb.GetSlot(1)->bundles.size(), 1U);
+    BOOST_CHECK_EQUAL(chain.scdb.GetSlot(1)->bundles[0].last_upvote, chain.height);
+}
+
+BOOST_AUTO_TEST_CASE(miner_keeps_its_bundle_upvoted)
+{
+    // The bundle a sidechain node vouches for is proposed by this node's blocks and upvoted by every
+    // one after: however short upvote_expiry_blocks, it stays until it is paid.
+    TestChain chain;
+    chain.params.withdrawal_period = 100;
+    chain.params.withdrawal_min_score = 10;
+    chain.params.upvote_expiry_blocks = 1;
+    chain.Activate(MakeSidechain(1));
+    BOOST_REQUIRE(chain.Connect({}, {chain.DepositTx(1, 10 * COIN)}));
+    MinerState miner;
+    std::string error;
+    const auto hash{miner.AddBundle(1, TestChain::BlindBundle(COIN, 1000), error)};
+    BOOST_REQUIRE(hash);
+    bool paid{false};
+    for (int i{0}; i < 20 && !paid; ++i) {
+        const BlockAdditions additions{miner.CreateBlockAdditions(chain.scdb, chain.params, chain.tip, {})};
+        std::vector<CMutableTransaction> txs;
+        for (const CTransactionRef& tx : additions.withdrawals) txs.emplace_back(*tx);
+        BOOST_REQUIRE_MESSAGE(chain.Connect(Scripts(additions), txs), chain.reject_reason);
+        paid = chain.scdb.WasPaid(1, *hash) == std::optional<bool>{true};
+        if (!paid) BOOST_REQUIRE_EQUAL(chain.scdb.GetSlot(1)->bundles.size(), 1U);
+    }
+    BOOST_CHECK(paid);
+}
+
+BOOST_AUTO_TEST_CASE(failed_bundles_are_forgotten)
+{
+    // From audit2_height, a failed bundle is forgotten withdrawal_period blocks after it failed; a
+    // paid one never is.
+    for (const bool active : {false, true}) {
+        TwoBundles setup;
+        TestChain& chain{setup.chain};
+        chain.params.audit2_height = active ? 0 : 1000;
+        const uint256 first{setup.first.GetHash().ToUint256()}, second{setup.second.GetHash().ToUint256()};
+        BOOST_REQUIRE(chain.Connect({}, {chain.WithdrawalTx(1, setup.first, 2 * COIN, COIN / 10)}));
+        const int failed{chain.height};
+        BOOST_REQUIRE(chain.scdb.WasPaid(1, second) == std::optional<bool>{false});
+        while (chain.height < failed + chain.params.withdrawal_period - 1) {
+            BOOST_REQUIRE(chain.Connect());
+            BOOST_REQUIRE(chain.scdb.WasPaid(1, second) == std::optional<bool>{false});
+        }
+        // Still remembered: it cannot be proposed again.
+        BOOST_CHECK(!chain.Connect({BundleScript(1, second)}));
+        BOOST_CHECK_EQUAL(chain.reject_reason, "bad-dc-bundle-closed");
+        const size_t closed{chain.scdb.ClosedCount()};
+        BOOST_REQUIRE(chain.Connect());
+        BOOST_CHECK_EQUAL(chain.scdb.WasPaid(1, second).has_value(), !active);
+        BOOST_CHECK_EQUAL(chain.scdb.ClosedCount(), active ? closed - 1 : closed);
+        BOOST_CHECK(chain.scdb.WasPaid(1, first) == std::optional<bool>{true});
+        // Forgotten, it can be proposed again (and would need the votes all over).
+        BOOST_CHECK_EQUAL(chain.Connect({BundleScript(1, second)}), active);
+        // A paid bundle never can.
+        BOOST_CHECK(!chain.Connect({BundleScript(1, first)}));
+        BOOST_CHECK_EQUAL(chain.reject_reason, "bad-dc-bundle-closed");
+    }
+}
+
+BOOST_AUTO_TEST_CASE(state_snapshot_and_index)
+{
+    // The failed bundles by height are rebuilt when a snapshot is read: what is forgotten next is the same.
+    TwoBundles setup;
+    TestChain& chain{setup.chain};
+    BOOST_REQUIRE(chain.Connect({}, {chain.WithdrawalTx(1, setup.first, 2 * COIN, COIN / 10)}));
+    DataStream stream{};
+    stream << chain.scdb;
+    SidechainDB read;
+    stream >> read;
+    BOOST_CHECK(read == chain.scdb);
+    chain.scdb = read;
+    chain.ConnectEmpty(chain.params.withdrawal_period);
+    BOOST_CHECK(!chain.scdb.WasPaid(1, setup.second.GetHash().ToUint256()));
+}
+
 BOOST_AUTO_TEST_CASE(database_records)
 {
     // The drivechain database on its own: what each block keeps, the snapshot and its version, the

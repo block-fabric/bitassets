@@ -35,6 +35,7 @@ ACTIVATION_PERIOD = 20
 ACTIVATION_MAX_FAILURES = 9
 WITHDRAWAL_PERIOD = 60
 WITHDRAWAL_MIN_SCORE = 30
+UPVOTE_EXPIRY_BLOCKS = 20
 
 SLOT = 1
 
@@ -211,7 +212,8 @@ class DrivechainTest(BitcoinTestFramework):
         self.mine()
         # The node has the bundle's transaction: it says what it pays, while miners vote.
         payouts = [{"amount": Decimal(payout) / COIN, "script": address_to_scriptpubkey(payout_address).hex()}]
-        assert_equal(node.getwithdrawalbundle(SLOT, bundle_hash), {"status": "pending", "score": 1, "blocksleft": WITHDRAWAL_PERIOD - 1, "payable": False, "payouts": payouts, "fee": Decimal(fee) / COIN})
+        proposed_at = node.getblockcount()
+        assert_equal(node.getwithdrawalbundle(SLOT, bundle_hash), {"status": "pending", "score": 1, "lastupvote": proposed_at, "blocksleft": WITHDRAWAL_PERIOD - 1, "payable": False, "payouts": payouts, "fee": Decimal(fee) / COIN})
         bundles = node.listwithdrawalbundles(SLOT)
         assert_equal(len(bundles), 1)
         assert_equal(bundles[0]["hash"], bundle_hash)
@@ -249,6 +251,7 @@ class DrivechainTest(BitcoinTestFramework):
         assert_equal(node.listwithdrawalbundles()[0]["vote"], "upvote")
         self.mine(WITHDRAWAL_MIN_SCORE - 1)
         assert_equal(node.listwithdrawalbundles()[0]["score"], WITHDRAWAL_MIN_SCORE - 1)
+        assert_equal(node.listwithdrawalbundles()[0]["lastupvote"], node.getblockcount())
         assert_equal(self.nodes[1].getreceivedbyaddress(payout_address, 0), 0)
         self.mine()
         bundles = node.listwithdrawalbundles()
@@ -309,8 +312,10 @@ class DrivechainTest(BitcoinTestFramework):
         other_hash = node.receivewithdrawalbundle(SLOT, other.serialize().hex())["hash"]
         self.mine()
         assert_equal(len(node.listwithdrawalbundles()), 1)
-        # It needs min score - 1 more points and gets none: it is dropped once the blocks left cannot provide them.
-        self.mine(WITHDRAWAL_PERIOD - (WITHDRAWAL_MIN_SCORE - 1))
+        # It gets no upvote: once UPVOTE_EXPIRY_BLOCKS blocks in a row did not upvote it, it fails
+        # (well before the blocks left could no longer bring it to the score).
+        assert_equal(node.getdrivechaininfo()["upvoteexpiryblocks"], UPVOTE_EXPIRY_BLOCKS)
+        self.mine(UPVOTE_EXPIRY_BLOCKS)
         assert_equal(len(node.listwithdrawalbundles()), 1)
         self.mine()
         assert_equal(node.listwithdrawalbundles(), [])
