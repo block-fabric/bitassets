@@ -812,7 +812,8 @@ public:
     /**
      * Bring m_scdb in line with the chain tip after startup, starting from the
      * snapshot taken at the last flush and using the undo data and blocks on
-     * disk for the difference.
+     * disk for the difference. False if that fails, or is interrupted
+     * (m_chainman.m_interrupt; what was done is kept for the next start).
      */
     bool LoadDrivechainState() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 

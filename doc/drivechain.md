@@ -105,3 +105,18 @@ replaying every proposal and closure since its slot activated.
   failed (the index of closures tells, whenever the node builds a block); it is dropped
   `PRUNE_DEPTH` (6) blocks after it closed. A handed bundle no block proposed is dropped after
   1008 blocks, unless it is the one the sidechain node vouches for.
+
+## Other limits
+
+* UTXO snapshots (assumeutxo) do not hold the drivechain state: `loadtxoutset` refuses them, and so
+  does `ActivateSnapshot` on every network but regtest (whose upstream tests load snapshots of
+  heights where no sidechain exists; the chainstate made from one starts with an empty sidechain
+  database).
+* Deriving the sidechain database from the blocks (after a format or parameter change, or for a
+  reorg deeper than the undo data) can take long. A shutdown interrupts it cleanly: at startup what
+  was derived so far is kept and the next start goes on from there; during a deep reorg the node
+  stays on the tip it had.
+* `listsidechaindeposits` lists only the records of blocks of the active chain (a crash between a
+  reorg and the next flush can leave records of others); they are skipped without counting towards
+  `count`, and an `after` whose record is such a stale one resumes from the record of the same
+  transaction in the active chain, or is refused.

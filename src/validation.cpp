@@ -2385,7 +2385,11 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
             const CBlockIndex* genesis{pindex->GetAncestor(0)};
             rebuilt.SetBlockHash(genesis->GetBlockHash());
             if (!RollForwardSidechainDB(rebuilt, genesis, pindex->pprev, pindex->pprev->nHeight - DRIVECHAIN_UNDO_DEPTH)) {
-                LogError("DisconnectBlock(): failure deriving the sidechain database\n");
+                if (m_chainman.m_interrupt) {
+                    LogInfo("DisconnectBlock(): deriving the sidechain database was interrupted");
+                } else {
+                    LogError("DisconnectBlock(): failure deriving the sidechain database\n");
+                }
                 return DISCONNECT_FAILED;
             }
             *scdb = std::move(rebuilt);
@@ -3176,12 +3180,23 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
         // The sidechain database is taken back in place (it is the last thing DisconnectBlock does);
         // if the coins turn out unclean after all, the block is applied to it again.
         if (DisconnectBlock(block, pindexDelete, view, &m_scdb) != DISCONNECT_OK) {
-            LogError("DisconnectTip(): DisconnectBlock %s failed\n", pindexDelete->GetBlockHash().ToString());
+            if (m_chainman.m_interrupt) {
+                // Interrupted while deriving the sidechain database for a deep reorg: nothing changed.
+                LogInfo("DisconnectTip(): interrupted while disconnecting block %s", pindexDelete->GetBlockHash().ToString());
+            } else {
+                LogError("DisconnectTip(): DisconnectBlock %s failed\n", pindexDelete->GetBlockHash().ToString());
+            }
             if (m_scdb.GetBlockHash() == pindexDelete->pprev->GetBlockHash()) {
+                // The coins stay at the block (the view is dropped): the sidechain database goes back
+                // to it too, by connecting the block again. That must work, it did before; if it does
+                // not, it is taken back to where it was, and the node cannot go on.
                 drivechain::BlockUndo undo;
                 std::string reject_reason;
                 if (!m_scdb.ConnectBlock(block, pindexDelete->nHeight, m_chainman.GetConsensus().drivechain, undo, nullptr, reject_reason)) {
+                    m_scdb.DisconnectBlock(undo);
+                    m_scdb.SetBlockHash(pindexDelete->pprev->GetBlockHash());
                     LogError("DisconnectTip(): the sidechain database cannot be brought back to %s (%s)\n", pindexDelete->GetBlockHash().ToString(), reject_reason);
+                    return FatalError(m_chainman.GetNotifications(), state, _("The sidechain database cannot be brought back to the chain tip."));
                 }
             }
             return false;
@@ -3453,6 +3468,10 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex&
             // This is likely a fatal error, but keep the mempool consistent,
             // just in case. Only remove from the mempool in this case.
             MaybeUpdateMempoolForReorg(disconnectpool, false);
+
+            // A deep reorg derives the sidechain database from the blocks, which a shutdown
+            // interrupts: the node stays on the tip it has, and goes on from there next time.
+            if (m_chainman.m_interrupt) return false;
 
             // If we're unable to disconnect a block during normal operation,
             // then that is a failure of our local system -- we should abort
@@ -5063,7 +5082,17 @@ bool Chainstate::LoadDrivechainState()
     LogInfo("Bringing the sidechain database from height %d to the chain tip at height %d", pindex->nHeight, tip->nHeight);
 
     // Roll forward along the chain, with undo data for the blocks a reorg can still take back.
-    if (!RollForwardSidechainDB(scdb, pindex, tip, tip->nHeight - DRIVECHAIN_UNDO_DEPTH)) return false;
+    if (!RollForwardSidechainDB(scdb, pindex, tip, tip->nHeight - DRIVECHAIN_UNDO_DEPTH)) {
+        if (m_chainman.m_interrupt && !scdb.GetBlockHash().IsNull()) {
+            // Interrupted (a shutdown): what was derived so far is kept, and the next start goes on
+            // from there rather than from the beginning (the snapshot of a block of the active chain
+            // is rolled forward from).
+            LogInfo("Interrupted while bringing the sidechain database to the chain tip; it goes on from block %s next time", scdb.GetBlockHash().ToString());
+            db.WriteState(DrivechainStateName(), scdb);
+            db.WriteFormatVersion();
+        }
+        return false;
+    }
 
     m_scdb = std::move(scdb);
     db.WriteState(DrivechainStateName(), m_scdb);
@@ -6097,6 +6126,13 @@ util::Result<CBlockIndex*> ChainstateManager::ActivateSnapshot(
 
         if (this->CurrentChainstate().m_from_snapshot_blockhash) {
             return util::Error{Untranslated("Can't activate a snapshot-based chainstate more than once")};
+        }
+        // A UTXO snapshot does not hold the drivechain state (sidechains, escrows, bundles): the
+        // chainstate made from it would start with an empty sidechain database and judge the blocks
+        // after the snapshot by it. Only regtest, whose upstream tests use snapshots at heights
+        // before any sidechain, takes them.
+        if (GetConsensus().drivechain.max_sidechains > 0 && GetParams().GetChainType() != ChainType::REGTEST) {
+            return util::Error{Untranslated("UTXO snapshots are not supported with drivechains: the snapshot does not hold the drivechain state")};
         }
         if (!GetParams().AssumeutxoForBlockhash(base_blockhash).has_value()) {
             auto available_heights = GetParams().GetAvailableSnapshotHeights();

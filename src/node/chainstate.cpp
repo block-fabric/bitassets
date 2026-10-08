@@ -124,7 +124,9 @@ static ChainstateLoadResult CompleteChainstateInitialization(
             }
             assert(chainstate->m_chain.Tip() != nullptr);
             if (!chainstate->LoadDrivechainState()) {
-                return {ChainstateLoadStatus::FAILURE, _("Error loading the sidechain database. You will need to rebuild the databases using -reindex.")};
+                if (chainman.m_interrupt) return {ChainstateLoadStatus::INTERRUPTED, {}};
+                return {ChainstateLoadStatus::FAILURE, _("Error loading the sidechain database: it could not be derived from the blocks on disk (see the log for the block). "
+                                                         "A pruned node no longer has the blocks: rebuild with -reindex.")};
             }
         }
     }
