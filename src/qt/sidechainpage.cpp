@@ -6,6 +6,7 @@
 
 #include <qt/clientmodel.h>
 #include <qt/guiutil.h>
+#include <qt/itemviews.h>
 #include <qt/noderpc.h>
 #include <qt/platformstyle.h>
 #include <qt/sidebarmining.h>
