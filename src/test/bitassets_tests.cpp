@@ -479,6 +479,57 @@ BOOST_AUTO_TEST_CASE(dead_assets_retire)
     BOOST_CHECK(f.state == before);
 }
 
+BOOST_AUTO_TEST_CASE(auction_does_not_keep_quote_alive)
+{
+    // The second audit: an auction of 1 unit of anything, quoting an asset, starting never and never
+    // collected, kept that asset from ever being retired.
+    Fixture f;
+    const auto [gold_control, gold]{f.Issue("GOLD", 1000)};
+    const auto [silver_control, silver]{f.Issue("SILVER", 10)};
+    // At most MAX_AUCTION_DELAY blocks ahead.
+    const auto auction_of{[&](int start) { return MakeTx({silver}, CreateAuction{SILVER, 1, GOLD, 10, 10, start, 10}, {Asset(SILVER, 9), Unit(Token::Kind::RECEIPT, uint256{})}); }};
+    BOOST_CHECK_EQUAL(f.Reject(auction_of(f.height + MAX_AUCTION_DELAY + 1)), "bad-ba-auction-delay");
+    BOOST_CHECK_EQUAL(f.Reject(auction_of(std::numeric_limits<int32_t>::max())), "bad-ba-auction-delay");
+    std::string reason;
+    {
+        // Before the rules, any start.
+        TState before{f.state};
+        BOOST_CHECK(before.CheckTx(auction_of(std::numeric_limits<int32_t>::max()), f.height, reason, nullptr, 0, 0, 0, f.height + 1));
+    }
+    const CTransaction made{auction_of(f.height + 1)};
+    BOOST_REQUIRE_MESSAGE(f.Apply(made, &reason), reason);
+    BOOST_CHECK(f.state.Auctions().at(made.GetHash()).quote_registration == f.state.Assets().at(GOLD).registration);
+    // GOLD dies: its control coin and every coin burned.
+    BOOST_REQUIRE(f.Apply(MakeTx({gold_control, gold}, Burn{{Unit(Token::Kind::CONTROL, GOLD), Asset(GOLD, 1000)}}, {})));
+    std::string why;
+    BOOST_CHECK(!f.state.Releasable(GOLD, &why, /*audit2=*/false));
+    BOOST_CHECK_EQUAL(why, "an auction of it is not collected");
+    BOOST_CHECK(f.state.Releasable(GOLD));
+    // SILVER, which the auction sells, stays alive by it.
+    BOOST_REQUIRE(f.Apply(MakeTx({silver_control, COutPoint{made.GetHash(), 0}}, Burn{{Unit(Token::Kind::CONTROL, SILVER), Asset(SILVER, 9)}}, {})));
+    BOOST_CHECK(!f.state.Releasable(SILVER, &why));
+    BOOST_CHECK_EQUAL(why, "an auction of it is not collected");
+    BOOST_REQUIRE(f.Apply(MakeTx({}, ReleaseAsset{GOLD}, {})));
+    // GOLD again, another asset: the auction takes none of it.
+    const auto [gold2_control, gold2]{f.Issue("GOLD", 50)};
+    f.height = 101;
+    BOOST_CHECK_EQUAL(f.Reject(MakeTx({gold2}, Bid{made.GetHash(), 10, 1, CScript{}}, {Asset(GOLD, 40), std::nullopt})), "bad-ba-auction-asset-gone");
+    // Collected, what it sells goes back.
+    BOOST_REQUIRE_MESSAGE(f.Apply(MakeTx({COutPoint{made.GetHash(), 1}}, Collect{made.GetHash(), HOLDER}, {std::nullopt}), &reason), reason);
+
+    // One that took some in keeps it alive.
+    Fixture g;
+    const auto [c1, g_gold]{g.Issue("GOLD", 1000)};
+    const auto [c2, g_silver]{g.Issue("SILVER", 10)};
+    const CTransaction auction{MakeTx({g_silver}, CreateAuction{SILVER, 2, GOLD, 10, 10, g.height, 10}, {Asset(SILVER, 8), Unit(Token::Kind::RECEIPT, uint256{})})};
+    BOOST_REQUIRE(g.Apply(auction));
+    const CTransaction bid{MakeTx({g_gold}, Bid{auction.GetHash(), 5, 1, CScript{}}, {Asset(GOLD, 995), std::nullopt})};
+    BOOST_REQUIRE_MESSAGE(g.Apply(bid, &reason), reason);
+    BOOST_REQUIRE(g.Apply(MakeTx({c1, COutPoint{bid.GetHash(), 0}}, Burn{{Unit(Token::Kind::CONTROL, GOLD), Asset(GOLD, 995)}}, {})));
+    BOOST_CHECK(!g.state.Releasable(GOLD, &why));
+    BOOST_CHECK_EQUAL(why, "an auction of it is not collected");
+}
+
 BOOST_AUTO_TEST_CASE(swap_math_exact)
 {
     // The swap math against a 256 bit reference, where amount * 997 * reserve does not fit in 128 bits.

@@ -78,6 +78,8 @@ inline constexpr uint64_t MIN_OPEN_CHN{1'000'000};
 inline constexpr uint64_t SWAP_FEE_PER_MILLE{3};
 /** Longest an auction may run, in blocks. */
 inline constexpr int32_t MAX_AUCTION_DURATION{1'000'000};
+/** Latest an auction may start, in blocks after the one that makes it (the second audit's rules): about a year. */
+inline constexpr int32_t MAX_AUCTION_DELAY{52'560};
 /** Most tokens one burn names. */
 inline constexpr size_t MAX_BURNS{16};
 
@@ -497,11 +499,15 @@ struct Auction {
     uint32_t bids{0};
     //! Collected: what was left and what came in went to the holder of the receipt.
     bool closed{false};
+    //! The registrations of its two assets when it was made (null for CHN): an asset retired and
+    //! registered again under its name is another asset, which the auction does not trade.
+    Txid base_registration;
+    Txid quote_registration;
 
     SERIALIZE_METHODS(Auction, obj)
     {
         READWRITE(obj.base, obj.base_amount, obj.quote, obj.start_price, obj.end_price, obj.start_height, obj.duration, obj.created,
-                  obj.remaining, obj.proceeds, obj.bids, obj.closed);
+                  obj.remaining, obj.proceeds, obj.bids, obj.closed, obj.base_registration, obj.quote_registration);
     }
     friend bool operator==(const Auction&, const Auction&) = default;
 
@@ -655,7 +661,7 @@ private:
  * earlier version) is not read: the node derives the state again from the blocks (StoreLayoutCurrent).
  *  1: the history of an asset's data in its record; outputs indexed by id only; closed auctions indexed.
  *  2: the history apart (0x3e); outputs indexed by id then kind; closed auctions out of the index;
- *     where each reservation was made (0x3d).
+ *     where each reservation was made (0x3d); the registrations of an auction's assets in it.
  */
 inline constexpr uint32_t STORE_LAYOUT{2};
 /** Whether the assets in a store are in the layout of this version, or there are none yet. */

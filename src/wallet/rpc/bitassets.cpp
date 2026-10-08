@@ -951,7 +951,7 @@ RPCMethod createauction()
             {"start_price", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "The price of all of it at the start, in what it sells for"},
             {"end_price", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "The price of all of it at the end: the least it sells for"},
             {"duration", RPCArg::Type::NUM, RPCArg::Optional::NO, "How many blocks it takes bids"},
-            {"start_in", RPCArg::Type::NUM, RPCArg::Default{1}, "When it starts, in blocks after the one that takes the transaction: 1 is the block after that"},
+            {"start_in", RPCArg::Type::NUM, RPCArg::Default{1}, strprintf("When it starts, in blocks after the one that takes the transaction: 1 is the block after that; at most %u", bitassets::MAX_AUCTION_DELAY)},
         },
         TXID_RESULT,
         RPCExamples{HelpExampleCli("createauction", "\"GOLD\" 100 \"CHN\" 50 10 1440")},
@@ -973,6 +973,7 @@ RPCMethod createauction()
     if (create.duration < 1 || create.duration > bitassets::MAX_AUCTION_DURATION) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("The duration is 1 to %u blocks", bitassets::MAX_AUCTION_DURATION));
     const int start_in{request.params[6].isNull() ? 1 : request.params[6].getInt<int>()};
     if (start_in < 1) throw JSONRPCError(RPC_INVALID_PARAMETER, "It starts a block after the one that takes the transaction, at the earliest");
+    if (start_in > bitassets::MAX_AUCTION_DELAY) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("It starts within %u blocks", bitassets::MAX_AUCTION_DELAY));
     // An auction cannot start before the block that makes it: a block of margin, should the transaction wait one to be mined.
     create.start_height = pwallet->chain().getBitAssetsHeight() + start_in;
     std::vector<COutPoint> inputs;
@@ -1013,6 +1014,12 @@ RPCMethod bidauction()
     if (!auction->OpenAt(height)) {
         if (height < auction->start_height) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("The auction starts at height %d", auction->start_height));
         throw JSONRPCError(RPC_INVALID_PARAMETER, "The auction takes no more bids");
+    }
+    // An asset of it retired since, or registered again: not what the auction trades.
+    for (const auto& [asset, registration] : {std::pair{auction->base, auction->base_registration}, std::pair{auction->quote, auction->quote_registration}}) {
+        if (asset.IsNull()) continue;
+        const auto record{pwallet->chain().getBitAsset(asset)};
+        if (!record || record->registration != registration) throw JSONRPCError(RPC_INVALID_PARAMETER, "An asset of this auction was retired since it was made: it takes no bids");
     }
     const uint8_t dq{DecimalsOf(*pwallet, auction->quote)}, db{DecimalsOf(*pwallet, auction->base)};
     const uint64_t price{auction->PriceAt(height)};

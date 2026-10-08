@@ -787,6 +787,10 @@ bool State::Releasable(const AssetId& asset, std::string* why, bool audit2) cons
         in = in.subspan(33);
         const auto auction{GetAuction(Txid::FromUint256(sidechain::KeyCodec<uint256>::Decode(in)))};
         open_auction = auction && !auction->closed;
+        // Under the second audit's rules, an auction that sells something else for it and has taken
+        // none of it in holds none of it: it does not keep it alive (else a 1-unit auction that never
+        // starts would, for ever). Bids into it are refused once the asset is gone (MakePlan).
+        if (open_auction && audit2 && auction->quote == asset && auction->base != asset && auction->proceeds == 0) open_auction = false;
         return !open_auction;
     });
     if (open_auction) return no("an auction of it is not collected");
@@ -862,6 +866,12 @@ std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, s
     }};
     // Pools and auctions trade CHN and registered assets.
     const auto tradable{[&](const AssetId& asset) { return asset.IsNull() || HasAsset(asset); }};
+    // The registration of an asset now (null for CHN, and for an asset not registered).
+    const auto registration{[&](const AssetId& asset) {
+        if (asset.IsNull()) return Txid{};
+        const auto record{GetAsset(asset)};
+        return record ? record->registration : Txid{};
+    }};
 
     if (const auto* reserve{op ? std::get_if<Reserve>(op) : nullptr}) {
         credit(Token::Kind::RESERVATION, txid.ToUint256(), 1);
@@ -1064,6 +1074,8 @@ std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, s
     } else if (const auto* create{op ? std::get_if<CreateAuction>(op) : nullptr}) {
         if (!tradable(create->base) || !tradable(create->quote)) return invalid("bad-ba-asset-unknown");
         if (create->start_height < height) return invalid("bad-ba-auction-started");
+        // An auction that never starts would hold what it sells, and the asset it quotes, for ever.
+        if (audit2 && create->start_height > height + MAX_AUCTION_DELAY) return invalid("bad-ba-auction-delay");
         Auction auction;
         auction.base = create->base;
         auction.base_amount = create->base_amount;
@@ -1074,6 +1086,8 @@ std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, s
         auction.duration = create->duration;
         auction.created = height;
         auction.remaining = create->base_amount;
+        auction.base_registration = registration(create->base);
+        auction.quote_registration = registration(create->quote);
         take(create->base, create->base_amount);
         // Its receipt: the transaction must output it.
         credit(Token::Kind::RECEIPT, txid.ToUint256(), 1);
@@ -1083,6 +1097,12 @@ std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, s
         if (!found) return invalid("bad-ba-no-auction");
         Auction auction{*found};
         if (!auction.OpenAt(height)) return invalid("bad-ba-auction-closed");
+        // Its assets as they were: one retired (an auction that took none of what it quotes does not
+        // keep that from being retired), or retired and registered again, is not what it trades.
+        // Collect needs no such rule: what it pays of the asset it quotes is what bids paid in, none.
+        if (audit2 && (registration(auction.base) != auction.base_registration || registration(auction.quote) != auction.quote_registration)) {
+            return invalid("bad-ba-auction-asset-gone");
+        }
         const uint64_t bought{auction.BuysAt(height, bid->quote_amount)};
         if (bought == 0 || bought > auction.remaining || bought < bid->min_base) return invalid("bad-ba-bid-price");
         const auto proceeds{Add(auction.proceeds, bid->quote_amount)};
