@@ -234,7 +234,7 @@ public:
         consensus.drivechain.single_payout_height = 7500;
         consensus.drivechain.idle_expiry_height = 7500;
         consensus.drivechain.idle_expiry_blocks = 30;
-        consensus.drivechain.audit2_height = 7716; // audit 2 rules on the test network, 300 blocks after the deploy
+        consensus.drivechain.audit2_height = 9437; // audit 2 rules on the test network: moved out while the third audit's fixes are made
         consensus.drivechain.upvote_expiry_blocks = 30;
         consensus.fPowAllowMinDifficultyBlocks = true;
         consensus.enforce_BIP94 = false; // aserti3 is not subject to the timewarp attack
