@@ -1636,24 +1636,45 @@ BOOST_AUTO_TEST_CASE(database_records)
         // Nor taken as the place to go on from.
         BOOST_CHECK(!db.ListDeposits(1, txids[1], 0, without_second));
     }
-    // A block taken out of the chain takes its deposits, and their txids, with it.
+    // Erasing the records of a block takes its deposits, and their txids, with it.
     BOOST_CHECK(db.EraseBlockDeposits(blocks[4].first));
     BOOST_CHECK(!db.ListDeposits(1, txids[4], 0, any));
     BOOST_CHECK_EQUAL(db.ListDeposits(1, std::nullopt, 0, any)->size(), 4U);
-    // The txid entry naming the record of a block that left the chain (the same transaction in a
-    // block of another branch, left by a crash): the place to go on from is its record in the active chain.
+    // A block of another branch at the same height, with the same transaction at the same position
+    // (a crash or a reorg back can leave both): each keeps its own records, and readers go by the
+    // active chain, whichever was written last.
     {
         const uint256 stale{0x5e};
+        const int height{chain.height - 3}; // the height of blocks[2] (a block with a bundle came after blocks[4])
         Deposit copy{blocks[2].second.at(0)};
         copy.block_hash = stale;
-        BOOST_REQUIRE(db.WriteBlock(stale, 20, BlockUndo{}, {copy}, chain.scdb));
-        BOOST_CHECK(db.ListDeposits(1, txids[2], 0, any)->empty());
+        BOOST_REQUIRE(db.WriteBlock(stale, height, BlockUndo{}, {copy}, chain.scdb));
+        BOOST_CHECK_EQUAL(db.ListDeposits(1, std::nullopt, 0, any)->size(), 5U);
         const auto active{[&](const uint256& h) { return h != stale; }};
         const auto page{db.ListDeposits(1, txids[2], 0, active)};
         BOOST_REQUIRE(page);
         BOOST_REQUIRE_EQUAL(page->size(), 1U);
         BOOST_CHECK((*page)[0].tx->GetHash().ToUint256() == txids[3]);
+        const auto listed{db.ListDeposits(1, txids[1], 0, active)};
+        BOOST_REQUIRE(listed);
+        BOOST_REQUIRE_EQUAL(listed->size(), 2U);
+        BOOST_CHECK((*listed)[0].block_hash == blocks[2].first);
+        // The other way around: the stale branch is the active one.
+        const auto other{[&](const uint256& h) { return h != blocks[2].first; }};
+        const auto from_stale{db.ListDeposits(1, txids[1], 0, other)};
+        BOOST_REQUIRE(from_stale);
+        BOOST_REQUIRE_EQUAL(from_stale->size(), 2U);
+        BOOST_CHECK((*from_stale)[0].block_hash == stale);
+        // By block.
+        const auto in_block{db.ListBlockDeposits(1, height, blocks[2].first)};
+        BOOST_REQUIRE_EQUAL(in_block.size(), 1U);
+        BOOST_CHECK(in_block[0].block_hash == blocks[2].first);
+        BOOST_REQUIRE_EQUAL(db.ListBlockDeposits(1, height, stale).size(), 1U);
+        BOOST_CHECK(db.ListBlockDeposits(1, height, uint256{0x99}).empty());
+        // Erasing the stale block's records leaves the active one's.
         BOOST_CHECK(db.EraseBlockDeposits(stale));
+        BOOST_CHECK_EQUAL(db.ListBlockDeposits(1, height, blocks[2].first).size(), 1U);
+        BOOST_CHECK_EQUAL(db.ListDeposits(1, txids[1], 0, any)->size(), 2U);
     }
 
     // The snapshot: read back as written; a missing or unreadable one leaves nothing behind.

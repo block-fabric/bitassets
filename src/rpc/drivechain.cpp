@@ -855,8 +855,8 @@ RPCMethod listsidechaindeposits()
     if (count == 0) count = MAX_DEPOSITS_LISTED;
 
     LOCK(::cs_main);
-    // Records left by blocks the active chain no longer has (a crash between a reorg and the next
-    // flush can leave some) are neither listed nor counted, nor taken as the place to go on from.
+    // Records of blocks the active chain no longer has (blocks that left it keep theirs) are neither
+    // listed nor counted, nor taken as the place to go on from.
     const auto in_active_chain{[&](const uint256& block_hash) {
         AssertLockHeld(::cs_main);
         const CBlockIndex* pindex{chainman.m_blockman.LookupBlockIndex(block_hash)};
@@ -1003,9 +1003,7 @@ RPCMethod getsidechainevents()
         if (const auto& accepted{bmm[height - first]}) obj.pushKV("bmm", accepted->GetHex());
 
         UniValue deposits(UniValue::VARR);
-        for (const drivechain::Deposit& deposit : chainman.m_blockman.m_drivechain_db->ListBlockDeposits(id, height)) {
-            // Only the records of this very block: see listsidechaindeposits.
-            if (deposit.block_hash != pindex->GetBlockHash()) continue;
+        for (const drivechain::Deposit& deposit : chainman.m_blockman.m_drivechain_db->ListBlockDeposits(id, height, pindex->GetBlockHash())) {
             UniValue entry(UniValue::VOBJ);
             entry.pushKV("destination", deposit.destination);
             entry.pushKV("amount", ValueFromAmount(deposit.amount));

@@ -3245,7 +3245,8 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
             return false;
         }
         view.Flush(/*reallocate_cache=*/false); // local CCoinsViewCache goes out of scope
-        m_blockman.m_drivechain_db->EraseBlockDeposits(pindexDelete->GetBlockHash());
+        // The block's records stay (readers skip blocks out of the active chain; reconnected, it
+        // writes them again): erasing them would not be crash-safe, the coins being flushed later.
         // The blocks connected next, at this height and above, keep their undo data until a flush
         // puts them deep enough (a reorg deeper than DRIVECHAIN_UNDO_DEPTH gets here).
         m_drivechain_undo_erased_height = std::min(m_drivechain_undo_erased_height, pindexDelete->nHeight - 1);
@@ -5126,7 +5127,6 @@ bool Chainstate::LoadDrivechainState()
                 break;
             }
             scdb.DisconnectBlock(undo);
-            db.EraseBlockDeposits(pindex->GetBlockHash());
             pindex = pindex->pprev;
         }
     }
