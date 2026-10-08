@@ -298,10 +298,13 @@ class BitAssetsTest(SidechainTest):
         fee = dead["release_fee"]
         assert_greater_than(fee, 0)
         withdrawals = len(side.listwithdrawals())
+        dead_number = dead["seq"]
         side.releaseasset("DEAD")
         assert_raises_rpc_error(-4, "being retired already", side.releaseasset, "DEAD")
         self.mine_txs()
         assert_raises_rpc_error(-8, "No such asset", side.getasset, "DEAD")
+        # Its number names no asset now: never the asset whose name the number is.
+        assert_raises_rpc_error(-8, "No asset has the number", side.getasset, dead_number)
         assert "DEAD" not in [a["label"] for a in side.listassets()]
         assert_raises_rpc_error(-8, "no pool", side.getpool, "DEAD", "CHN")
         new = side.listwithdrawals()
@@ -351,6 +354,7 @@ class BitAssetsTest(SidechainTest):
         assert_equal(side.getasset("GOLD"), gold)
         assert_equal(side.listmyassets(), mine)
         self.check_in_sync()
+
 
 
 if __name__ == "__main__":

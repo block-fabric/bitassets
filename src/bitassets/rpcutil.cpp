@@ -173,8 +173,12 @@ AssetId ParseAssetArg(const UniValue& value, const std::function<std::optional<A
         if (const auto hash{uint256::FromHex(text.substr(2))}) return *hash;
     }
     if (lookup) {
+        // Text that reads as a number names the asset of that number, or nothing: never the asset
+        // whose name it is, which may be a private look-alike (a number of an asset retired since,
+        // or not given yet, would otherwise resolve to it).
         if (const auto seq{ParseSeq(text)}) {
             if (const auto asset{lookup(*seq)}) return *asset;
+            throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("No asset has the number %s (it may have been retired)", text));
         }
     }
     return HashName(text);

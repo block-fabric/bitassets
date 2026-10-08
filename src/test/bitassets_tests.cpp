@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <bitassets/state.h>
+#include <bitassets/rpcutil.h>
 #include <addresstype.h>
 #include <consensus/params.h>
 #include <sidechain/state.h>
@@ -199,6 +200,19 @@ BOOST_AUTO_TEST_CASE(marker_round_trip)
 BOOST_AUTO_TEST_CASE(seq_format)
 {
     for (uint32_t seq : {0u, 1u, 99999999u, 100000000u, 4000000000u}) BOOST_CHECK_EQUAL(*ParseSeq(FormatSeq(seq)), seq);
+}
+
+BOOST_AUTO_TEST_CASE(asset_arg_number_never_a_name)
+{
+    // The number of an asset retired since (or not given yet): an error, never the asset whose
+    // name the number is (a private look-alike may have it).
+    const std::string number{FormatSeq(7)};
+    const AssetId gold{HashName("GOLD")};
+    const auto lookup{[&](uint32_t seq) -> std::optional<AssetId> { return seq == 3 ? std::optional{gold} : std::nullopt; }};
+    BOOST_CHECK(ParseAssetArg(UniValue{FormatSeq(3)}, lookup) == gold);
+    BOOST_CHECK_THROW(ParseAssetArg(UniValue{number}, lookup), UniValue);
+    BOOST_CHECK(ParseAssetArg(UniValue{"GOLD"}, lookup) == gold);
+    BOOST_CHECK(ParseAssetArg(UniValue{"chn"}, lookup) == CHN);
 }
 
 BOOST_AUTO_TEST_CASE(register_and_conserve)
