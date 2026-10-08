@@ -355,6 +355,14 @@ class BitAssetsTest(SidechainTest):
         assert_equal(side.listmyassets(), mine)
         self.check_in_sync()
 
+        self.log.info("sendall leaves the outputs that carry tokens alone")
+        held = other.listmyassets()
+        assert_greater_than(len(held["assets"]), 0)
+        other.sendall([side.getnewaddress()])
+        self.mine_txs()
+        assert_equal(other.getbalances()["mine"]["trusted"], 0)
+        assert_equal(other.listmyassets()["assets"], held["assets"])
+        assert_equal(other.listmyassets()["liquidity"], held["liquidity"])
 
 
 if __name__ == "__main__":
