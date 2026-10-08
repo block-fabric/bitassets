@@ -397,9 +397,9 @@ BOOST_AUTO_TEST_CASE(pools)
     const auto [control, coins]{f.Issue("GOLD", 1'000'000)};
     // A pool of GOLD and CHN: the marker burns the CHN that goes in, exactly.
     const AddLiquidity add{GOLD, CHN, 100'000, 50'000'000, 1};
-    BOOST_CHECK_EQUAL(f.Reject(MakeTx({coins}, add, {Asset(GOLD, 900'000), std::nullopt}, 49'999'999)), "bad-ba-marker-value");
+    BOOST_CHECK_EQUAL(f.Reject(MakeTx({coins}, add, {Asset(GOLD, 900'000), std::nullopt, std::nullopt}, 49'999'999)), "bad-ba-marker-value");
     BOOST_CHECK_EQUAL(f.Reject(MakeTx({coins}, add, {Asset(GOLD, 900'000)}, 50'000'000)), "bad-ba-results");
-    const CTransaction added{MakeTx({coins}, add, {Asset(GOLD, 900'000), std::nullopt}, 50'000'000)};
+    const CTransaction added{MakeTx({coins}, add, {Asset(GOLD, 900'000), std::nullopt, std::nullopt}, 50'000'000)};
     std::string reason;
     BOOST_REQUIRE_MESSAGE(f.Apply(added, &reason), reason);
     const uint256 id{PoolId(GOLD, CHN)};
@@ -454,8 +454,8 @@ BOOST_AUTO_TEST_CASE(abandoned_pools_close)
     Fixture f;
     const auto [control, coins]{f.Issue("GOLD", 1'000'000)};
     // Too small to open.
-    BOOST_CHECK_EQUAL(f.Reject(MakeTx({coins}, AddLiquidity{GOLD, CHN, 100, 900'000, 1}, {Asset(GOLD, 999'900), std::nullopt}, 900'000)), "bad-ba-pool-too-small");
-    const CTransaction added{MakeTx({coins}, AddLiquidity{GOLD, CHN, 100'000, 50'000'000, 1}, {Asset(GOLD, 900'000), std::nullopt}, 50'000'000)};
+    BOOST_CHECK_EQUAL(f.Reject(MakeTx({coins}, AddLiquidity{GOLD, CHN, 100, 900'000, 1}, {Asset(GOLD, 999'900), std::nullopt, std::nullopt}, 900'000)), "bad-ba-pool-too-small");
+    const CTransaction added{MakeTx({coins}, AddLiquidity{GOLD, CHN, 100'000, 50'000'000, 1}, {Asset(GOLD, 900'000), std::nullopt, std::nullopt}, 50'000'000)};
     std::string reason;
     BOOST_REQUIRE_MESSAGE(f.Apply(added, &reason), reason);
     const uint256 id{PoolId(GOLD, CHN)};
@@ -472,18 +472,139 @@ BOOST_AUTO_TEST_CASE(abandoned_pools_close)
     BOOST_CHECK(before.CheckTx(MakeTx({}, Swap{CHN, 500'000'000, GOLD, 1, CScript{}}, {std::nullopt}, 500'000'000), f.height, r2, nullptr, f.height + 1));
     // A dust deposit does not reopen it; a real one does, and it trades again.
     const COutPoint gold{added.GetHash(), 0};
-    BOOST_CHECK_EQUAL(f.Reject(MakeTx({gold}, AddLiquidity{GOLD, CHN, 10, 100'000, 1}, {Asset(GOLD, 899'990), std::nullopt}, 100'000)), "bad-ba-pool-too-small");
-    const CTransaction reopened{MakeTx({gold}, AddLiquidity{GOLD, CHN, 100'000, 50'000'000, 1}, {Asset(GOLD, 800'000), std::nullopt}, 50'000'000)};
+    BOOST_CHECK_EQUAL(f.Reject(MakeTx({gold}, AddLiquidity{GOLD, CHN, 10, 100'000, 1}, {Asset(GOLD, 899'990), std::nullopt, std::nullopt}, 100'000)), "bad-ba-pool-too-small");
+    const CTransaction reopened{MakeTx({gold}, AddLiquidity{GOLD, CHN, 100'000, 50'000'000, 1}, {Asset(GOLD, 800'000), std::nullopt, std::nullopt}, 50'000'000)};
     BOOST_REQUIRE_MESSAGE(f.Apply(reopened, &reason), reason);
     BOOST_CHECK(!amm::Abandoned(f.state.Pools().at(id)));
     BOOST_CHECK(f.Apply(MakeTx({}, Swap{CHN, 1'000'000, GOLD, 1, CScript{}}, {std::nullopt}, 1'000'000)));
+}
+
+BOOST_AUTO_TEST_CASE(liquidity_reopen_front_run)
+{
+    // The fourth audit: a pool everyone left (only its MIN_LIQUIDITY shares nobody holds, and their
+    // dust) took a deposit at the price of its dust, both amounts whole, for the shares of the side
+    // that gave fewer. Front-running a reopening with a deposit at the dust's price, Mallory got the
+    // shares of the price she chose, then the reopener's deposit gave her its excess.
+    Fixture f;
+    const auto [control, coins]{f.Issue("GOLD", 10'000'000)};
+    const CTransaction opened{MakeTx({coins}, AddLiquidity{GOLD, CHN, 100'000, 50'000'000, 1}, {Asset(GOLD, 9'900'000), std::nullopt, std::nullopt}, 50'000'000)};
+    std::string reason;
+    BOOST_REQUIRE_MESSAGE(f.Apply(opened, &reason), reason);
+    const uint256 id{PoolId(GOLD, CHN)};
+    const uint64_t held{f.state.Pools().at(id).shares - MIN_LIQUIDITY};
+    const auto [w0, w1]{amm::Withdraw(f.state.Pools().at(id), held)};
+    BOOST_REQUIRE(f.Apply(MakeTx({COutPoint{opened.GetHash(), 1}}, RemoveLiquidity{GOLD, CHN, held, w1, w0, HOLDER}, {std::nullopt})));
+    const Pool dusty{f.state.Pools().at(id)};
+    BOOST_REQUIRE(amm::Abandoned(dusty) && dusty.asset0 == CHN);
+    const uint64_t dust_chn{dusty.reserve0}, dust_gold{dusty.reserve1};
+    BOOST_REQUIRE(dust_chn > 0 && dust_gold > 0);
+    const CTransaction split{MakeTx({COutPoint{opened.GetHash(), 0}}, std::nullopt, {Asset(GOLD, 5'000'000), Asset(GOLD, 4'900'000)})};
+    BOOST_REQUIRE(f.Apply(split));
+    const COutPoint mallory_gold{split.GetHash(), 0}, alice_gold{split.GetHash(), 1};
+    const CScript alice_script{CScript() << OP_0 << std::vector<unsigned char>(20, 7)};
+
+    // Alice reopens it at 5000 satoshis a unit: 100'000 units and 5 CHN, what the pool reopens with,
+    // the dust counted (the wallet offers the rest). Quoted: isqrt(5e13) shares, MIN_LIQUIDITY aside.
+    const uint64_t alice_chn{500'000'000 - dust_chn}, alice_units{100'000 - dust_gold};
+    const auto quote{amm::Provide(dusty, alice_chn, alice_units)};
+    BOOST_REQUIRE(quote && quote->opens);
+    BOOST_CHECK_EQUAL(quote->shares, 7'071'067u - MIN_LIQUIDITY);
+    const auto alice_tx{[&](uint64_t min_shares, bool two_results = true) {
+        std::vector<std::optional<Token>> outs{Asset(GOLD, 4'900'000 - alice_units), std::nullopt};
+        if (two_results) outs.emplace_back();
+        CMutableTransaction tx{MakeTx({alice_gold}, AddLiquidity{GOLD, CHN, alice_units, alice_chn, min_shares}, outs, alice_chn)};
+        // What comes back goes to Alice's address.
+        if (two_results) tx.vout[2].scriptPubKey = alice_script;
+        return CTransaction{tx};
+    }};
+    // Mallory, first: a deposit at the dust's price.
+    const uint64_t m_chn{5'000'000}, m_gold{m_chn * dust_gold / dust_chn};
+    const auto mallory_tx{[&](bool two_results = true) {
+        std::vector<std::optional<Token>> outs{Asset(GOLD, 5'000'000 - m_gold), std::nullopt};
+        if (two_results) outs.emplace_back();
+        return MakeTx({mallory_gold}, AddLiquidity{GOLD, CHN, m_gold, m_chn, 1}, outs, m_chn);
+    }};
+
+    {
+        // Before the fourth audit's rules (the second audit's height, here after): Alice's deposit
+        // goes in whole at the dust's price, and Mallory's shares take much more than she put in.
+        TState old{f.state};
+        TUndo undo;
+        std::vector<CTxOut> payouts;
+        const CTransaction mallory{mallory_tx(false)};
+        BOOST_REQUIRE(old.ApplyTx(mallory, f.height, undo, payouts, reason, 0, nullptr, 0, 0, f.height + 1));
+        BOOST_REQUIRE_MESSAGE(old.ApplyTx(alice_tx(1, false), f.height, undo, payouts, reason, 0, nullptr, 0, 0, f.height + 1), reason);
+        const uint64_t mallory_shares{old.Tokens().at(COutPoint{mallory.GetHash(), 1}).amount};
+        BOOST_CHECK(amm::Withdraw(old.Pools().at(id), mallory_shares).first > 5 * m_chn);
+    }
+
+    // Under the rules now, a transaction lists two result outputs: the shares, and what comes back.
+    BOOST_CHECK_EQUAL(f.Reject(mallory_tx(false)), "bad-ba-results");
+    const TState before_mallory{f.state};
+    const CTransaction mallory{mallory_tx()};
+    BOOST_REQUIRE_MESSAGE(f.Apply(mallory, &reason), reason);
+    // A reopening is a new pool, with the dust merged in: Mallory set its price.
+    const Pool reopened{f.state.Pools().at(id)};
+    BOOST_CHECK_EQUAL(reopened.reserve0, dust_chn + m_chn);
+    BOOST_CHECK_EQUAL(reopened.reserve1, dust_gold + m_gold);
+    const uint64_t mallory_shares{f.state.Tokens().at(COutPoint{mallory.GetHash(), 1}).amount};
+    BOOST_CHECK_EQUAL(reopened.shares, mallory_shares + MIN_LIQUIDITY);
+    BOOST_CHECK(!f.state.Tokens().contains(COutPoint{mallory.GetHash(), 2}));
+    // Alice's deposit, made for her price, would go in at Mallory's and give far fewer shares than
+    // quoted: refused, nothing lost.
+    BOOST_CHECK_EQUAL(f.Reject(alice_tx(quote->shares * 99 / 100)), "bad-ba-liquidity-price");
+    // Even with no least shares, nothing goes to Mallory: only what the price takes goes in, the rest
+    // of Alice's CHN comes back, by the coinbase, to the address of her second result output.
+    f.payouts.clear();
+    const CTransaction alice{alice_tx(1)};
+    BOOST_REQUIRE_MESSAGE(f.Apply(alice, &reason), reason);
+    const Pool after{f.state.Pools().at(id)};
+    BOOST_REQUIRE_EQUAL(f.payouts.size(), 1u);
+    BOOST_CHECK(f.payouts[0].scriptPubKey == alice_script);
+    // CHN and GOLD are conserved exactly: what went in and what came back are what Alice offered.
+    BOOST_CHECK_EQUAL(after.reserve0 - reopened.reserve0 + static_cast<uint64_t>(f.payouts[0].nValue), alice_chn);
+    BOOST_CHECK_EQUAL(after.reserve1 - reopened.reserve1, alice_units);
+    BOOST_CHECK(!f.state.Tokens().contains(COutPoint{alice.GetHash(), 2}));
+    // Mallory's shares are worth what she and the dust put in, rounding aside: not Alice's CHN.
+    BOOST_CHECK(amm::Withdraw(after, mallory_shares).first <= dust_chn + m_chn + 1);
+
+    // An honest race: Bob reopens it at Alice's price first. Alice's deposit goes in at that price,
+    // for at least her least shares, and the CHN its price does not take comes back.
+    Fixture g;
+    g.state = before_mallory;
+    BOOST_REQUIRE(g.state.Pools().at(id) == dusty);
+    const CTransaction bob{MakeTx({mallory_gold}, AddLiquidity{GOLD, CHN, 10'000 - dust_gold, 50'000'000 - dust_chn, 1}, {Asset(GOLD, 5'000'000 - 10'000 + dust_gold), std::nullopt, std::nullopt}, 50'000'000 - dust_chn)};
+    BOOST_REQUIRE_MESSAGE(g.Apply(bob, &reason), reason);
+    BOOST_CHECK_EQUAL(g.state.Pools().at(id).reserve0, 50'000'000u);
+    BOOST_CHECK_EQUAL(g.state.Pools().at(id).reserve1, 10'000u);
+    g.payouts.clear();
+    const CTransaction raced{alice_tx(quote->shares * 99 / 100)};
+    BOOST_REQUIRE_MESSAGE(g.Apply(raced, &reason), reason);
+    BOOST_CHECK(g.state.Tokens().at(COutPoint{raced.GetHash(), 1}).amount >= quote->shares * 99 / 100);
+    BOOST_REQUIRE_EQUAL(g.payouts.size(), 1u);
+    BOOST_CHECK(g.payouts[0].scriptPubKey == alice_script);
+
+    // Too much GOLD into a live pool: its excess comes back as GOLD, to the second result output.
+    const COutPoint more_gold{raced.GetHash(), 0};
+    const Pool live{g.state.Pools().at(id)};
+    const auto deposit{amm::Provide(live, 5'000'000, 500'000)};
+    BOOST_REQUIRE(deposit && !deposit->opens);
+    BOOST_CHECK_EQUAL(deposit->take0, 5'000'000u);
+    const uint64_t back{500'000 - deposit->take1};
+    BOOST_REQUIRE(back > 0);
+    const uint64_t have{4'900'000 - alice_units};
+    const CTransaction excess{MakeTx({more_gold}, AddLiquidity{GOLD, CHN, 500'000, 5'000'000, 1}, {Asset(GOLD, have - 500'000), std::nullopt, std::nullopt}, 5'000'000)};
+    BOOST_REQUIRE_MESSAGE(g.Apply(excess, &reason), reason);
+    BOOST_CHECK(g.state.Tokens().at(COutPoint{excess.GetHash(), 2}) == Asset(GOLD, back));
+    BOOST_CHECK_EQUAL(g.state.Pools().at(id).reserve1, live.reserve1 + deposit->take1);
+    BOOST_CHECK_EQUAL(g.state.Assets().at(GOLD).supply, 10'000'000u);
 }
 
 BOOST_AUTO_TEST_CASE(dead_assets_retire)
 {
     Fixture f;
     const auto [control, coins]{f.Issue("GOLD", 1'000'000)};
-    const CTransaction added{MakeTx({coins}, AddLiquidity{GOLD, CHN, 100'000, 50'000'000, 1}, {Asset(GOLD, 900'000), std::nullopt}, 50'000'000)};
+    const CTransaction added{MakeTx({coins}, AddLiquidity{GOLD, CHN, 100'000, 50'000'000, 1}, {Asset(GOLD, 900'000), std::nullopt, std::nullopt}, 50'000'000)};
     BOOST_REQUIRE(f.Apply(added));
     const uint256 id{PoolId(GOLD, CHN)};
     // Alive: its control coin exists, someone holds some, its pool has providers.
@@ -607,7 +728,7 @@ BOOST_AUTO_TEST_CASE(small_providers_and_dust)
     Fixture f;
     const auto [gc, gold]{f.Issue("GOLD", 20'000'000)};
     const auto [sc, silver]{f.Issue("SILVER", 2'000)};
-    const CTransaction added{MakeTx({gold, silver}, AddLiquidity{GOLD, SILVER, 10'000'000, 2'000, 1}, {Asset(GOLD, 10'000'000), std::nullopt})};
+    const CTransaction added{MakeTx({gold, silver}, AddLiquidity{GOLD, SILVER, 10'000'000, 2'000, 1}, {Asset(GOLD, 10'000'000), std::nullopt, std::nullopt})};
     std::string reason;
     BOOST_REQUIRE_MESSAGE(f.Apply(added, &reason), reason);
     const COutPoint lp{added.GetHash(), 1};
@@ -632,7 +753,7 @@ BOOST_AUTO_TEST_CASE(small_providers_and_dust)
     BOOST_CHECK_EQUAL(f.Reject(MakeTx({COutPoint{leave.GetHash(), 0}}, RemoveLiquidity{GOLD, SILVER, 10, 1, 1, CScript{}}, {Token{Token::Kind::LP, id, held - 20}, std::nullopt})), "bad-ba-liquidity-price");
 
     // With CHN: dust stays in the pool.
-    const CTransaction chn_pool{MakeTx({COutPoint{added.GetHash(), 0}}, AddLiquidity{GOLD, CHN, 100'000, 50'000'000, 1}, {Asset(GOLD, 9'900'000), std::nullopt}, 50'000'000)};
+    const CTransaction chn_pool{MakeTx({COutPoint{added.GetHash(), 0}}, AddLiquidity{GOLD, CHN, 100'000, 50'000'000, 1}, {Asset(GOLD, 9'900'000), std::nullopt, std::nullopt}, 50'000'000)};
     BOOST_REQUIRE_MESSAGE(f.Apply(chn_pool, &reason), reason);
     const uint256 chn_id{PoolId(GOLD, CHN)};
     const COutPoint chn_lp{chn_pool.GetHash(), 1};
@@ -865,7 +986,7 @@ BOOST_AUTO_TEST_CASE(revert_restores)
     const TState before{f.state};
     f.undo = TUndo{};
     // A block that makes a pool, trades in it, registers another asset and mints.
-    const CTransaction added{MakeTx({coins}, AddLiquidity{GOLD, CHN, 100'000, 50'000'000, 1}, {Asset(GOLD, 900'000), std::nullopt}, 50'000'000)};
+    const CTransaction added{MakeTx({coins}, AddLiquidity{GOLD, CHN, 100'000, 50'000'000, 1}, {Asset(GOLD, 900'000), std::nullopt, std::nullopt}, 50'000'000)};
     BOOST_REQUIRE(f.Apply(added));
     BOOST_REQUIRE(f.Apply(MakeTx({}, Swap{CHN, 10'000, GOLD, 1, CScript{}}, {std::nullopt}, 10'000)));
     BOOST_REQUIRE(f.Apply(MakeTx({control}, Mint{GOLD, 5}, {Unit(Token::Kind::CONTROL, GOLD), Asset(GOLD, 5)})));
@@ -970,7 +1091,7 @@ BOOST_AUTO_TEST_CASE(release_counts)
     // Pools: counted while someone provides liquidity to them.
     const TState before_pool{f.state};
     const TUndo undo_before{f.undo};
-    const CTransaction added{MakeTx({COutPoint{bid.GetHash(), 0}}, AddLiquidity{GOLD, CHN, 100'000, 50'000'000, 1}, {Asset(GOLD, 899'990), std::nullopt}, 50'000'000)};
+    const CTransaction added{MakeTx({COutPoint{bid.GetHash(), 0}}, AddLiquidity{GOLD, CHN, 100'000, 50'000'000, 1}, {Asset(GOLD, 899'990), std::nullopt, std::nullopt}, 50'000'000)};
     BOOST_REQUIRE_MESSAGE(f.Apply(added, &reason), reason);
     BOOST_CHECK(counts(GOLD) == (Counts{0, 1}));
     const uint256 id{PoolId(GOLD, CHN)};
@@ -986,7 +1107,7 @@ BOOST_AUTO_TEST_CASE(release_counts)
     BOOST_REQUIRE(f.Apply(MakeTx({lp}, RemoveLiquidity{GOLD, CHN, held - held / 2, 1, 1, HOLDER}, {std::nullopt})));
     BOOST_CHECK(amm::Abandoned(f.state.Pools().at(id)));
     BOOST_CHECK(counts(GOLD) == (Counts{0, 0}));
-    BOOST_REQUIRE_MESSAGE(f.Apply(MakeTx({COutPoint{added.GetHash(), 0}}, AddLiquidity{GOLD, CHN, 100'000, 50'000'000, 1}, {Asset(GOLD, 799'990), std::nullopt}, 50'000'000), &reason), reason);
+    BOOST_REQUIRE_MESSAGE(f.Apply(MakeTx({COutPoint{added.GetHash(), 0}}, AddLiquidity{GOLD, CHN, 100'000, 50'000'000, 1}, {Asset(GOLD, 799'990), std::nullopt, std::nullopt}, 50'000'000), &reason), reason);
     BOOST_CHECK(counts(GOLD) == (Counts{0, 1}));
 
     // Undone, the counts are as they were.
@@ -1033,7 +1154,7 @@ BOOST_AUTO_TEST_CASE(release_of_one_satoshi)
         const CTransaction registered{MakeTx({COutPoint{reserve.GetHash(), 0}}, reg, {Unit(Token::Kind::CONTROL, GOLD), Asset(GOLD, 10'000'000)})};
         BOOST_REQUIRE(apply(registered));
         // A pool of 10'000'000 GOLD and 1 satoshi: everyone leaves, the satoshi stays (dust stays in the pool).
-        const CTransaction added{MakeTx({COutPoint{registered.GetHash(), 1}}, AddLiquidity{GOLD, CHN, 10'000'000, 1, 1}, {std::nullopt}, 1)};
+        const CTransaction added{MakeTx({COutPoint{registered.GetHash(), 1}}, AddLiquidity{GOLD, CHN, 10'000'000, 1, 1}, {std::nullopt, std::nullopt}, 1)};
         BOOST_REQUIRE(apply(added));
         const uint256 id{PoolId(GOLD, CHN)};
         const bitassets::Pool pool{*side.BitAssets().GetPool(id)};

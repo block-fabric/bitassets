@@ -888,7 +888,11 @@ RPCMethod addliquidity()
         "Put two assets in their pool, for shares of it; this makes the pool if there is none, at the price the amounts\n"
         "set. Into a pool there is, the second amount is worked out from the first at the pool's price, unless given.\n"
         "A pool nobody provides liquidity to any more (abandoned) is reopened as a new pool is made: both amounts are\n"
-        "needed, and they set its price (what it holds is the dust it keeps for good, at a price anyone could set)." + HELP_REQUIRING_PASSPHRASE,
+        "needed, and they set its price (what it holds is the dust it keeps for good, at a price anyone could set).\n"
+        "Under the second audit's rules, the amounts given for an abandoned pool are what it reopens with: the dust it\n"
+        "holds counts toward them, and the rest goes in. Should someone else reopen or move the pool first, the\n"
+        "deposit goes in at the pool's price then, what its price does not take comes back, and it is refused if it\n"
+        "gives fewer shares than quoted, less the slippage." + HELP_REQUIRING_PASSPHRASE,
         {
             {"asset_a", RPCArg::Type::STR, RPCArg::Optional::NO, bitassets::ASSET_ARG_HELP},
             {"amount_a", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "How much of it"},
@@ -899,7 +903,7 @@ RPCMethod addliquidity()
         RPCResult{RPCResult::Type::OBJ, "", "",
         {
             {RPCResult::Type::STR_HEX, "txid", "The transaction"},
-            {RPCResult::Type::NUM, "amount_a", "What goes in of the first asset (at the pool's price, into a pool someone provides liquidity to)"},
+            {RPCResult::Type::NUM, "amount_a", "What goes in of the first asset if nothing moves the pool first (at the pool's price, into a pool someone provides liquidity to; less the dust, into an abandoned one)"},
             {RPCResult::Type::NUM, "amount_b", "And of the second"},
             {RPCResult::Type::NUM, "shares", "The shares it gives if nothing moves the pool first"},
             {RPCResult::Type::BOOL, "sets_price", "Whether the amounts set the pool's price: a new pool, or an abandoned one reopened"},
@@ -933,24 +937,58 @@ RPCMethod addliquidity()
         amount_b = static_cast<uint64_t>(b_needed);
     }
     bitassets::Pool current;
-    if (pool) current = *pool;
-    const bool a_first{pool ? pool->asset0 == a.id : a.id < b.id};
-    // Into a pool someone provides liquidity to, a deposit gets the shares of the side that gives
-    // fewer, and the rest of the other side would be given away to the pool's providers: only what
-    // the pool's price takes of it goes in (rounded up, so that it gives no fewer shares).
-    if (pool && !sets_price && current.reserve0 > 0 && current.reserve1 > 0) {
-        const uint64_t ra{a_first ? current.reserve0 : current.reserve1}, rb{a_first ? current.reserve1 : current.reserve0};
-        const unsigned __int128 sa{static_cast<unsigned __int128>(amount_a) * current.shares / ra};
-        const unsigned __int128 sb{static_cast<unsigned __int128>(amount_b) * current.shares / rb};
-        const unsigned __int128 fewer{std::min(sa, sb)};
-        const auto worth{[&](uint64_t reserve) { return static_cast<uint64_t>((fewer * reserve + current.shares - 1) / current.shares); }};
-        if (sa < sb) amount_b = worth(rb);
-        if (sb < sa) amount_a = worth(ra);
+    if (pool) {
+        current = *pool;
+    } else {
+        current.asset0 = std::min(a.id, b.id);
+        current.asset1 = std::max(a.id, b.id);
     }
-    uint64_t shares{bitassets::amm::SharesFor(current, a_first ? amount_a : amount_b, a_first ? amount_b : amount_a)};
-    if (current.shares == 0) shares = shares > bitassets::MIN_LIQUIDITY ? shares - bitassets::MIN_LIQUIDITY : 0;
+    const bool a_first{current.asset0 == a.id};
+    const bool audit2{pwallet->chain().getBitAssetsAudit2()};
+    // What the transaction offers, what goes in of it if nothing moves the pool first, and the shares.
+    uint64_t offer_a{amount_a}, offer_b{amount_b};
+    uint64_t shares{0};
+    if (audit2) {
+        // A pool everyone left holds dust, which the deposit that reopens it merges in: the amounts
+        // given are what it reopens with, at their price, and the dust counts toward them.
+        if (pool && sets_price) {
+            const uint64_t dust_a{a_first ? current.reserve0 : current.reserve1}, dust_b{a_first ? current.reserve1 : current.reserve0};
+            if (amount_a <= dust_a || amount_b <= dust_b) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("This pool holds %s %s and %s %s, left by its last providers, which count toward what it reopens with: give more than that of each",
+                                                                    bitassets::FormatUnits(dust_a, a.decimals), a.label, bitassets::FormatUnits(dust_b, b.decimals), b.label));
+            }
+            offer_a = amount_a - dust_a;
+            offer_b = amount_b - dust_b;
+        }
+        const auto deposit{bitassets::amm::Provide(current, a_first ? offer_a : offer_b, a_first ? offer_b : offer_a)};
+        if (deposit) {
+            shares = deposit->shares;
+            // Into a pool someone provides liquidity to, only what its price takes is offered: nothing
+            // comes back unless the pool moves first (then the excess does, by the rules).
+            if (!deposit->opens) {
+                offer_a = a_first ? deposit->take0 : deposit->take1;
+                offer_b = a_first ? deposit->take1 : deposit->take0;
+            }
+        }
+    } else {
+        // Into a pool someone provides liquidity to, a deposit gets the shares of the side that gives
+        // fewer, and the rest of the other side would be given away to the pool's providers: only what
+        // the pool's price takes of it goes in (rounded up, so that it gives no fewer shares).
+        if (pool && !sets_price && current.reserve0 > 0 && current.reserve1 > 0) {
+            const uint64_t ra{a_first ? current.reserve0 : current.reserve1}, rb{a_first ? current.reserve1 : current.reserve0};
+            const unsigned __int128 sa{static_cast<unsigned __int128>(amount_a) * current.shares / ra};
+            const unsigned __int128 sb{static_cast<unsigned __int128>(amount_b) * current.shares / rb};
+            const unsigned __int128 fewer{std::min(sa, sb)};
+            const auto worth{[&](uint64_t reserve) { return static_cast<uint64_t>((fewer * reserve + current.shares - 1) / current.shares); }};
+            if (sa < sb) offer_b = worth(rb);
+            if (sb < sa) offer_a = worth(ra);
+        }
+        shares = bitassets::amm::SharesFor(current, a_first ? offer_a : offer_b, a_first ? offer_b : offer_a);
+        if (current.shares == 0) shares = shares > bitassets::MIN_LIQUIDITY ? shares - bitassets::MIN_LIQUIDITY : 0;
+    }
     if (shares == 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "Too little: it makes no shares (a new pool needs the product of the amounts, in units, above a million)");
-    // Opening (or reopening an abandoned) pool takes a deposit worth trading against.
+    // Opening (or reopening an abandoned) pool takes a deposit worth trading against: what the pool
+    // holds after it (its dust merged in, under the second audit's rules) is what the amounts give.
     if (bitassets::amm::Abandoned(current)) {
         const uint64_t chn{a.id.IsNull() ? amount_a : b.id.IsNull() ? amount_b : bitassets::MIN_OPEN_CHN};
         if (shares < bitassets::MIN_OPEN_SHARES || chn < bitassets::MIN_OPEN_CHN) {
@@ -960,10 +998,15 @@ RPCMethod addliquidity()
     std::vector<COutPoint> inputs;
     std::vector<Out> outs;
     CAmount chn_in{0};
-    PayIn(*pwallet, a, amount_a, inputs, outs, chn_in);
-    PayIn(*pwallet, b, amount_b, inputs, outs, chn_in);
+    PayIn(*pwallet, a, offer_a, inputs, outs, chn_in);
+    PayIn(*pwallet, b, offer_b, inputs, outs, chn_in);
+    // The shares; under the second audit's rules, then what comes back (asset coins, or CHN the
+    // coinbase pays to its address), should the pool move first.
     outs.push_back({ChangeDestination(*pwallet), std::nullopt});
-    const CTransactionRef tx{Send(*pwallet, bitassets::AddLiquidity{a.id, b.id, amount_a, amount_b, std::max<uint64_t>(1, LessSlippage(shares, slippage))}, outs, inputs, chn_in)};
+    if (audit2) outs.push_back({ChangeDestination(*pwallet), std::nullopt});
+    const CTransactionRef tx{Send(*pwallet, bitassets::AddLiquidity{a.id, b.id, offer_a, offer_b, std::max<uint64_t>(1, LessSlippage(shares, slippage))}, outs, inputs, chn_in)};
+    amount_a = offer_a;
+    amount_b = offer_b;
     UniValue result(UniValue::VOBJ);
     result.pushKV("txid", tx->GetHash().GetHex());
     result.pushKV("amount_a", bitassets::AmountToJSON(amount_a, a.decimals));
@@ -1324,7 +1367,7 @@ RPCMethod listassetactivity()
                     summary = strprintf("Swapped %s for at least %s", amount(op.asset_in, op.amount_in), amount(op.asset_out, op.min_out));
                 } else if constexpr (std::is_same_v<T, bitassets::AddLiquidity>) {
                     operation = "add liquidity";
-                    summary = strprintf("Put %s and %s in their pool", amount(op.asset_a, op.amount_a), amount(op.asset_b, op.amount_b));
+                    summary = strprintf("Put %s and %s (at most) in their pool", amount(op.asset_a, op.amount_a), amount(op.asset_b, op.amount_b));
                 } else if constexpr (std::is_same_v<T, bitassets::RemoveLiquidity>) {
                     operation = "remove liquidity";
                     summary = strprintf("Took %s and %s out of their pool, at least", amount(op.asset_a, op.min_a), amount(op.asset_b, op.min_b));

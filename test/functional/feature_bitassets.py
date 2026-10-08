@@ -333,6 +333,37 @@ class BitAssetsTest(SidechainTest):
         self.mine_txs()
         assert_equal(side.getpool("GOLD", "CHN")["abandoned"], True)
 
+        self.log.info("Reopening a pool cannot be front-run")
+        dust = side.getpool("GOLD", "CHN")
+        assert_greater_than(dust["reserve_a"], 0)
+        # The dust counts toward what the pool reopens with: amounts not above it are refused.
+        assert_raises_rpc_error(-8, "count toward what it reopens with", side.addliquidity, "GOLD", dust["reserve_a"], "CHN", 1)
+        gold_before = self.holding(side, "GOLD")["balance"]
+        # Alice reopens it at 0.01 CHN a GOLD; her transaction waits while Mallory's, at the price of the
+        # dust (0.002), is mined first.
+        alice = side.addliquidity("GOLD", 200, "CHN", 2)
+        assert_equal(alice["sets_price"], True)
+        assert_equal(alice["amount_a"], Decimal(200) - dust["reserve_a"])
+        assert_equal(alice["amount_b"], Decimal(2) - dust["reserve_b"])
+        side.prioritisetransaction(alice["txid"], 0, -100000000)
+        mallory = other.addliquidity("GOLD", 25, "CHN", "0.05")
+        self.sync_mempools()
+        block = self.mine_txs()
+        assert mallory["txid"] in [tx["txid"] for tx in block["tx"]]
+        # Mallory's amounts, the dust merged in, are what the pool reopened with: her price.
+        pool = side.getpool("GOLD", "CHN")
+        assert_equal((pool["reserve_a"], pool["reserve_b"]), (Decimal("25.00"), Decimal("0.05000000")))
+        assert_equal(pool["price"], Decimal("0.002"))
+        # Alice's deposit would now go in at Mallory's price, for far fewer shares than quoted: it
+        # left the mempool, and nothing of hers went to Mallory.
+        assert alice["txid"] not in side.getrawmempool()
+        side.abandontransaction(alice["txid"])
+        assert_equal(self.holding(side, "GOLD")["balance"], gold_before)
+        assert_equal([l["pool"] for l in side.listmyassets()["liquidity"]], [])
+        # Mallory's shares are worth what she put in, not more.
+        mine = other.listmyassets()["liquidity"][0]
+        assert mine["value_a"] <= Decimal("25.00") and mine["value_b"] <= Decimal("0.05000000")
+
         self.log.info("A dead asset is retired: its pools' CHN go to mainchain miners")
         side.reserveasset("DEAD")
         self.mine_txs()

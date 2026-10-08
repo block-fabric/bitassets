@@ -52,10 +52,30 @@ spends a token without carrying it on, or outputs one it does not have, is inval
 - `addliquidity` puts both assets in, for shares of the pool (tokens like any other). The first
   deposit makes the pool and sets its price; it keeps 1000 shares for good, so that a pool is never
   emptied. Later deposits go in at the pool's price.
+- **The amounts of a deposit are the most that goes in** (the fourth audit's rules, from
+  `bitassets_audit2_height`). Into a pool someone provides liquidity to, the side that gives fewer
+  shares goes in whole and, of the other, only what those shares are worth at the pool's price
+  (rounded up: the pool never loses); the rest comes back. The marker lists two result outputs: the
+  shares, then what comes back — asset coins, or CHN paid by the coinbase to that output's address
+  (less than the least CHN paid out stays in the pool); it carries nothing if nothing comes back.
+  Nothing a deposit offers is given away to the pool's providers. (Before these rules, both amounts
+  went in whole, for the shares of the side that gave fewer: the wallet offers only what the pool's
+  price takes.)
 - A pool everyone has left (*abandoned*: only the 1000 shares nobody holds) takes no trades, and is
-  reopened as a new pool is made: the wallet and the window want both amounts, which set its price,
-  and say so. What it holds is dust, at whatever price the last trade or provider left it — a price
-  anyone can set, which nobody should deposit at unawares.
+  reopened as a new pool is made: shares are the square root of the product of what it holds after
+  the deposit, 1000 of them kept for good, and both amounts go in. What it held — dust, at whatever
+  price the last trade or provider left it — is merged in: the wallet takes the amounts given as what
+  the pool reopens with, and puts in the rest, so that they set its price exactly (it refuses
+  amounts not above the dust). Before these rules, a deposit into an abandoned pool went in at the
+  dust's price, for the shares of the side that gave fewer: someone who reopened it first at the
+  dust's price, just before a reopening, took the reopener's excess.
+- **A reopening cannot be front-run.** Whoever's deposit opens the pool first sets its price;
+  another deposit made for another price then goes in at that price, its excess back, and is refused
+  if it gives fewer shares than the slippage allows (the shares of a deposit fall with the square
+  root of how far the price is from its own). Making a reopening fail takes reopening the pool
+  oneself, with at least 0.01 CHN on a CHN side and 100000 shares, at a price anyone can trade
+  against, or arbitrage by a swap before adding; leaving again leaves the 1000 shares' part behind,
+  as dust for the next reopener.
 - `swapasset` pays one asset in and takes at least an amount of the other out (the slippage the
   trade accepts); `quoteswap` says what a trade gives now. `removeliquidity` gives shares back for
   both assets; a side that rounds to nothing is left out, so that a small provider can always leave.
@@ -88,7 +108,8 @@ what it sells.
 
 CHN that goes into a pool or an auction leaves circulation: the marker burns it (its value is the
 CHN the operation takes in, exactly). CHN that comes out is paid by the coinbase of the block, as
-deposits are, to the address the transaction names. Asset coins that come out go to the *result*
+deposits are, to the address the transaction names (for a deposit into a pool, the address of its
+second result output). Asset coins that come out go to the *result*
 outputs the marker lists, in the amount the state gives when the block is connected — never less
 than the transaction asks for.
 

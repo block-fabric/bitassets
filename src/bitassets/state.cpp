@@ -415,6 +415,37 @@ uint64_t SharesFor(const Pool& pool, uint64_t amount0, uint64_t amount1)
     return shares > MAX_AMOUNT ? 0 : static_cast<uint64_t>(shares);
 }
 
+std::optional<Deposit> Provide(const Pool& pool, uint64_t amount0, uint64_t amount1)
+{
+    if (amount0 == 0 || amount1 == 0 || amount0 > MAX_AMOUNT || amount1 > MAX_AMOUNT) return std::nullopt;
+    if (Abandoned(pool)) {
+        // As a new pool is made, with what it holds (the dust everyone left) merged in.
+        const auto r0{Add(pool.reserve0, amount0)}, r1{Add(pool.reserve1, amount1)};
+        if (!r0 || !r1) return std::nullopt;
+        const uint64_t total{Isqrt(static_cast<unsigned __int128>(*r0) * *r1)};
+        if (total <= MIN_LIQUIDITY) return std::nullopt;
+        return Deposit{total - MIN_LIQUIDITY, amount0, amount1, /*opens=*/true};
+    }
+    if (pool.reserve0 == 0 || pool.reserve1 == 0) return std::nullopt;
+    const unsigned __int128 s0{static_cast<unsigned __int128>(amount0) * pool.shares / pool.reserve0};
+    const unsigned __int128 s1{static_cast<unsigned __int128>(amount1) * pool.shares / pool.reserve1};
+    const unsigned __int128 shares{std::min(s0, s1)};
+    if (shares == 0 || shares > MAX_AMOUNT) return std::nullopt;
+    // What the shares are worth of a reserve, rounded up: at most the amount offered, as the shares
+    // are at most what that amount gives.
+    const auto worth{[&](uint64_t reserve) { return static_cast<uint64_t>((shares * reserve + pool.shares - 1) / pool.shares); }};
+    Deposit deposit{static_cast<uint64_t>(shares), amount0, amount1, /*opens=*/false};
+    if (s0 <= s1) {
+        deposit.take1 = worth(pool.reserve1);
+    } else {
+        deposit.take0 = worth(pool.reserve0);
+    }
+    // CHN goes back by the coinbase: dust stays in the pool, for its providers.
+    if (pool.asset0.IsNull() && amount0 - deposit.take0 < MIN_CHN_PAYOUT) deposit.take0 = amount0;
+    if (pool.asset1.IsNull() && amount1 - deposit.take1 < MIN_CHN_PAYOUT) deposit.take1 = amount1;
+    return deposit;
+}
+
 double PriceImpact(uint64_t reserve_in, uint64_t reserve_out, uint64_t amount_in, uint64_t amount_out)
 {
     if (reserve_in == 0 || reserve_out == 0 || amount_in == 0) return 100.0;
@@ -560,6 +591,9 @@ struct State::Plan {
     std::vector<uint256> pools_gone;
     std::optional<AssetId> asset_gone;
     CAmount released{0};
+    //! An AddLiquidity under the second audit's rules: its two results (the shares, then what goes
+    //! back) go to its two result outputs, the second carrying nothing if nothing, or CHN, goes back.
+    bool returns{false};
     //! Whether the transaction is one of the assets (has a marker or spends tokens): it writes the layout.
     bool assets_tx{false};
 };
@@ -1107,27 +1141,60 @@ std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, s
         const bool a_first{pool.asset0 == add->asset_a};
         const uint64_t amount0{a_first ? add->amount_a : add->amount_b};
         const uint64_t amount1{a_first ? add->amount_b : add->amount_a};
-        const bool fresh{pool.shares == 0};
-        const uint64_t shares{amm::SharesFor(pool, amount0, amount1)};
-        // A new pool keeps MIN_LIQUIDITY of its shares for good.
-        const uint64_t given{fresh ? shares - std::min(shares, MIN_LIQUIDITY) : shares};
-        if (given == 0 || given < add->min_shares) return invalid("bad-ba-liquidity-price");
-        // A pool opens, or reopens, with a deposit worth trading against, not dust.
-        if (pool_rules && amm::Abandoned(pool)) {
-            const uint64_t chn_in{pool.asset0.IsNull() ? amount0 : pool.asset1.IsNull() ? amount1 : MIN_OPEN_CHN};
-            if (given < MIN_OPEN_SHARES || chn_in < MIN_OPEN_CHN) return invalid("bad-ba-pool-too-small");
+        if (audit2) {
+            // The amounts are the most that goes in: at the pool's price, the rest back; or they open
+            // the pool (amm::Provide). Whoever opens a pool first sets its price: a deposit made for
+            // another price goes in at it, or gives fewer shares than it asks for and is refused.
+            if (!Add(pool.reserve0, amount0) || !Add(pool.reserve1, amount1)) return invalid("bad-ba-liquidity");
+            const auto deposit{amm::Provide(pool, amount0, amount1)};
+            if (!deposit || deposit->shares < add->min_shares) return invalid("bad-ba-liquidity-price");
+            if (deposit->opens) {
+                // A pool opens, or reopens, with a deposit worth trading against, not dust.
+                const uint64_t chn_after{pool.asset0.IsNull() ? pool.reserve0 + amount0 : pool.asset1.IsNull() ? pool.reserve1 + amount1 : MIN_OPEN_CHN};
+                if (pool_rules && (deposit->shares < MIN_OPEN_SHARES || chn_after < MIN_OPEN_CHN)) return invalid("bad-ba-pool-too-small");
+                // The MIN_LIQUIDITY shares nobody held (of the pool everyone left) give way to those of the new one.
+                pool.shares = deposit->shares + MIN_LIQUIDITY;
+            } else {
+                const auto total{Add(pool.shares, deposit->shares)};
+                if (!total) return invalid("bad-ba-liquidity");
+                pool.shares = *total;
+            }
+            pool.reserve0 += deposit->take0;
+            pool.reserve1 += deposit->take1;
+            // All of what the transaction offers is taken in; what goes back is a result.
+            take(add->asset_a, add->amount_a);
+            take(add->asset_b, add->amount_b);
+            const uint64_t back0{amount0 - deposit->take0}, back1{amount1 - deposit->take1};
+            // Only the side that gives more shares has any back.
+            if (back0 > 0 && back1 > 0) return invalid("bad-ba-liquidity");
+            plan.results.push_back({id, deposit->shares});
+            plan.results.push_back(back0 > 0 ? Result{pool.asset0, back0} : Result{pool.asset1, back1});
+            plan.returns = true;
+            plan.pool = std::make_pair(id, pool);
+        } else {
+            // Before, both amounts went in whole, and a pool everyone left took them at the price of its dust.
+            const bool fresh{pool.shares == 0};
+            const uint64_t shares{amm::SharesFor(pool, amount0, amount1)};
+            // A new pool keeps MIN_LIQUIDITY of its shares for good.
+            const uint64_t given{fresh ? shares - std::min(shares, MIN_LIQUIDITY) : shares};
+            if (given == 0 || given < add->min_shares) return invalid("bad-ba-liquidity-price");
+            // A pool opens, or reopens, with a deposit worth trading against, not dust.
+            if (pool_rules && amm::Abandoned(pool)) {
+                const uint64_t chn_in{pool.asset0.IsNull() ? amount0 : pool.asset1.IsNull() ? amount1 : MIN_OPEN_CHN};
+                if (given < MIN_OPEN_SHARES || chn_in < MIN_OPEN_CHN) return invalid("bad-ba-pool-too-small");
+            }
+            const auto r0{Add(pool.reserve0, amount0)};
+            const auto r1{Add(pool.reserve1, amount1)};
+            const auto total{Add(pool.shares, shares)};
+            if (!r0 || !r1 || !total) return invalid("bad-ba-liquidity");
+            pool.reserve0 = *r0;
+            pool.reserve1 = *r1;
+            pool.shares = *total;
+            take(add->asset_a, add->amount_a);
+            take(add->asset_b, add->amount_b);
+            plan.results.push_back({id, given});
+            plan.pool = std::make_pair(id, pool);
         }
-        const auto r0{Add(pool.reserve0, amount0)};
-        const auto r1{Add(pool.reserve1, amount1)};
-        const auto total{Add(pool.shares, shares)};
-        if (!r0 || !r1 || !total) return invalid("bad-ba-liquidity");
-        pool.reserve0 = *r0;
-        pool.reserve1 = *r1;
-        pool.shares = *total;
-        take(add->asset_a, add->amount_a);
-        take(add->asset_b, add->amount_b);
-        plan.results.push_back({id, given});
-        plan.pool = std::make_pair(id, pool);
     } else if (const auto* remove{op ? std::get_if<RemoveLiquidity>(op) : nullptr}) {
         const uint256 id{PoolId(remove->asset_a, remove->asset_b)};
         const auto found{GetPool(id)};
@@ -1245,9 +1312,28 @@ std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, s
     // The CHN taken in are what the marker burns: no more, no less.
     if (static_cast<uint64_t>(chn_in) != chn_taken) return invalid("bad-ba-marker-value");
 
-    // The results: CHN by the coinbase, tokens to the result outputs, in order.
-    std::vector<Token> result_tokens;
-    for (const Result& result : plan.results) {
+    // The results: CHN by the coinbase, tokens to the result outputs, in order; what each result
+    // output carries (nothing, for one that takes CHN back from an AddLiquidity, or nothing back).
+    std::vector<std::optional<Token>> result_tokens;
+    if (plan.returns) {
+        if (result_outputs != 2 || plan.results.size() != 2) return invalid("bad-ba-results");
+        result_tokens.push_back(Token{Token::Kind::LP, plan.results[0].asset, plan.results[0].amount});
+        const Result& back{plan.results[1]};
+        if (back.amount == 0) {
+            result_tokens.emplace_back();
+        } else if (back.asset.IsNull()) {
+            // Paid by the coinbase to the script of the second result output (AddLiquidity names no
+            // other): CHN that went in, burned by the marker, comes out.
+            size_t seen{0};
+            for (const MarkerOutput& out : marker->outputs) {
+                if (!out.token && seen++ == 1) plan.payouts.emplace_back(static_cast<CAmount>(back.amount), tx.vout[out.n].scriptPubKey);
+            }
+            result_tokens.emplace_back();
+        } else {
+            result_tokens.push_back(Token{Token::Kind::ASSET, back.asset, back.amount});
+        }
+    }
+    for (const Result& result : plan.returns ? std::vector<Result>{} : plan.results) {
         if (result.asset.IsNull()) {
             const CScript* chn_to{op ? ChnTo(*op) : nullptr};
             if (!chn_to || chn_to->empty()) return invalid("bad-ba-chn-to");
@@ -1271,7 +1357,8 @@ std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, s
     for (const auto& [n, token] : explicit_outputs) plan.created.emplace_back(COutPoint{txid, n}, token);
     size_t next_result{0};
     for (const MarkerOutput& out : marker->outputs) {
-        if (!out.token) plan.created.emplace_back(COutPoint{txid, out.n}, result_tokens[next_result++]);
+        if (out.token) continue;
+        if (const auto& token{result_tokens[next_result++]}) plan.created.emplace_back(COutPoint{txid, out.n}, *token);
     }
     return plan;
 }

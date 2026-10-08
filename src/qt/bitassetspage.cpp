@@ -1194,12 +1194,20 @@ QWidget* BitAssetsPage::createTradeTab()
             if (m_lq_amount_b->text().isEmpty()) return say(abandoned ? tr("Nobody provides liquidity to this pool: give both amounts, which set its price.") : tr("A new pool: give both amounts, which set its price."), true);
             args.push_back(m_lq_amount_b->text().toStdString());
             const QString question{abandoned ? tr("Reopen the %1 / %2 pool with %3 %1 and %4 %2? Nobody provides liquidity to it: these amounts set its price, "
-                                                  "whatever price it was left at. Check it is the price you want.")
-                                             : tr("Make the %1 / %2 pool with %3 %1 and %4 %2? Its price starts at what these amounts set.")};
-            if (!confirm(abandoned ? tr("Reopen a pool") : tr("Make a pool"), question.arg(a, b, m_lq_amount_a->text(), m_lq_amount_b->text()), abandoned)) return;
+                                                  "whatever price it was left at. Check it is the price you want. The dust it holds (%5 %1 and %6 %2) counts "
+                                                  "toward them: you put in the rest. Should someone reopen it first, your deposit goes in at their price, "
+                                                  "what it does not take comes back, and it is refused if it would give fewer shares than quoted.")
+                                                   .arg(a, b, m_lq_amount_a->text(), m_lq_amount_b->text(), Num((*pool)["reserve_a"]), Num((*pool)["reserve_b"]))
+                                             : tr("Make the %1 / %2 pool with %3 %1 and %4 %2? Its price starts at what these amounts set.").arg(a, b, m_lq_amount_a->text(), m_lq_amount_b->text())};
+            if (!confirm(abandoned ? tr("Reopen a pool") : tr("Make a pool"), question, abandoned)) return;
         }
         if (const auto r{call("addliquidity", args, true)}) {
-            say(tr("Adding %1 %2 and %3 %4 to their pool with the next block.").arg(Num((*r)["amount_a"]), a, Num((*r)["amount_b"]), b));
+            if (sets_price) {
+                say(tr("%1 the %2 / %3 pool with %4 %2 and %5 %3, with the next block.").arg(abandoned ? tr("Reopening") : tr("Making"), a, b, m_lq_amount_a->text(), m_lq_amount_b->text()));
+            } else {
+                say(tr("Adding %1 %2 and %3 %4 to their pool with the next block, at its price: should it move first, what its price does not take comes back.")
+                        .arg(Num((*r)["amount_a"]), a, Num((*r)["amount_b"]), b));
+            }
             m_lq_amount_a->clear();
             m_lq_amount_b->clear();
             m_pools_listed.clear();
@@ -1285,8 +1293,10 @@ void BitAssetsPage::updateLiquidityQuote()
         const QString price{qa > 0 && qb > 0 ? tr("at 1 %1 = %2 %3").arg(a, QString::number(qb / qa, 'g', 10), b) : QString{}};
         if (abandoned) {
             m_lq_line->setText(tr("<span style='color:%1'><b>Nobody provides liquidity to this pool any more.</b></span> It holds only the dust every pool "
-                                  "keeps, at whatever price it was left at (anyone can set it): your amounts set its price, as for a new pool. %2")
-                                   .arg(QLatin1String(ORANGE), price.isEmpty() ? tr("Give both amounts.") : tr("It reopens %1.").arg(price)));
+                                  "keeps (%3 %4 and %5 %6), at whatever price it was left at (anyone can set it): your amounts set its price, as for a new "
+                                  "pool, and the dust counts toward them. %2")
+                                   .arg(QLatin1String(ORANGE), price.isEmpty() ? tr("Give both amounts.") : tr("It reopens %1.").arg(price),
+                                        Num((*pool)["reserve_a"]), a, Num((*pool)["reserve_b"]), b));
         } else {
             m_lq_line->setText(price.isEmpty() ? tr("A new pool: your amounts set its price.") : tr("A new pool, %1.").arg(price));
         }

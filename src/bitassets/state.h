@@ -282,7 +282,17 @@ struct Swap {
     friend bool operator==(const Swap&, const Swap&) = default;
 };
 
-/** Put two assets in their pool (making it, if there is none). Result: the shares, at least `min_shares`. */
+/**
+ * Put two assets in their pool (making it, if there is none). Result: the shares, at least `min_shares`.
+ *
+ * Under the second audit's rules (amm::Provide), the amounts are the most that goes in, and the
+ * marker lists two result outputs: the shares, then what goes back. Into a pool someone provides
+ * liquidity to, the side that gives fewer shares goes in whole, and of the other only what those
+ * shares are worth at the pool's price: the rest goes back, as asset coins to the second result
+ * output, or, for CHN, paid by the coinbase to its script (CHN under MIN_CHN_PAYOUT stays in the
+ * pool). A new pool, or one nobody provides liquidity to any more, is opened by the amounts as a
+ * new pool is made, what it holds merged in, and nothing goes back: the second output carries nothing.
+ */
 struct AddLiquidity {
     static constexpr uint8_t KIND{7};
     AssetId asset_a;
@@ -563,6 +573,28 @@ uint64_t SwapOut(uint64_t reserve_in, uint64_t reserve_out, uint64_t amount_in);
 std::optional<uint64_t> SwapIn(uint64_t reserve_in, uint64_t reserve_out, uint64_t amount_out);
 /** The shares adding `amount0` and `amount1` to a pool makes (MIN_LIQUIDITY included for a new pool); 0 if none. */
 uint64_t SharesFor(const Pool& pool, uint64_t amount0, uint64_t amount1);
+/** What a deposit does under the second audit's rules (Provide). */
+struct Deposit {
+    //! The shares it gives (for a pool it opens, MIN_LIQUIDITY more are kept for good).
+    uint64_t shares{0};
+    //! What goes into the pool of each asset; the rest of what the deposit offers goes back.
+    uint64_t take0{0};
+    uint64_t take1{0};
+    //! Whether it opens the pool: a new one, or one nobody provides liquidity to any more (Abandoned).
+    bool opens{false};
+};
+/**
+ * A deposit of at most `amount0` and `amount1` into a pool, under the second audit's rules; nullopt
+ * if it gives no shares. Into a pool someone provides liquidity to, it gives the shares of the side
+ * that gives fewer, which goes in whole; of the other side, what those shares are worth, rounded up
+ * (the pool never loses), unless what would go back is CHN under MIN_CHN_PAYOUT (it goes in too). A
+ * pool nobody provides liquidity to (a new one, or one everyone left) is opened as a new pool is
+ * made, with what it holds merged in: isqrt of the product of its reserves after, MIN_LIQUIDITY of
+ * them kept for good; both amounts go in. Its price is then the deposit's, its dust aside: nobody's
+ * deposit can be taken in at the price of the dust, and a deposit that comes after another opened
+ * the pool goes in at that one's price, its excess back, or is refused by its least shares.
+ */
+std::optional<Deposit> Provide(const Pool& pool, uint64_t amount0, uint64_t amount1);
 /** What `shares` take out of a pool. */
 std::pair<uint64_t, uint64_t> Withdraw(const Pool& pool, uint64_t shares);
 /** The same under the second audit's rules: CHN below MIN_CHN_PAYOUT is not taken out, it stays in the pool. */
