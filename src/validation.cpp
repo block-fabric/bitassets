@@ -114,6 +114,9 @@ const std::vector<std::string> CHECKLEVEL_DOC {
  *  noticeably interfere with the pruning mechanism.
  * */
 static constexpr int PRUNE_LOCK_BUFFER{10};
+/** Largest BMM request or deposit the mempool takes (see PreChecks): ten times a TRUC child,
+ *  room for a deposit paid from a hundred and more inputs. */
+static constexpr int64_t MAX_DRIVECHAIN_TX_VSIZE{10 * TRUC_CHILD_MAX_VSIZE};
 
 // Return whether the completed full flush should compact chainstate
 static bool ShouldCompactChainstate(bool in_ibd)
@@ -978,7 +981,28 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
                 return slot && *slot < max_sidechains;
             });
         }};
-        const bool drivechain_tx{drivechain::GetBmmRequest(tx).has_value() || is_treasury(tx)};
+        const bool bmm_request{drivechain::GetBmmRequest(tx).has_value()};
+        const bool drivechain_tx{bmm_request || is_treasury(tx)};
+        // Whatever its parents: a BMM request, which the next request of its sidechain has to
+        // replace, and a deposit, which the next treasury transaction of its sidechain spends,
+        // are kept small, so that a large one at a low fee rate cannot make replacing or
+        // following it expensive. (A withdrawal, of any size, pays a bundle the miners voted through.)
+        if (drivechain_tx && GetVirtualTransactionSize(tx) > MAX_DRIVECHAIN_TX_VSIZE) {
+            bool withdrawal{false};
+            for (const CTxIn& in : tx.vin) {
+                const CTxOut& spent{m_view.AccessCoin(in.prevout).out};
+                const auto slot{drivechain::ParseEscrowScript(spent.scriptPubKey)};
+                if (!slot || *slot >= max_sidechains) continue;
+                withdrawal = std::any_of(tx.vout.begin(), tx.vout.end(), [&](const CTxOut& out) {
+                    return drivechain::ParseEscrowScript(out.scriptPubKey) == slot && out.nValue < spent.nValue;
+                });
+                break;
+            }
+            if (bmm_request || !withdrawal) {
+                return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "dc-tx-too-large",
+                                     strprintf("a %s of more than %u vbytes", bmm_request ? "BMM request" : "deposit", MAX_DRIVECHAIN_TX_VSIZE));
+            }
+        }
         for (const CTxIn& in : tx.vin) {
             const CTransactionRef parent{m_pool.get(in.prevout.hash)};
             if (!parent || in.prevout.n >= parent->vout.size()) continue;

@@ -233,6 +233,34 @@ class DrivechainRulesTest(BitcoinTestFramework):
         assert chained_txid in node.getblock(block)["tx"]
         self.sync_all()
 
+        self.log.info("A BMM request or a deposit is small whatever its parents: confirmed ones do not let a large one in")
+        filler = [CTxOut(10000, address_to_scriptpubkey(node.getnewaddress())) for _ in range(330)]
+        coin = [u for u in node.listunspent(1) if u["amount"] >= 1][0]
+        ctip = node.getsidechain(SLOT)["escrow"]
+        large = CTransaction()
+        large.vin = [CTxIn(COutPoint(int(ctip["txid"], 16), ctip["n"])), CTxIn(COutPoint(int(coin["txid"], 16), coin["vout"]))]
+        large.vout = [CTxOut(int((ctip["amount"] + Decimal("0.5")) * COIN), bytes.fromhex(escrow_script)),
+                      CTxOut(0, CScript([OP_RETURN, b"dest"])),
+                      CTxOut(int((coin["amount"] - Decimal("0.5") - Decimal("0.01")) * COIN) - 330 * 10000, address_to_scriptpubkey(node.getnewaddress()))] + filler
+        large_signed = node.signrawtransactionwithwallet(large.serialize().hex())["hex"]
+        assert node.decoderawtransaction(large_signed)["vsize"] > 10000
+        assert_raises_rpc_error(-26, "dc-tx-too-large", node.sendrawtransaction, large_signed)
+        # A large BMM request, paid from a confirmed coin.
+        request = node.createbmmrequest(SLOT, "77" * 32, Decimal("0.001"))
+        request_out = node.getrawtransaction(request["txid"], True)["vout"][0]
+        large = CTransaction()
+        large.vin = [CTxIn(COutPoint(int(coin["txid"], 16), coin["vout"]))]
+        large.vout = [CTxOut(int(request_out["value"] * COIN), bytes.fromhex(request_out["scriptPubKey"]["hex"])),
+                      CTxOut(int((coin["amount"] - Decimal("0.01")) * COIN) - 330 * 10000, address_to_scriptpubkey(node.getnewaddress()))] + filler
+        large_signed = node.signrawtransactionwithwallet(large.serialize().hex())["hex"]
+        assert_raises_rpc_error(-26, "dc-tx-too-large", node.sendrawtransaction, large_signed)
+        # Honest ones go through.
+        assert request["txid"] in node.getrawmempool()
+        deposit = node.createsidechaindeposit(SLOT, "dest", 1)
+        assert deposit["txid"] in node.getrawmempool()
+        self.mine()
+        self.sync_all()
+
     def test_wallet_avoids_pinned_parents(self):
         self.log.info("The wallet pays nothing but small BMM requests from the unconfirmed change of a BMM request")
         node = self.nodes[0]
