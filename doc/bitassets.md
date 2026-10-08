@@ -113,10 +113,11 @@ second result output). Asset coins that come out go to the *result*
 outputs the marker lists, in the amount the state gives when the block is connected — never less
 than the transaction asks for.
 
-The least CHN paid out is 1000 satoshis (each payout takes a place in the coinbase's queue, which
-pays a bounded number per block): a swap or a bid that would pay less is refused; less taken out of a
-pool stays in it, for its providers; less from collecting an auction is not paid (it was burned when
-it went in).
+The least CHN paid out is 50000 satoshis, 0.0005 CHN (each payout takes a place in the coinbase's
+queue, which pays a bounded number per block: 500 of the sidechain's own; filling it with payouts of
+1000 satoshis, as under the second audit's rules, took next to nothing): a swap or a bid that would
+pay less is refused; less taken out of a pool, or coming back from a deposit, stays in it, for its
+providers; less from collecting an auction is not paid (it was burned when it went in).
 
 ## Rules by height
 

@@ -4,6 +4,8 @@
 
 #include <qt/bitassetspage.h>
 
+#include <bitassets/state.h>
+
 #include <qt/clientmodel.h>
 #include <qt/itemviews.h>
 #include <qt/qrimagewidget.h>
@@ -1259,6 +1261,16 @@ void BitAssetsPage::updateQuote()
     const auto quote{NodeRpc::Call(m_client_model, "quoteswap", Args({pay_arg.toStdString(), amount.toStdString(), get_arg.toStdString()}), error)};
     if (!quote) return m_quote_line->setText(QStringLiteral("<span style='color:%1'>%2</span>").arg(QLatin1String(RED), error.toHtmlEscaped()));
     m_get_amount->setText(Num((*quote)["amount_out"]));
+    // CHN a pool pays out is at least MIN_CHN_PAYOUT (the second audit's rules): less is refused.
+    if (get_arg == QLatin1String("CHN")) {
+        const auto info{call("getbitassetsinfo", UniValue{UniValue::VARR}, false, true)};
+        const bool audit2{info && (*info)["height"].getInt<int>() >= (*info)["audit2_height"].getInt<int>()};
+        const double least{static_cast<double>(bitassets::MIN_CHN_PAYOUT) / COIN};
+        if (audit2 && QString::fromStdString((*quote)["amount_out"].getValStr()).toDouble() < least) {
+            m_quote_line->setText(tr("<span style='color:%1'>Too little: the least CHN a pool pays out is %2 CHN.</span>").arg(QLatin1String(RED), QString::number(least, 'f', 8)));
+            return;
+        }
+    }
     const double impact{(*quote)["price_impact"].get_real()};
     const int decimals{m_decimals.contains(get_arg) ? m_decimals.at(get_arg) : 0};
     const double least{QString::fromStdString((*quote)["amount_out"].getValStr()).toDouble() * (1 - m_slippage->value() / 100)};

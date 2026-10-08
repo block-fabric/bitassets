@@ -774,7 +774,9 @@ BOOST_AUTO_TEST_CASE(small_providers_and_dust)
     const COutPoint some_gold{chn_pool.GetHash(), 0};
     BOOST_CHECK(amm::SwapOut(100'000, chn_before, 1) < MIN_CHN_PAYOUT);
     BOOST_CHECK_EQUAL(f.Reject(MakeTx({some_gold}, Swap{GOLD, 1, CHN, 1, HOLDER}, {Asset(GOLD, 9'899'999)})), "bad-ba-chn-dust");
-    BOOST_CHECK(f.Apply(MakeTx({some_gold}, Swap{GOLD, 10, CHN, 1, HOLDER}, {Asset(GOLD, 9'899'990)})));
+    BOOST_CHECK_EQUAL(f.Reject(MakeTx({some_gold}, Swap{GOLD, 10, CHN, 1, HOLDER}, {Asset(GOLD, 9'899'990)})), "bad-ba-chn-dust");
+    BOOST_CHECK(amm::SwapOut(100'000, chn_before, 200) >= MIN_CHN_PAYOUT);
+    BOOST_CHECK(f.Apply(MakeTx({some_gold}, Swap{GOLD, 200, CHN, 1, HOLDER}, {Asset(GOLD, 9'899'800)})));
 
     // Collecting CHN dust from an auction: not paid out.
     Fixture g;
@@ -853,8 +855,8 @@ BOOST_AUTO_TEST_CASE(auctions)
 {
     Fixture f;
     const auto [control, coins]{f.Issue("GOLD", 100)};
-    CreateAuction create{GOLD, 40, CHN, 4'000, 400, f.height + 1, 10};
-    BOOST_CHECK_EQUAL(f.Reject(MakeTx({coins}, CreateAuction{GOLD, 40, CHN, 4'000, 400, f.height - 1, 10}, {Asset(GOLD, 60), Unit(Token::Kind::RECEIPT, uint256{})})), "bad-ba-auction-started");
+    CreateAuction create{GOLD, 40, CHN, 400'000, 40'000, f.height + 1, 10};
+    BOOST_CHECK_EQUAL(f.Reject(MakeTx({coins}, CreateAuction{GOLD, 40, CHN, 400'000, 40'000, f.height - 1, 10}, {Asset(GOLD, 60), Unit(Token::Kind::RECEIPT, uint256{})})), "bad-ba-auction-started");
     BOOST_CHECK_EQUAL(f.Reject(MakeTx({coins}, create, {Asset(GOLD, 60)})), "bad-ba-tokens-lost");
     const CTransaction made{MakeTx({coins}, create, {Asset(GOLD, 60), Unit(Token::Kind::RECEIPT, uint256{})})};
     BOOST_REQUIRE(f.Apply(made));
@@ -863,33 +865,33 @@ BOOST_AUTO_TEST_CASE(auctions)
     BOOST_CHECK(f.state.Tokens().at(receipt) == Unit(Token::Kind::RECEIPT, id.ToUint256()));
 
     // Not started yet.
-    BOOST_CHECK_EQUAL(f.Reject(MakeTx({}, Bid{id, 1'000, 1, CScript{}}, {std::nullopt}, 1'000)), "bad-ba-auction-closed");
+    BOOST_CHECK_EQUAL(f.Reject(MakeTx({}, Bid{id, 100'000, 1, CScript{}}, {std::nullopt}, 100'000)), "bad-ba-auction-closed");
     // Canceled before any bid, everything back: possible, but not now.
     f.height = 101;
-    // A bid of 1000 at the start (4000 for 40) buys 10.
-    const CTransaction bid{MakeTx({}, Bid{id, 1'000, 10, CScript{}}, {std::nullopt}, 1'000)};
+    // A bid of 100000 at the start (400000 for 40) buys 10.
+    const CTransaction bid{MakeTx({}, Bid{id, 100'000, 10, CScript{}}, {std::nullopt}, 100'000)};
     std::string reason;
     BOOST_REQUIRE_MESSAGE(f.Apply(bid, &reason), reason);
     BOOST_CHECK(f.state.Tokens().at(COutPoint{bid.GetHash(), 0}) == Asset(GOLD, 10));
     BOOST_CHECK_EQUAL(f.state.Auctions().at(id).remaining, 30u);
     // More than is left: refused.
-    BOOST_CHECK_EQUAL(f.Reject(MakeTx({}, Bid{id, 4'000, 1, CScript{}}, {std::nullopt}, 4'000)), "bad-ba-bid-price");
+    BOOST_CHECK_EQUAL(f.Reject(MakeTx({}, Bid{id, 400'000, 1, CScript{}}, {std::nullopt}, 400'000)), "bad-ba-bid-price");
     // With a bid, it cannot be collected while it runs.
     BOOST_CHECK_EQUAL(f.Reject(MakeTx({receipt}, Collect{id, HOLDER}, {std::nullopt})), "bad-ba-auction-running");
-    // In its last block, at the end price (the original's node stopped here): 400 for 40, 10 per unit.
+    // In its last block, at the end price (the original's node stopped here): 40000 for 40, 1000 per unit (what is paid out is at least MIN_CHN_PAYOUT).
     f.height = 110;
-    const CTransaction last{MakeTx({}, Bid{id, 100, 10, CScript{}}, {std::nullopt}, 100)};
+    const CTransaction last{MakeTx({}, Bid{id, 10'000, 10, CScript{}}, {std::nullopt}, 10'000)};
     BOOST_REQUIRE_MESSAGE(f.Apply(last, &reason), reason);
     BOOST_CHECK_EQUAL(f.state.Auctions().at(id).remaining, 20u);
     f.height = 111;
-    BOOST_CHECK_EQUAL(f.Reject(MakeTx({}, Bid{id, 100, 1, CScript{}}, {std::nullopt}, 100)), "bad-ba-auction-closed");
+    BOOST_CHECK_EQUAL(f.Reject(MakeTx({}, Bid{id, 10'000, 1, CScript{}}, {std::nullopt}, 10'000)), "bad-ba-auction-closed");
     // Collected: what is left (GOLD) to the result output, what came in (CHN) by the coinbase.
     f.payouts.clear();
     const CTransaction collect{MakeTx({receipt}, Collect{id, HOLDER}, {std::nullopt})};
     BOOST_REQUIRE_MESSAGE(f.Apply(collect, &reason), reason);
     BOOST_CHECK(f.state.Tokens().at(COutPoint{collect.GetHash(), 0}) == Asset(GOLD, 20));
     BOOST_REQUIRE_EQUAL(f.payouts.size(), 1u);
-    BOOST_CHECK_EQUAL(f.payouts[0].nValue, 1'100);
+    BOOST_CHECK_EQUAL(f.payouts[0].nValue, 110'000);
     BOOST_CHECK(f.state.Auctions().at(id).closed);
 }
 

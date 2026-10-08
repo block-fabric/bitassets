@@ -81,12 +81,16 @@ inline constexpr int32_t MAX_AUCTION_DURATION{1'000'000};
 /** Latest an auction may start, in blocks after the one that makes it (the second audit's rules): about a year. */
 inline constexpr int32_t MAX_AUCTION_DELAY{52'560};
 /**
- * Least CHN a pool or an auction pays out (the second audit's rules). A payout takes a place in the
- * coinbase's queue, which pays a bounded number per block: dust payouts would delay everyone's. Less
- * from a swap or a bid is refused; less taken out of a pool stays in it, for its providers; less
- * from collecting an auction is not paid (the CHN were burned when they went in).
+ * Least CHN a pool or an auction pays out (the second audit's rules): 0.0005 CHN. A payout takes a
+ * place in the coinbase's queue, which pays a bounded number per block (half of MAX_PAYOUTS_PER_BLOCK
+ * for the sidechain's own): small payouts would delay everyone's. Filling the queue for a block takes
+ * 500 swaps of this much each (0.25 CHN turned over, 0.3% of it to the pools each way, and the fees),
+ * not 500 of 1000 satoshis (0.000005 CHN); a payout of it is five times the least withdrawal, and an
+ * output worth spending at any fee rate below about 700 sat/vB. Less from a swap or a bid is refused;
+ * less taken out of a pool, or coming back from a deposit, stays in it, for its providers; less from
+ * collecting an auction is not paid (the CHN were burned when they went in).
  */
-inline constexpr uint64_t MIN_CHN_PAYOUT{1'000};
+inline constexpr uint64_t MIN_CHN_PAYOUT{50'000};
 /** Most tokens one burn names. */
 inline constexpr size_t MAX_BURNS{16};
 
