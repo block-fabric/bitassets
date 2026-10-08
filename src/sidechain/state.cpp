@@ -400,10 +400,13 @@ bool State::ApplyTxSteps(const CTransaction& tx, int height, const Consensus::Si
     // in CHN, the coinbase pays.
     CAmount released{0};
     bitassets::State assets{Writable()};
-    if (!assets.ApplyTx(tx, height, payouts, reject_reason, params.bitassets_pool_rules_height, &released, params.bitassets_release_height, params.bitassets_audit_height, params.bitassets_audit2_height)) return false;
+    if (!assets.ApplyTx(tx, height, payouts, reject_reason, params.bitassets_pool_rules_height, &released, params.bitassets_release_height,
+                        params.bitassets_audit_height, params.bitassets_audit2_height, params.bitassets_reveal_depth)) return false;
     // CHN freed by retiring an asset go to mainchain miners: a withdrawal of 1 satoshi, burned on the
     // mainchain (a bundle has to pay something), whose fee is the rest. Nobody can take it back.
-    if (released >= 2) {
+    // Before the second audit's rules, a single satoshi freed stayed in the mainchain's escrow, which
+    // nothing on this chain backs any more; from them, it is that withdrawal, with no fee.
+    if (released >= (height >= params.bitassets_audit2_height ? 1 : 2)) {
         Withdrawal withdrawal;
         withdrawal.outpoint = COutPoint{tx.GetHash(), RELEASE_WITHDRAWAL_INDEX};
         withdrawal.amount = 1;

@@ -4,6 +4,8 @@
 
 #include <bitassets/state.h>
 #include <addresstype.h>
+#include <consensus/params.h>
+#include <sidechain/state.h>
 #include <arith_uint256.h>
 #include <script/script.h>
 #include <streams.h>
@@ -49,9 +51,9 @@ public:
         m_store = std::move(store);
         return *this;
     }
-    bool ApplyTx(const CTransaction& tx, int height, TUndo& undo, std::vector<CTxOut>& payouts, std::string& reason, int pool_rules_height = 0, CAmount* released = nullptr, int release_height = 0, int audit_height = 0, int audit2_height = 0)
+    bool ApplyTx(const CTransaction& tx, int height, TUndo& undo, std::vector<CTxOut>& payouts, std::string& reason, int pool_rules_height = 0, CAmount* released = nullptr, int release_height = 0, int audit_height = 0, int audit2_height = 0, int reveal_depth = 0)
     {
-        const bool ok{bitassets::State{*m_store}.ApplyTx(tx, height, payouts, reason, pool_rules_height, released, release_height, audit_height, audit2_height)};
+        const bool ok{bitassets::State{*m_store}.ApplyTx(tx, height, payouts, reason, pool_rules_height, released, release_height, audit_height, audit2_height, reveal_depth)};
         undo.parts.push_back(m_store->TakeUndo());
         return ok;
     }
@@ -136,11 +138,13 @@ struct Fixture {
     int height{100};
     //! The second audit's rules: from 0, as on a new chain.
     int audit2_height{0};
+    //! How deep a reservation is before it is revealed, under those rules: 0, so that Issue registers in one block.
+    int reveal_depth{0};
 
     bool Apply(const CTransaction& tx, std::string* reason = nullptr)
     {
         std::string r;
-        const bool ok{state.ApplyTx(tx, height, undo, payouts, r, 0, nullptr, 0, 0, audit2_height)};
+        const bool ok{state.ApplyTx(tx, height, undo, payouts, r, 0, nullptr, 0, 0, audit2_height, reveal_depth)};
         if (reason) *reason = r;
         return ok;
     }
@@ -148,7 +152,7 @@ struct Fixture {
     {
         std::string r;
         const TState before{state};
-        BOOST_CHECK(!state.ApplyTx(tx, height, undo, payouts, r, 0, nullptr, 0, 0, audit2_height));
+        BOOST_CHECK(!state.ApplyTx(tx, height, undo, payouts, r, 0, nullptr, 0, 0, audit2_height, reveal_depth));
         BOOST_CHECK(state == before);
         return r;
     }
@@ -838,5 +842,184 @@ BOOST_AUTO_TEST_CASE(revert_restores)
     BOOST_CHECK(f.state == before);
 }
 
+BOOST_AUTO_TEST_CASE(reservation_reveal_depth)
+{
+    // The third audit: whoever makes a block sees every registration waiting for it. It could reserve
+    // the name under a nonce of its own and register it in that very block, ahead of the one it saw
+    // (and ahead of its maker's, even bound to its script): nothing compared where a reservation was
+    // made with where it is revealed. Under the second audit's rules, a registration in block h
+    // reveals a reservation made in block r only if h - r >= reveal_depth.
+    Fixture f;
+    f.reveal_depth = 3;
+    const uint256 nonce{HashName("secret")};
+    const CTransaction reserve{MakeReserve(ReservationCommitment(GOLD, nonce, HOLDER))};
+    BOOST_REQUIRE(f.Apply(reserve));
+    bitassets::Register reg;
+    reg.name = GOLD;
+    reg.nonce = nonce;
+    reg.text = "GOLD";
+    const CTransaction registration{MakeTx({COutPoint{reserve.GetHash(), 0}}, reg, {Unit(Token::Kind::CONTROL, GOLD)})};
+    for (const int height : {100, 101, 102}) {
+        f.height = height;
+        BOOST_CHECK_EQUAL(f.Reject(registration), "bad-ba-reservation-too-young");
+    }
+    std::string reason;
+    f.height = 103;
+    BOOST_CHECK_MESSAGE(f.Apply(registration, &reason), reason);
+    BOOST_CHECK(f.state.Assets().contains(GOLD));
+
+    // Before the rules, in the block after (the mempool takes no token of an unconfirmed output), or
+    // even in the same one.
+    Fixture before;
+    before.audit2_height = 1000;
+    before.reveal_depth = 3;
+    const CTransaction old{MakeReserve(ReservationCommitment(GOLD, nonce))};
+    BOOST_REQUIRE(before.Apply(old));
+    BOOST_CHECK_MESSAGE(before.Apply(MakeTx({COutPoint{old.GetHash(), 0}}, reg, {Unit(Token::Kind::CONTROL, GOLD)}), &reason), reason);
+
+    // A reservation made before the rules and revealed under them: as deep as any.
+    Fixture across;
+    across.audit2_height = 101;
+    across.reveal_depth = 3;
+    const CTransaction early{MakeReserve(ReservationCommitment(GOLD, nonce))};
+    BOOST_REQUIRE(across.Apply(early));
+    const CTransaction late{MakeTx({COutPoint{early.GetHash(), 0}}, reg, {Unit(Token::Kind::CONTROL, GOLD)})};
+    across.height = 101;
+    BOOST_CHECK_EQUAL(across.Reject(late), "bad-ba-reservation-too-young");
+    across.height = 103;
+    BOOST_CHECK_MESSAGE(across.Apply(late, &reason), reason);
+}
+
+BOOST_AUTO_TEST_CASE(release_counts)
+{
+    // The third audit: under the second audit's rules, whether an asset could be retired went through
+    // every auction quoting it, skipping those that took none of it in: 100k such auctions made each
+    // releaseasset (and getasset, listassets) read 100k entries. Each record counts the auctions that
+    // hold some of it and its pools with providers, kept as auctions and pools change.
+    Fixture f;
+    const auto [gold_control, gold]{f.Issue("GOLD", 1'000'000)};
+    const auto [silver_control, silver]{f.Issue("SILVER", 1'000)};
+    const auto counts{[&](const AssetId& asset) {
+        const AssetRecord record{f.state.Assets().at(asset)};
+        return std::make_pair(record.holding_auctions, record.provided_pools);
+    }};
+    using Counts = std::pair<uint32_t, uint32_t>;
+    BOOST_CHECK(counts(GOLD) == (Counts{0, 0}));
+    // Auctions of a unit of SILVER each, for GOLD, that take nothing in: they hold SILVER, not GOLD.
+    COutPoint left{silver};
+    std::vector<Txid> auctions;
+    for (uint64_t i{0}; i < 50; ++i) {
+        const CTransaction made{MakeTx({left}, CreateAuction{SILVER, 1, GOLD, 10, 10, f.height + 1, 10}, {Asset(SILVER, 999 - i), Unit(Token::Kind::RECEIPT, uint256{})})};
+        BOOST_REQUIRE(f.Apply(made));
+        auctions.push_back(made.GetHash());
+        left = COutPoint{made.GetHash(), 0};
+    }
+    BOOST_CHECK(counts(GOLD) == (Counts{0, 0}));
+    BOOST_CHECK(counts(SILVER) == (Counts{50, 0}));
+    // A bid pays GOLD into one: it holds GOLD now.
+    f.height += 1;
+    const CTransaction bid{MakeTx({gold}, Bid{auctions[0], 10, 1, CScript{}}, {Asset(GOLD, 999'990), std::nullopt})};
+    std::string reason;
+    BOOST_REQUIRE_MESSAGE(f.Apply(bid, &reason), reason);
+    BOOST_CHECK(counts(GOLD) == (Counts{1, 0}));
+    // Sold out, not collected: it still holds what bids paid in, and is still SILVER's.
+    BOOST_CHECK(counts(SILVER) == (Counts{50, 0}));
+    // Collected: it holds nothing.
+    BOOST_REQUIRE_MESSAGE(f.Apply(MakeTx({COutPoint{auctions[0], 1}}, Collect{auctions[0], HOLDER}, {std::nullopt}), &reason), reason);
+    BOOST_CHECK(counts(GOLD) == (Counts{0, 0}));
+    BOOST_CHECK(counts(SILVER) == (Counts{49, 0}));
+    // Canceled before any bid: the same.
+    BOOST_REQUIRE_MESSAGE(f.Apply(MakeTx({COutPoint{auctions[1], 1}}, Collect{auctions[1], HOLDER}, {std::nullopt}), &reason), reason);
+    BOOST_CHECK(counts(SILVER) == (Counts{48, 0}));
+
+    // Pools: counted while someone provides liquidity to them.
+    const TState before_pool{f.state};
+    const TUndo undo_before{f.undo};
+    const CTransaction added{MakeTx({COutPoint{bid.GetHash(), 0}}, AddLiquidity{GOLD, CHN, 100'000, 50'000'000, 1}, {Asset(GOLD, 899'990), std::nullopt}, 50'000'000)};
+    BOOST_REQUIRE_MESSAGE(f.Apply(added, &reason), reason);
+    BOOST_CHECK(counts(GOLD) == (Counts{0, 1}));
+    const uint256 id{PoolId(GOLD, CHN)};
+    const uint64_t held{f.state.Pools().at(id).shares - MIN_LIQUIDITY};
+    // Half out: still provided.
+    BOOST_REQUIRE(f.Apply(MakeTx({COutPoint{added.GetHash(), 1}}, RemoveLiquidity{GOLD, CHN, held / 2, 1, 1, HOLDER}, {Token{Token::Kind::LP, id, held - held / 2}, std::nullopt})));
+    BOOST_CHECK(counts(GOLD) == (Counts{0, 1}));
+    // Everyone out: abandoned, not counted; reopened, counted again.
+    COutPoint lp;
+    for (const auto& [outpoint, token] : f.state.Tokens()) {
+        if (token.kind == Token::Kind::LP) lp = outpoint;
+    }
+    BOOST_REQUIRE(f.Apply(MakeTx({lp}, RemoveLiquidity{GOLD, CHN, held - held / 2, 1, 1, HOLDER}, {std::nullopt})));
+    BOOST_CHECK(amm::Abandoned(f.state.Pools().at(id)));
+    BOOST_CHECK(counts(GOLD) == (Counts{0, 0}));
+    BOOST_REQUIRE_MESSAGE(f.Apply(MakeTx({COutPoint{added.GetHash(), 0}}, AddLiquidity{GOLD, CHN, 100'000, 50'000'000, 1}, {Asset(GOLD, 799'990), std::nullopt}, 50'000'000), &reason), reason);
+    BOOST_CHECK(counts(GOLD) == (Counts{0, 1}));
+
+    // Undone, the counts are as they were.
+    TUndo since;
+    since.parts.assign(f.undo.parts.begin() + undo_before.parts.size(), f.undo.parts.end());
+    f.state.Revert(since);
+    BOOST_CHECK(f.state == before_pool);
+    BOOST_CHECK(counts(GOLD) == (Counts{0, 0}));
+}
+
+BOOST_AUTO_TEST_CASE(release_of_one_satoshi)
+{
+    // The third audit: a release that freed exactly 1 satoshi of CHN gave it to nobody (a withdrawal to
+    // mainchain miners was made from 2 on): it stayed in the mainchain's escrow, backed by nothing.
+    // Under the second audit's rules it is a withdrawal of 1 satoshi with no fee.
+    const auto run{[](int audit2_height) {
+        sidechain::EmptyStore empty;
+        sidechain::StoreOverlay store{empty, /*journal=*/false};
+        sidechain::State side{store};
+        Consensus::SidechainParams params;
+        params.enabled = true;
+        // Pools open with any deposit (as on the test network before the rules of pools), so that one
+        // can hold a single satoshi; the second audit's rules for all but the release (at 110).
+        params.bitassets_pool_rules_height = 1000;
+        params.bitassets_reveal_depth = 1;
+        std::vector<CTxOut> payouts;
+        std::string reason;
+        int height{100};
+        const auto apply{[&](const CTransaction& tx) {
+            Consensus::SidechainParams at{params};
+            at.bitassets_audit2_height = height >= 110 ? audit2_height : 0;
+            const bool ok{side.ApplyTx(tx, height, at, payouts, reason)};
+            BOOST_CHECK_MESSAGE(ok, reason);
+            return ok;
+        }};
+        const uint256 nonce{HashName("n")};
+        const CTransaction reserve{MakeReserve(ReservationCommitment(GOLD, nonce, HOLDER))};
+        BOOST_REQUIRE(apply(reserve));
+        height = 101;
+        bitassets::Register reg;
+        reg.name = GOLD;
+        reg.nonce = nonce;
+        reg.supply = 10'000'000;
+        const CTransaction registered{MakeTx({COutPoint{reserve.GetHash(), 0}}, reg, {Unit(Token::Kind::CONTROL, GOLD), Asset(GOLD, 10'000'000)})};
+        BOOST_REQUIRE(apply(registered));
+        // A pool of 10'000'000 GOLD and 1 satoshi: everyone leaves, the satoshi stays (dust stays in the pool).
+        const CTransaction added{MakeTx({COutPoint{registered.GetHash(), 1}}, AddLiquidity{GOLD, CHN, 10'000'000, 1, 1}, {std::nullopt}, 1)};
+        BOOST_REQUIRE(apply(added));
+        const uint256 id{PoolId(GOLD, CHN)};
+        const bitassets::Pool pool{*side.BitAssets().GetPool(id)};
+        const uint64_t held{pool.shares - MIN_LIQUIDITY};
+        const auto [out0, out1]{amm::WithdrawPaid(pool, held)};
+        BOOST_REQUIRE_EQUAL(out0, 0u);
+        const CTransaction removed{MakeTx({COutPoint{added.GetHash(), 0}}, RemoveLiquidity{GOLD, CHN, held, out1, 0, HOLDER}, {std::nullopt})};
+        BOOST_REQUIRE(apply(removed));
+        BOOST_REQUIRE_EQUAL(side.BitAssets().GetPool(id)->reserve0, 1u);
+        BOOST_REQUIRE(apply(MakeTx({COutPoint{registered.GetHash(), 0}, COutPoint{removed.GetHash(), 0}}, Burn{{Unit(Token::Kind::CONTROL, GOLD), Asset(GOLD, out1)}}, {})));
+        height = 110;
+        const CTransaction release{MakeTx({}, ReleaseAsset{GOLD}, {})};
+        BOOST_REQUIRE(apply(release));
+        return side.GetWithdrawal(COutPoint{release.GetHash(), sidechain::RELEASE_WITHDRAWAL_INDEX});
+    }};
+    const auto given{run(/*audit2_height=*/0)};
+    BOOST_REQUIRE(given);
+    BOOST_CHECK_EQUAL(given->amount, 1);
+    BOOST_CHECK_EQUAL(given->main_fee, 0);
+    // Before the rules, nothing.
+    BOOST_CHECK(!run(/*audit2_height=*/1000));
+}
 
 BOOST_AUTO_TEST_SUITE_END()

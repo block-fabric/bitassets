@@ -453,11 +453,17 @@ struct AssetRecord {
     AssetData data;
     //! How many values each field has had (its registration's included): where its history ends.
     std::array<uint32_t, DATA_FIELDS> changes{};
+    //! Auctions not collected that hold some of it: that sell it, or that took it in (bids paid it).
+    //! Kept as auctions change (State::SetAuction), so that whether it can be retired is one look.
+    uint32_t holding_auctions{0};
+    //! Its pools that someone provides liquidity to (not amm::Abandoned), kept as pools change.
+    uint32_t provided_pools{0};
 
     SERIALIZE_METHODS(AssetRecord, obj)
     {
         READWRITE(obj.seq, obj.registration, obj.height, obj.text, obj.decimals, obj.supply, obj.minted, obj.burned, obj.fixed,
-                  obj.data, obj.changes[0], obj.changes[1], obj.changes[2], obj.changes[3], obj.changes[4], obj.changes[5]);
+                  obj.data, obj.changes[0], obj.changes[1], obj.changes[2], obj.changes[3], obj.changes[4], obj.changes[5],
+                  obj.holding_auctions, obj.provided_pools);
     }
     friend bool operator==(const AssetRecord&, const AssetRecord&) = default;
 
@@ -534,6 +540,12 @@ struct Auction {
     bool OpenAt(int height) const { return !closed && remaining > 0 && height >= start_height && height <= EndHeight(); }
     /** Whether the receipt can close it in the block at `height`. */
     bool CollectableAt(int height) const { return !closed && (height > EndHeight() || remaining == 0 || bids == 0); }
+    /**
+     * Whether it holds some of an asset, which keeps the asset from being retired: not collected, and
+     * selling it, or having taken some of it in. One that sells something else for it and took none
+     * of it in holds none (the second audit's rules; before, any auction not collected of it did).
+     */
+    bool Holds(const AssetId& asset) const { return !closed && (base == asset || (quote == asset && proceeds > 0)); }
 };
 
 /** Pool arithmetic, as the rules do it. */
@@ -615,14 +627,14 @@ public:
      * changes nothing.
      * @param[out] released  CHN freed by retiring an asset (ReleaseAsset), for mainchain miners
      */
-    [[nodiscard]] bool ApplyTx(const CTransaction& tx, int height, std::vector<CTxOut>& payouts, std::string& reject_reason, int pool_rules_height = 0, CAmount* released = nullptr, int release_height = 0, int audit_height = 0, int audit2_height = 0);
+    [[nodiscard]] bool ApplyTx(const CTransaction& tx, int height, std::vector<CTxOut>& payouts, std::string& reject_reason, int pool_rules_height = 0, CAmount* released = nullptr, int release_height = 0, int audit_height = 0, int audit2_height = 0, int reveal_depth = 0);
     /**
      * Whether an asset is dead and can be retired; if not, why (`why`). `audit2`: under the second
      * audit's rules (see Consensus::SidechainParams::bitassets_audit2_height).
      */
     bool Releasable(const AssetId& asset, std::string* why = nullptr, bool audit2 = true) const;
     /** Whether ApplyTx would accept the transaction now; `results`, if given, gets what it would pay out. */
-    [[nodiscard]] bool CheckTx(const CTransaction& tx, int height, std::string& reject_reason, std::vector<Result>* results = nullptr, int pool_rules_height = 0, int release_height = 0, int audit_height = 0, int audit2_height = 0) const;
+    [[nodiscard]] bool CheckTx(const CTransaction& tx, int height, std::string& reject_reason, std::vector<Result>* results = nullptr, int pool_rules_height = 0, int release_height = 0, int audit_height = 0, int audit2_height = 0, int reveal_depth = 0) const;
     /** What the inputs of a transaction carry, in the order of the inputs. */
     std::vector<std::pair<uint32_t, Token>> SpentTokens(const CTransaction& tx) const;
 
@@ -657,7 +669,7 @@ public:
 
 private:
     struct Plan;
-    std::optional<Plan> MakePlan(const CTransaction& tx, int height, std::string& reject_reason, int pool_rules_height, int release_height, int audit_height, int audit2_height) const;
+    std::optional<Plan> MakePlan(const CTransaction& tx, int height, std::string& reject_reason, int pool_rules_height, int release_height, int audit_height, int audit2_height, int reveal_depth) const;
 
     // Writes, with the indexes kept in step.
     sidechain::StoreOverlay& Writable() const;
@@ -666,6 +678,8 @@ private:
     void SetOrder(const Txid& id, const std::optional<uint64_t>& order);
     void SetPool(const uint256& id, const std::optional<Pool>& pool);
     void SetAuction(const Txid& id, const std::optional<Auction>& auction);
+    /** Adds `delta` to a count of the record of an asset (AssetRecord::holding_auctions, provided_pools), if it is registered. */
+    void Count(const AssetId& asset, uint32_t AssetRecord::*count, int delta);
 
     const sidechain::StoreView* m_view;
     sidechain::StoreOverlay* m_overlay;
@@ -677,8 +691,10 @@ private:
  *  1: the history of an asset's data in its record; outputs indexed by id only; closed auctions indexed.
  *  2: the history apart (0x3e); outputs indexed by id then kind; closed auctions out of the index;
  *     where each reservation was made (0x3d); the registrations of an auction's assets in it.
+ *  3: in each asset's record, how many auctions hold some of it and how many of its pools have
+ *     providers (AssetRecord::holding_auctions, provided_pools).
  */
-inline constexpr uint32_t STORE_LAYOUT{2};
+inline constexpr uint32_t STORE_LAYOUT{3};
 /** Whether the assets in a store are in the layout of this version, or there are none yet. */
 bool StoreLayoutCurrent(const sidechain::StoreView& view);
 

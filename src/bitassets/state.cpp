@@ -720,10 +720,29 @@ void State::SetOrder(const Txid& id, const std::optional<uint64_t>& order)
     if (commitment) out.Put(CommitmentKey(*commitment, order.value_or(0), id), {});
 }
 
+void State::Count(const AssetId& asset, uint32_t AssetRecord::*count, int delta)
+{
+    if (delta == 0 || asset.IsNull()) return;
+    auto record{GetAsset(asset)};
+    if (!record) return;
+    uint32_t& n{(*record).*count};
+    // Kept in step with the pools and auctions, it never goes below zero nor wraps.
+    n = delta < 0 ? n - std::min<uint32_t>(n, -delta) : n + delta;
+    ASSETS.Put(Writable(), asset, *record);
+}
+
 void State::SetPool(const uint256& id, const std::optional<Pool>& pool)
 {
     sidechain::StoreOverlay& out{Writable()};
-    if (const auto old{GetPool(id)}) {
+    const auto old{GetPool(id)};
+    // The count of each asset's pools that have providers.
+    const int provided{(pool && !amm::Abandoned(*pool) ? 1 : 0) - (old && !amm::Abandoned(*old) ? 1 : 0)};
+    if (provided != 0) {
+        const Pool& either{pool ? *pool : *old};
+        Count(either.asset0, &AssetRecord::provided_pools, provided);
+        Count(either.asset1, &AssetRecord::provided_pools, provided);
+    }
+    if (old) {
         out.Erase(Key2(POOLS_BY_ASSET, old->asset0, id));
         out.Erase(Key2(POOLS_BY_ASSET, old->asset1, id));
     }
@@ -739,8 +758,19 @@ void State::SetPool(const uint256& id, const std::optional<Pool>& pool)
 void State::SetAuction(const Txid& id, const std::optional<Auction>& auction)
 {
     sidechain::StoreOverlay& out{Writable()};
+    const auto old{GetAuction(id)};
+    // The count of the auctions that hold some of each of its assets: of the asset the auction was
+    // made with (one retired since, and its name registered again, is another asset).
+    if (old || auction) {
+        const Auction& either{auction ? *auction : *old};
+        for (const auto& [asset, registration] : {std::pair{either.base, either.base_registration}, std::pair{either.quote, either.quote_registration}}) {
+            const int delta{(auction && auction->Holds(asset) ? 1 : 0) - (old && old->Holds(asset) ? 1 : 0)};
+            if (delta == 0) continue;
+            if (const auto record{GetAsset(asset)}; record && record->registration == registration) Count(asset, &AssetRecord::holding_auctions, delta);
+        }
+    }
     // Only auctions not closed are indexed: the rules look for those alone.
-    if (const auto old{GetAuction(id)}; old && !old->closed) {
+    if (old && !old->closed) {
         out.Erase(Key2(AUCTIONS_BY_ASSET, old->base, id.ToUint256()));
         out.Erase(Key2(AUCTIONS_BY_ASSET, old->quote, id.ToUint256()));
     }
@@ -819,33 +849,22 @@ bool State::Releasable(const AssetId& asset, std::string* why, bool audit2) cons
     // What carries it, through the index of outputs by what they carry: one look per kind.
     if (FirstTokenOf(asset, Token::Kind::ASSET)) return no("someone holds some of it");
     if (FirstTokenOf(asset, Token::Kind::CONTROL)) return no("its control coin exists");
-    // The index has the auctions not closed only.
-    bool open_auction{false};
-    m_view->ForEach(Prefix(AUCTIONS_BY_ASSET, asset), [&](const sidechain::StoreBytes& key, const sidechain::StoreBytes&) {
-        std::span<const unsigned char> in{key};
-        in = in.subspan(33);
-        const auto auction{GetAuction(Txid::FromUint256(sidechain::KeyCodec<uint256>::Decode(in)))};
-        open_auction = auction && !auction->closed;
+    if (audit2) {
         // Under the second audit's rules, an auction that sells something else for it and has taken
         // none of it in holds none of it: it does not keep it alive (else a 1-unit auction that never
-        // starts would, for ever). Bids into it are refused once the asset is gone (MakePlan).
-        if (open_auction && audit2 && auction->quote == asset && auction->base != asset && auction->proceeds == 0) open_auction = false;
-        return !open_auction;
-    });
-    if (open_auction) return no("an auction of it is not collected");
-    bool provided{false};
-    m_view->ForEach(Prefix(POOLS_BY_ASSET, asset), [&](const sidechain::StoreBytes& key, const sidechain::StoreBytes&) {
-        std::span<const unsigned char> in{key};
-        in = in.subspan(33);
-        const auto pool{GetPool(sidechain::KeyCodec<uint256>::Decode(in))};
-        provided = pool && !amm::Abandoned(*pool);
-        return !provided;
-    });
-    if (provided) return no("a pool of it has liquidity providers");
+        // starts would, for ever). Bids into it are refused once the asset is gone (MakePlan). The
+        // record counts the others (Auction::Holds): one look, however many auctions quote it.
+        if (record->holding_auctions > 0) return no("an auction of it is not collected");
+    } else {
+        // Before, any auction not collected of it, through the index (which has those alone): the
+        // first entry says.
+        if (m_view->Next(Prefix(AUCTIONS_BY_ASSET, asset), Prefix(AUCTIONS_BY_ASSET, asset))) return no("an auction of it is not collected");
+    }
+    if (record->provided_pools > 0) return no("a pool of it has liquidity providers");
     return true;
 }
 
-std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, std::string& reject_reason, int pool_rules_height, int release_height, int audit_height, int audit2_height) const
+std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, std::string& reject_reason, int pool_rules_height, int release_height, int audit_height, int audit2_height, int reveal_depth) const
 {
     const bool pool_rules{height >= pool_rules_height};
     const bool audit2{height >= audit2_height};
@@ -948,6 +967,13 @@ std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, s
             if (*found == implied && !reservation) reservation = id;
         }
         if (!reservation) return invalid("bad-ba-no-reservation");
+        // Under the second audit's rules, only once the reservation is deep enough: whoever makes
+        // this block saw the name and the nonce of every registration waiting for it, and could have
+        // reserved the name under a nonce of its own, in this very block, to register it first.
+        if (audit2) {
+            const auto origin{GetReservationOrigin(*reservation)};
+            if (origin && int64_t{height} - origin->height < reveal_depth) return invalid("bad-ba-reservation-too-young");
+        }
         if (!bound && height >= audit_height) {
             // Only the oldest reservation of a commitment reveals it: a copy of someone else's, made to
             // register the asset first once they reveal it, is younger.
@@ -1243,17 +1269,17 @@ std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, s
     return plan;
 }
 
-bool State::CheckTx(const CTransaction& tx, int height, std::string& reject_reason, std::vector<Result>* results, int pool_rules_height, int release_height, int audit_height, int audit2_height) const
+bool State::CheckTx(const CTransaction& tx, int height, std::string& reject_reason, std::vector<Result>* results, int pool_rules_height, int release_height, int audit_height, int audit2_height, int reveal_depth) const
 {
-    auto plan{MakePlan(tx, height, reject_reason, pool_rules_height, release_height, audit_height, audit2_height)};
+    auto plan{MakePlan(tx, height, reject_reason, pool_rules_height, release_height, audit_height, audit2_height, reveal_depth)};
     if (!plan) return false;
     if (results) *results = std::move(plan->results);
     return true;
 }
 
-bool State::ApplyTx(const CTransaction& tx, int height, std::vector<CTxOut>& payouts, std::string& reject_reason, int pool_rules_height, CAmount* released, int release_height, int audit_height, int audit2_height)
+bool State::ApplyTx(const CTransaction& tx, int height, std::vector<CTxOut>& payouts, std::string& reject_reason, int pool_rules_height, CAmount* released, int release_height, int audit_height, int audit2_height, int reveal_depth)
 {
-    const auto plan{MakePlan(tx, height, reject_reason, pool_rules_height, release_height, audit_height, audit2_height)};
+    const auto plan{MakePlan(tx, height, reject_reason, pool_rules_height, release_height, audit_height, audit2_height, reveal_depth)};
     if (!plan) return false;
     sidechain::StoreOverlay& out{Writable()};
     // In the order the rules have always applied a plan in.

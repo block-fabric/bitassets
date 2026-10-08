@@ -120,9 +120,18 @@ struct SidechainParams {
      * took nothing in does not keep the asset from being retired, nor pays a later asset of its name;
      * an auction starts within MAX_AUCTION_DELAY blocks; a name that reads as another asset (CHN, a
      * number, "0x") is refused; liquidity can be taken out when one side rounds to nothing; CHN
-     * results below MIN_CHN_PAYOUT are not paid out by the coinbase.
+     * results below MIN_CHN_PAYOUT are not paid out by the coinbase; a registration reveals a
+     * reservation only once it is bitassets_reveal_depth blocks deep; a retired asset's CHN are given
+     * to mainchain miners however few (1 satoshi included).
      */
     int bitassets_audit2_height{0};
+    /**
+     * From bitassets_audit2_height: a registration in block h reveals a reservation made in block r
+     * only if h - r >= bitassets_reveal_depth. Whoever makes a block sees every registration waiting
+     * for it, and could otherwise reserve the same name under a nonce of its own and register it in
+     * its own block, ahead of the one it saw.
+     */
+    int bitassets_reveal_depth{1};
     /**
      * From this height, no withdrawal is refunded, and no bundle started, while a bundle of this
      * sidechain is pending on the mainchain. It may hold any withdrawal: one committed on another

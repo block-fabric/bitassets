@@ -239,6 +239,7 @@ public:
         // Set when the slot activates on the mainchain: the height of the block that activated it.
         consensus.sidechain.main_activation_height = 0;
         consensus.sidechain.audit2_height = 0;
+        consensus.sidechain.bitassets_reveal_depth = 6;
         consensus.coinbase_maturity = 0; // what a block pays (deposits, fees) can be spent in the next
     }
 };
@@ -343,8 +344,9 @@ public:
         // The test network had a trade into an abandoned pool before (block 621).
         consensus.sidechain.bitassets_pool_rules_height = 660;
         consensus.sidechain.bitassets_release_height = 720;
-        consensus.sidechain.bitassets_audit_height = 3100;
+        consensus.sidechain.bitassets_audit_height = 4284; // no later than bitassets_audit2_height: set with it at deploy
         consensus.sidechain.bitassets_audit2_height = 4284; // audit 2 rules on the test network: moved out while the third audit's fixes are made
+        consensus.sidechain.bitassets_reveal_depth = 3;
         // The test network ran without it until then; see SidechainParams.
         consensus.sidechain.single_bundle_height = 3100;
         // The height of the mainchain block that activated the slot; nothing is left out at 0.
@@ -460,6 +462,7 @@ public:
                        .message_start = {0x62, 0x61, 0x73, 0x03}, .default_port = 39355, .bech32_hrp = "tba"});
         consensus.sidechain.main_activation_height = 0;
         consensus.sidechain.audit2_height = 0;
+        consensus.sidechain.bitassets_reveal_depth = 3;
         consensus.coinbase_maturity = 0; // what a block pays (deposits, fees) can be spent in the next
     }
 };
@@ -521,6 +524,7 @@ public:
             consensus.sidechain.slot = *opts.sidechain_slot;
             consensus.sidechain.bundle_retry_delay = 5;
             consensus.sidechain.audit2_height = 0;
+            consensus.sidechain.bitassets_reveal_depth = 2;
             // A sidechain has no sidechains of its own.
             consensus.drivechain.max_sidechains = 0;
             consensus.coinbase_maturity = 0;
