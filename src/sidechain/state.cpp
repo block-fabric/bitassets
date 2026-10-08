@@ -207,6 +207,12 @@ bool State::ApplyMainEvents(int main_height, const Mainchain& mainchain, int hei
         return false;
     }
     int first{from + 1};
+    // A bundle committed to before audit2_height has no height of its commitment on record, and would
+    // never expire unproposed. From the first block at audit2_height, the next mainchain block counts
+    // as its commitment: the same on every node.
+    if (height >= params.audit2_height && BUNDLE_MAIN_HEIGHT.Get(*m_view) == -1 && Bundle()) {
+        BUNDLE_MAIN_HEIGHT.Put(Writable(), from + 1);
+    }
     // What the mainchain did up to the block that activated this sidechain in its slot, deposits
     // included, was for whatever held the slot before.
     if (height >= params.audit2_height) first = std::max(first, params.main_activation_height + 1);

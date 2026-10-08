@@ -87,7 +87,10 @@ A sidechain has no miners and no coins of its own.
 - **Bundles nobody proposes.** From `audit2_height`, a bundle the mainchain has
   not proposed `unproposed_expiry_blocks` mainchain blocks after the block that
   committed to it fails, and its withdrawals go in a later one or can be taken
-  back.
+  back. A proposal made before that block, by someone who worked the hash
+  out ahead, counts if the bundle is still pending then. A bundle committed
+  to before `audit2_height` counts as committed in the mainchain block after
+  the last one the first block at `audit2_height` follows.
 - **Committed twice.** A mainchain miner can commit to a sidechain block again
   later. The block keeps its first commitment; losing the second, in a reorg
   of the mainchain, changes nothing for it.

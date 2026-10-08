@@ -1701,6 +1701,50 @@ BOOST_AUTO_TEST_CASE(unproposed_bundle_fails)
     }
 }
 
+BOOST_AUTO_TEST_CASE(bundle_from_before_audit2_expires)
+{
+    // A bundle committed to before audit2_height has no height of its commitment: from the first block
+    // at audit2_height, the next mainchain block counts as its commitment, and it can expire unproposed.
+    Consensus::SidechainParams params;
+    params.unproposed_expiry_blocks = 3;
+    params.bundle_retry_delay = 0;
+    params.audit2_height = 4;
+    SideStore side;
+    sidechain::State& state{side.state};
+    CKey key;
+    key.MakeNewKey(/*fCompressed=*/true);
+    const CScript pay{GetScriptForDestination(WitnessV0KeyHash{key.GetPubKey().GetID()})};
+    MakeWithdrawal(state, key, pay, 1, params);
+    sidechain::Mainchain mainchain;
+    Extend(mainchain, 20);
+    std::string reason;
+    std::vector<CTxOut> payouts;
+    BOOST_REQUIRE_MESSAGE(state.ApplyMainEvents(0, mainchain, 2, params, payouts, reason), reason);
+    const auto bundle{state.NextBundle(2, uint256{0xa}, params)};
+    BOOST_REQUIRE(bundle);
+    BOOST_REQUIRE_MESSAGE(state.StartBundle(bundle->GetHash().ToUint256(), 2, uint256{0xa}, params, reason), reason);
+    BOOST_CHECK_EQUAL(state.BundleMainHeight(), -1);
+    // Before audit2_height, it stays pending however long.
+    BOOST_REQUIRE_MESSAGE(state.ApplyMainEvents(8, mainchain, 3, params, payouts, reason), reason);
+    BOOST_CHECK(state.Bundle());
+    BOOST_CHECK_EQUAL(state.BundleMainHeight(), -1);
+    // The first block at audit2_height: committed as of mainchain block 9, the next one.
+    const uint256 before{state.Hash()};
+    side.store.TakeUndo();
+    BOOST_REQUIRE_MESSAGE(state.ApplyMainEvents(10, mainchain, 4, params, payouts, reason), reason);
+    BOOST_CHECK(state.Bundle());
+    BOOST_CHECK_EQUAL(state.BundleMainHeight(), 9);
+    // Undone with the block.
+    side.store.Revert(side.store.TakeUndo());
+    BOOST_CHECK(state.Hash() == before);
+    BOOST_REQUIRE_MESSAGE(state.ApplyMainEvents(10, mainchain, 4, params, payouts, reason), reason);
+    // unproposed_expiry_blocks after it, unproposed: it fails.
+    BOOST_REQUIRE_MESSAGE(state.ApplyMainEvents(12, mainchain, 5, params, payouts, reason), reason);
+    BOOST_CHECK(!state.Bundle());
+    BOOST_CHECK_EQUAL(state.LastFailureHeight(), 5);
+    BOOST_CHECK_EQUAL(state.BundleMainHeight(), -1);
+}
+
 BOOST_AUTO_TEST_CASE(bundle_proposed_before_its_commitment)
 {
     // The hash of a bundle can be worked out before the block that commits to it (public withdrawals,
