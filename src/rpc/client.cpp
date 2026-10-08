@@ -59,6 +59,7 @@ public:
  */
 static const CRPCConvertParam vRPCConvertParams[] =
 {
+    { "syncmainchain", 0, "allowdeepreorg" },
     { "setbmm", 0, "mine" },
     { "setbmm", 2, "always" },
     { "setbmm", 3, "amount" },
