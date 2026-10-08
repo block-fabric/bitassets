@@ -132,8 +132,12 @@ static ChainstateLoadResult CompleteChainstateInitialization(
                 return {ChainstateLoadStatus::FAILURE, Untranslated(strprintf("Error loading the sidechain database: %s", util::ErrorString(loaded).original))};
             }
         } else {
-            // The chain is connected again from genesis: so is the sidechain state.
-            chainstate->ResetDrivechainState();
+            // The chainstate is built from the blocks (-reindex-chainstate, a new node): the
+            // drivechain database too, which has to be in the current format, derived under the
+            // current parameters, before the blocks are connected; and the sidechain state with it.
+            if (auto reset{chainstate->ResetDrivechainState()}; !reset) {
+                return {ChainstateLoadStatus::FAILURE, util::ErrorString(reset)};
+            }
             // Every block is checked again against the record as it is: a recheck left from a record
             // filled in after blocks were connected (Mainchain::RecheckPending) has nothing left to do.
             if (sidechain::Mainchain* record{chainman.m_mainchain.get()}; record && !record->NeedsBackfill() && record->RecheckPending()) {
