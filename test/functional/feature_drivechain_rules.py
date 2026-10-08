@@ -56,6 +56,7 @@ class DrivechainRulesTest(BitcoinTestFramework):
         self.test_template_fields()
         self.test_template_bmm_requests()
         self.test_mempool_pinning()
+        self.test_wallet_avoids_pinned_parents()
         self.test_reorg_evicts_deposit()
         self.test_reorg_evicts_withdrawal()
         self.test_reorg_keeps_chained_first_deposits()
@@ -219,6 +220,44 @@ class DrivechainRulesTest(BitcoinTestFramework):
         block = self.mine()[0]
         assert chained_txid in node.getblock(block)["tx"]
         self.sync_all()
+
+    def test_wallet_avoids_pinned_parents(self):
+        self.log.info("The wallet pays nothing but small BMM requests and deposits from the unconfirmed change of a BMM request")
+        node = self.nodes[0]
+        node.createwallet("pinning")
+        wallet = node.get_wallet_rpc("pinning")
+        funder = node.get_wallet_rpc(self.default_wallet_name)
+        funder.send(outputs=[{wallet.getnewaddress(): 3}, {wallet.getnewaddress(): 1}])
+        self.mine()
+        self.sync_all()
+
+        # The request takes the coin of 3 (the other one is locked meanwhile); its change is unconfirmed.
+        # (The change of a deposit is not used unconfirmed anyway: the treasury input is not the wallet's.)
+        small = [{"txid": u["txid"], "vout": u["vout"]} for u in wallet.listunspent() if u["amount"] == 1]
+        wallet.lockunspent(False, small)
+        request = wallet.createbmmrequest(SLOT, "55" * 32, Decimal("0.001"))
+        wallet.lockunspent(True, small)
+        assert request["txid"] in node.getrawmempool()
+        # A payment goes around it, with the confirmed coin of 1.
+        payment = wallet.sendtoaddress(funder.getnewaddress(), Decimal("0.6"))
+        assert all(i["txid"] != request["txid"] for i in wallet.getrawtransaction(payment, True)["vin"])
+        assert payment in node.getrawmempool()
+        # Without it, the change of the payment (0.4) is not enough: refused, not sent to be refused by the mempool.
+        assert_raises_rpc_error(-6, "Insufficient funds", wallet.sendtoaddress, funder.getnewaddress(), Decimal("0.8"))
+        # sendall leaves it out as well.
+        sent = wallet.sendall([funder.getnewaddress()])
+        assert sent["txid"] in node.getrawmempool()
+        assert all(i["txid"] != request["txid"] for i in wallet.getrawtransaction(sent["txid"], True)["vin"])
+        # It is listed all the same.
+        assert any(u["txid"] == request["txid"] for u in wallet.listunspent(0))
+
+        # A deposit may be paid from it: it is small enough for the mempool to take it.
+        deposit = wallet.createsidechaindeposit(SLOT, "dest", Decimal("0.5"))
+        assert deposit["txid"] in node.getrawmempool()
+        assert request["txid"] in [i["txid"] for i in wallet.getrawtransaction(deposit["txid"], True)["vin"]]
+        self.mine()
+        self.sync_all()
+        wallet.unloadwallet()
 
     def test_reorg_evicts_deposit(self):
         self.log.info("A deposit to a sidechain whose activation is undone leaves the mempool")
