@@ -76,6 +76,7 @@
 #include <span>
 #include <string>
 #include <tuple>
+#include <unordered_set>
 #include <utility>
 
 using kernel::CCoinsStats;
@@ -2747,6 +2748,24 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             }
         }
 
+        // A transaction without inputs (allowed by some sidechains) does not spend anything, so
+        // nothing stops it from being included twice: its outputs would then overwrite unspent
+        // coins, which AddCoin refuses by throwing. Refuse the block instead.
+        if (!tx.IsCoinBase() && tx.vin.empty()) {
+            bool overwrite{false};
+            for (size_t o = 0; o < tx.vout.size(); ++o) {
+                if (view.HaveCoin(COutPoint{tx.GetHash(), static_cast<uint32_t>(o)})) {
+                    overwrite = true;
+                    break;
+                }
+            }
+            if (overwrite) {
+                state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-txns-BIP30",
+                              "transaction without inputs overwrites an unspent output: " + tx.GetHash().ToString());
+                break;
+            }
+        }
+
         CTxUndo undoDummy;
         if (i > 0) {
             blockundo.vtxundo.emplace_back();
@@ -4234,6 +4253,20 @@ bool CheckBlock(const CBlock& block, BlockValidationState& state, const Consensu
                                  strprintf("Transaction check failed (tx hash %s) %s", tx->GetHash().ToString(), tx_state.GetDebugMessage()));
         }
     }
+    // Refuse any duplicate transaction. Upstream relies on a duplicate double-spending its own
+    // inputs, but a sidechain may allow transactions without inputs, and the merkle "mutated"
+    // check only catches duplicates that end up as adjacent pairs in the tree.
+    {
+        std::unordered_set<Txid, SaltedTxidHasher> txids;
+        txids.reserve(block.vtx.size());
+        for (const auto& tx : block.vtx) {
+            if (!txids.insert(tx->GetHash()).second) {
+                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-txns-duplicate",
+                                     strprintf("duplicate transaction %s", tx->GetHash().ToString()));
+            }
+        }
+    }
+
     // This underestimates the number of sigops, because unlike ConnectBlock it
     // does not count witness and p2sh sigops.
     unsigned int nSigOps = 0;
