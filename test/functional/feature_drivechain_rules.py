@@ -215,6 +215,18 @@ class DrivechainRulesTest(BitcoinTestFramework):
                         CTxOut(0, CScript([OP_RETURN, b"dest"])),
                         CTxOut(int((change["value"] - Decimal("0.5") - Decimal("0.0001")) * COIN), address_to_scriptpubkey(node.getnewaddress()))]
         signed = node.signrawtransactionwithwallet(chained.serialize().hex())["hex"]
+        # A large deposit on the unconfirmed escrow output (paid from a confirmed coin, so only the
+        # escrow output is unconfirmed) would pin the escrow chain with its size: refused.
+        coin = [u for u in node.listunspent(1) if u["amount"] >= 1][0]
+        large = CTransaction()
+        large.vin = [CTxIn(COutPoint(int(deposit["txid"], 16), escrow["n"])), CTxIn(COutPoint(int(coin["txid"], 16), coin["vout"]))]
+        large.vout = [CTxOut(int((escrow["value"] + Decimal("0.5")) * COIN), bytes.fromhex(escrow_script)),
+                      CTxOut(0, CScript([OP_RETURN, b"dest"])),
+                      CTxOut(int((coin["amount"] - Decimal("0.5") - Decimal("0.001")) * COIN) - 40 * 10000, address_to_scriptpubkey(node.getnewaddress()))] + \
+            [CTxOut(10000, address_to_scriptpubkey(node.getnewaddress())) for _ in range(40)]
+        large_signed = node.signrawtransactionwithwallet(large.serialize().hex())["hex"]
+        assert node.decoderawtransaction(large_signed)["vsize"] > 1000
+        assert_raises_rpc_error(-26, "a deposit of more than 1000 vbytes spends the escrow output", node.sendrawtransaction, large_signed)
         chained_txid = node.sendrawtransaction(signed)
         assert chained_txid in node.getrawmempool()
         block = self.mine()[0]

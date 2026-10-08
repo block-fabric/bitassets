@@ -967,7 +967,7 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
     // compete with: the next request of its sidechain replaces it, the next treasury transaction
     // follows it. Like a TRUC transaction it takes no unconfirmed children that could pin it there,
     // with their size or their low fee, but small ones of its kind: the next treasury transaction
-    // through the escrow output, and a request or treasury transaction paid from its change (a
+    // through the escrow output (a withdrawal of any size), and a request or treasury transaction paid from its change (a
     // wallet that serves several sidechains). Not for transactions a reorg brings back.
     if (!bypass_limits) {
         const uint32_t max_sidechains{m_active_chainstate.m_chainman.GetConsensus().drivechain.max_sidechains};
@@ -981,8 +981,20 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
         for (const CTxIn& in : tx.vin) {
             const CTransactionRef parent{m_pool.get(in.prevout.hash)};
             if (!parent || in.prevout.n >= parent->vout.size()) continue;
-            // The escrow output: spent only by the next treasury transaction, as the escrow rules have it.
-            if (const auto slot{drivechain::ParseEscrowScript(parent->vout[in.prevout.n].scriptPubKey)}; slot && *slot < max_sidechains) continue;
+            // The escrow output: spent only by the next treasury transaction, as the escrow rules have
+            // it. A deposit chained on an unconfirmed one is small, like a TRUC child: a large one at
+            // a low fee rate would hold up every deposit chained after it. (A withdrawal, of any size,
+            // pays a bundle the miners voted through.)
+            if (const auto slot{drivechain::ParseEscrowScript(parent->vout[in.prevout.n].scriptPubKey)}; slot && *slot < max_sidechains) {
+                const bool withdrawal{std::any_of(tx.vout.begin(), tx.vout.end(), [&](const CTxOut& out) {
+                    return drivechain::ParseEscrowScript(out.scriptPubKey) == slot && out.nValue < parent->vout[in.prevout.n].nValue;
+                })};
+                if (!withdrawal && GetVirtualTransactionSize(tx) > TRUC_CHILD_MAX_VSIZE) {
+                    return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "dc-unconfirmed-parent",
+                                         strprintf("a deposit of more than %u vbytes spends the escrow output of %s, which is not confirmed", TRUC_CHILD_MAX_VSIZE, parent->GetHash().ToString()));
+                }
+                continue;
+            }
             if (!drivechain::GetBmmRequest(*parent) && !is_treasury(*parent)) continue;
             if (!drivechain_tx || GetVirtualTransactionSize(tx) > TRUC_CHILD_MAX_VSIZE) {
                 return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "dc-unconfirmed-parent",
