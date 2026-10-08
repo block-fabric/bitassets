@@ -554,7 +554,9 @@ void Follower::CheckActiveChain()
     const bool recheck{!lowest && record.RecheckPending()};
     if (recheck) {
         LOCK(::cs_main);
-        const int from{chainman.GetConsensus().sidechain.single_bundle_height};
+        // The same blocks as those that wait for the record to be filled in (WaitsForBackfill).
+        const Consensus::SidechainParams& params{chainman.GetConsensus().sidechain};
+        const int from{std::min(params.single_bundle_height, params.audit2_height)};
         CBlockIndex* first{nullptr};
         for (CBlockIndex* pindex{chainman.ActiveChain().Tip()}; pindex && pindex->nHeight > 0 && pindex->nHeight >= from; pindex = pindex->pprev) {
             // A block follows the mainchain up to the block before its commitment, then checks.
