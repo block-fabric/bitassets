@@ -263,11 +263,11 @@ public:
         m_assumed_chain_state_size = 1;
 
         // The genesis reward pays an unspendable output: there is no premine.
-        // Restarted on 05/Oct/2026, after a third security audit changed the drivechain and sidechain rules.
-        genesis = CreateGenesisBlock("Chains testnet 05/Oct/2026 after the third audit: one chain to mine them all", CScript() << OP_RETURN, 1791205858, 3092956453, 0x1d00ffff, 1, 50 * COIN);
+        // Restarted on 08/Oct/2026, after a fourth security audit changed the drivechain and sidechain rules.
+        genesis = CreateGenesisBlock("Chains testnet 08/Oct/2026 after the fourth audit: one chain to mine them all", CScript() << OP_RETURN, 1791511194, 959884959, 0x1d00ffff, 1, 50 * COIN);
         consensus.hashGenesisBlock = genesis.GetHash();
-        assert(consensus.hashGenesisBlock == uint256{"000000001678618f202769500f0389987362d034990984a07b1503415178feee"});
-        assert(genesis.hashMerkleRoot == uint256{"96200bfc5ef1d780fe11c33d73b7d44fd95628b91d7189f83bf0fe6541188d10"});
+        assert(consensus.hashGenesisBlock == uint256{"000000000d299de396d2bea052a8411d4410da5464ec79ec9648b77e8a824f24"});
+        assert(genesis.hashMerkleRoot == uint256{"806158a4b6d576cdb331b74225d8d7efaf6c6ff2b41b758934ebf9e4860f3c4a"});
 
         // No DNS or fixed seeds yet; peers are added with -addnode.
         vFixedSeeds.clear();
@@ -287,7 +287,7 @@ public:
         m_assumeutxo_data = {};
 
         chainTxData = ChainTxData{
-            .nTime    = 1791205858,
+            .nTime    = 1791511194,
             .tx_count = 1,
             .dTxRate  = 0,
         };
