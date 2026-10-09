@@ -311,10 +311,9 @@ bool State::MainPending(const Mainchain& mainchain, const Consensus::SidechainPa
 
 bool State::MainPendingNext(const Mainchain& mainchain, const Consensus::SidechainParams& params) const
 {
-    // A record not filled in yet may miss proposals: as if one were pending.
     const auto bundle{Bundle()};
     const uint256 ours{bundle ? bundle->hash : uint256{}};
-    return mainchain.NeedsBackfill() || mainchain.SupportedPending(MainHeight(), params.pending_min_score, ours) ||
+    return mainchain.SupportedPending(MainHeight(), params.pending_min_score, ours) ||
            mainchain.SupportedPending(mainchain.Height(), params.pending_min_score, ours) ||
            mainchain.RisingLeader(MainHeight(), PENDING_TREND_BLOCKS, PENDING_TREND_MIN_RISE, ours) ||
            mainchain.RisingLeader(mainchain.Height(), PENDING_TREND_BLOCKS, PENDING_TREND_MIN_RISE, ours);

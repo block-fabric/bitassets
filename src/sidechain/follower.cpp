@@ -199,43 +199,6 @@ bool Follower::UpdateRecord(bool may_drop)
             m_allow_deep_reorg = false;
         }
     }};
-    // A record written before it kept proposed bundles gets them, block by block, before anything
-    // else. Blocks are only filled in, never dropped: no commitment goes missing meanwhile. A block
-    // the mainchain no longer has stops it; the loop below then drops it and those above it, and
-    // fetches what replaced them, proposals included.
-    if (may_drop && record.NeedsBackfill()) {
-        LogInfo("Filling in the withdrawal bundles proposed in the %d mainchain blocks on record", record.Height() + 1);
-        int filled{-1};
-        std::optional<int> moved;
-        for (int from{0}; from <= record.Height() && !moved; from += BATCH) {
-            if (m_stop) return changed;
-            const UniValue batch{fetch(from, BATCH)};
-            for (size_t i{0}; i < batch.size() && from + static_cast<int>(i) <= record.Height(); ++i) {
-                const int h{from + static_cast<int>(i)};
-                if (!record.Backfill(h, Hash256(batch[i]["hash"]), ParseProposed(batch[i]), ParsePending(batch[i]))) {
-                    moved = h;
-                    break;
-                }
-                filled = h;
-            }
-            // A batch cut short: the mainchain node does not have the blocks yet.
-            if (!moved && filled < std::min(from + BATCH - 1, record.Height())) break;
-        }
-        if (moved) {
-            // The mainchain left the record at this height: what is above goes, and comes back, proposals
-            // included, from the mainchain as it is now.
-            before_drop(*moved - 1);
-            const std::vector<MainBlock> removed{record.Truncate(*moved - 1)};
-            LOCK(m_mutex);
-            for (const MainBlock& block : removed) {
-                if (block.bmm && !record.CommittedHeight(*block.bmm)) m_uncommitted.push_back(*block.bmm);
-            }
-            changed = true;
-        } else if (filled < record.Height()) {
-            throw std::runtime_error("The mainchain node does not have all the blocks on record yet (is it still syncing?); waiting for it before going on");
-        }
-        record.BackfillDone();
-    }
     while (!m_stop) {
         const int height{record.Height()};
         // The block on record is asked for again, to learn whether the mainchain still has it.
@@ -562,57 +525,6 @@ void Follower::CheckActiveChain()
             }
         }
     }
-    // Blocks connected while the record missed the bundles that mainchain blocks proposed were checked
-    // as if none was pending (State::MainPending): the lowest that started a bundle or refunded a
-    // withdrawal while one was pending is checked again, with those above it.
-    const bool recheck{!lowest && record.RecheckPending()};
-    // Whether the blocks to be checked again were: the recheck is done only then.
-    bool rechecked{recheck};
-    std::optional<std::string> too_deep;
-    if (recheck) {
-        LOCK(::cs_main);
-        // Every block but the first.
-        const int from{1};
-        // From the bottom up, up to the first block that acted while a bundle was pending: the
-        // lowest to check again, and the scan stops there.
-        CBlockIndex* first{nullptr};
-        for (int height{from}; height <= chainman.ActiveChain().Height() && !first; ++height) {
-            CBlockIndex* pindex{chainman.ActiveChain()[height]};
-            // A block follows the mainchain up to the block before its commitment, then checks.
-            const auto bmm_height{record.CommittedHeight(pindex->GetBlockHash())};
-            if (!bmm_height || !record.BundlePending(*bmm_height - 1)) continue;
-            // A pruned block cannot be checked again: it is left as it is.
-            CBlock block;
-            if (!chainman.m_blockman.ReadBlock(block, *pindex)) continue;
-            const bool acts{std::any_of(block.vtx.begin(), block.vtx.end(), [](const CTransactionRef& tx) {
-                return std::any_of(tx->vout.begin(), tx->vout.end(), [&](const CTxOut& out) {
-                    return tx->IsCoinBase() ? ParseBundleCommitScript(out.scriptPubKey).has_value() : ParseRefundScript(out.scriptPubKey).has_value();
-                });
-            })};
-            if (acts) first = pindex;
-        }
-        if (first) {
-            // Checking it again takes it back first, which needs the undo data of the sidechain state
-            // from the tip down to it: kept only for the last DRIVECHAIN_UNDO_DEPTH blocks. Deeper,
-            // the chainstate has to be built anew; the recheck stays to be done until then, and the
-            // node does not go on with blocks a node synced from scratch would refuse.
-            drivechain::BlockUndo undo;
-            if (!chainman.m_blockman.m_drivechain_db->ReadBlockUndo(first->GetBlockHash(), undo)) {
-                too_deep = strprintf("The record of the mainchain is complete again, and block %s at height %d, which acted while a "
-                                     "withdrawal bundle was pending on the mainchain, has to be checked again; it is too deep to be taken "
-                                     "back in place (the undo data is kept for the last %d blocks). Restart with -reindex-chainstate.",
-                                     first->GetBlockHash().ToString(), first->nHeight, DRIVECHAIN_UNDO_DEPTH);
-            } else {
-                LogInfo("The record of the mainchain is complete again: checking block %s and the blocks after it again", first->GetBlockHash().ToString());
-                if (!moved || first->nHeight < moved->nHeight) moved = first;
-            }
-        }
-    }
-    if (too_deep) {
-        m_stop = true;
-        chainman.GetNotifications().fatalError(Untranslated(*too_deep));
-        throw std::runtime_error(*too_deep);
-    }
     if (lowest) {
         LogInfo("Block %s and the blocks after it have no commitment on the mainchain", lowest->GetBlockHash().ToString());
         BlockValidationState state;
@@ -626,12 +538,10 @@ void Follower::CheckActiveChain()
         const bool taken_back{WITH_LOCK(::cs_main, return !chainman.ActiveChain().Contains(*moved))};
         if (!taken_back) {
             LogWarning("Block %s could not be taken back to be checked again; trying again later", moved->GetBlockHash().ToString());
-            rechecked = false;
         }
         WITH_LOCK(::cs_main, chainman.ActiveChainstate().ReconsiderRecordFailure(moved));
         chainman.ActiveChainstate().ActivateBestChain(state);
     }
-    if (rechecked) record.RecheckDone();
     // Blocks marked failed against the record, whose commitment the record has now: a node that
     // stopped between learning of the commitment and acting on it would otherwise never take them
     // again. Each has a commitment on the mainchain, which costs a fee: there cannot be many.
@@ -649,10 +559,8 @@ void Follower::CheckActiveChain()
         BlockValidationState state;
         chainman.ActiveChainstate().ActivateBestChain(state);
     }
-    // A recheck left for after the blocks without commitment went: on the next round.
-    const bool done{!record.RecheckPending()};
     LOCK(m_mutex);
-    m_chain_checked = done;
+    m_chain_checked = true;
 }
 
 bool Follower::CatchingUp() const

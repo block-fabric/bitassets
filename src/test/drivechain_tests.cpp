@@ -1692,8 +1692,8 @@ BOOST_AUTO_TEST_CASE(bundle_proposed_before_its_commitment)
 
 BOOST_AUTO_TEST_CASE(every_proposal_and_close_counts)
 {
-    // A bundle closed, forgotten by the mainchain and proposed again is pending again; closes and
-    // proposals of one block: the close first.
+    // A bundle closed, forgotten by the mainchain and proposed again: each proposal and each close is
+    // on record.
     sidechain::Mainchain mainchain;
     const uint256 x{0x77};
     Extend(mainchain, 1, [&](sidechain::MainBlock& b) { b.proposed.push_back(x); });
@@ -1702,18 +1702,18 @@ BOOST_AUTO_TEST_CASE(every_proposal_and_close_counts)
     Extend(mainchain, 1, [&](sidechain::MainBlock& b) { b.proposed.push_back(x); });
     Extend(mainchain, 1, [&](sidechain::MainBlock& b) { b.bundles.push_back({x, false}); b.proposed.push_back(x); });
     Extend(mainchain, 1, [&](sidechain::MainBlock& b) { b.bundles.push_back({x, true}); });
-    const std::vector<bool> expected{true, false, false, true, true, false};
-    for (int h{0}; h < 6; ++h) BOOST_CHECK_EQUAL(mainchain.BundlePending(h), expected[h]);
     BOOST_CHECK(mainchain.ClosedHeight(x) == 1);
     BOOST_CHECK(mainchain.ProposedBetween(x, 1, 3));
     BOOST_CHECK(!mainchain.ProposedBetween(x, 1, 2));
+    BOOST_CHECK(mainchain.ProposedBetween(x, 4, 4));
     // Truncated, the later events go, the earlier stay.
     mainchain.Truncate(3);
-    BOOST_CHECK(mainchain.BundlePending(3));
-    BOOST_CHECK(!mainchain.BundlePending(2));
+    BOOST_CHECK(mainchain.ProposedBetween(x, 3, 3));
+    BOOST_CHECK(!mainchain.ProposedBetween(x, 4, 10));
+    BOOST_CHECK(mainchain.ClosedHeight(x) == 1);
     mainchain.Truncate(2);
-    BOOST_CHECK(!mainchain.BundlePending(2));
     BOOST_CHECK(!mainchain.ProposedBetween(x, 1, 10));
+    BOOST_CHECK(mainchain.ClosedHeight(x) == 1);
 }
 
 BOOST_AUTO_TEST_CASE(record_independent_failures)
@@ -1772,52 +1772,9 @@ BOOST_AUTO_TEST_CASE(events_before_the_slot_activated_are_left_out)
     }
 }
 
-BOOST_AUTO_TEST_CASE(bundle_pending_index)
-{
-    // Whether a bundle was pending after a block, kept as a count per block, against the scan of every
-    // proposal it replaces: random proposals, closes, reorgs and fill-ins.
-    FastRandomContext rng{/*fDeterministic=*/true};
-    sidechain::Mainchain mainchain;
-    std::vector<sidechain::MainBlock> blocks;
-    const auto scan{[&](int h) {
-        // Block by block: closes, then proposals.
-        std::set<uint256> pending;
-        for (int i{0}; i < static_cast<int>(blocks.size()) && i <= h; ++i) {
-            for (const auto& e : blocks[i].bundles) pending.erase(e.hash);
-            for (const uint256& p : blocks[i].proposed) pending.insert(p);
-        }
-        return !pending.empty();
-    }};
-    uint8_t salt{0};
-    for (int round{0}; round < 400; ++round) {
-        const int action{static_cast<int>(rng.randrange(10))};
-        if (action == 0 && !blocks.empty()) {
-            const int keep{static_cast<int>(rng.randrange(blocks.size()))};
-            mainchain.Truncate(keep - 1);
-            blocks.resize(keep);
-        } else if (action == 1 && !blocks.empty()) {
-            const int h{static_cast<int>(rng.randrange(blocks.size()))};
-            if (blocks[h].proposed.empty()) {
-                blocks[h].proposed.push_back(uint256{static_cast<uint8_t>(rng.randrange(8) + 1)});
-                BOOST_REQUIRE(mainchain.Backfill(h, blocks[h].hash, blocks[h].proposed));
-            }
-        } else {
-            sidechain::MainBlock block;
-            block.hash = uint256{++salt};
-            block.hash.data()[31] = static_cast<uint8_t>(round);
-            if (!blocks.empty()) block.prev_hash = blocks.back().hash;
-            if (rng.randbool()) block.proposed.push_back(uint256{static_cast<uint8_t>(rng.randrange(8) + 1)});
-            if (rng.randbool()) block.bundles.push_back({uint256{static_cast<uint8_t>(rng.randrange(8) + 1)}, rng.randbool()});
-            BOOST_REQUIRE(mainchain.Append(block));
-            blocks.push_back(block);
-        }
-        for (int h{-1}; h <= static_cast<int>(blocks.size()) + 1; ++h) BOOST_REQUIRE_EQUAL(mainchain.BundlePending(h), scan(h));
-    }
-}
-
 BOOST_AUTO_TEST_CASE(record_keeps_what_the_follower_needs)
 {
-    // The sidechain found in the slot, why blocks failed, and a recheck still to do survive a restart.
+    // The sidechain found in the slot and why blocks failed survive a restart.
     const DBParams params{.path = m_args.GetDataDirBase() / "mainchain_record", .cache_bytes = 1 << 20};
     const uint256 block_a{0xa1}, block_b{0xb2};
     {
@@ -1826,63 +1783,66 @@ BOOST_AUTO_TEST_CASE(record_keeps_what_the_follower_needs)
         record.SetSlotIdentity({7, uint256{0x77}});
         record.NoteFailure(block_a, sidechain::Mainchain::Failure::RECORD);
         record.NoteFailure(block_b, sidechain::Mainchain::Failure::MANUAL);
-        BOOST_CHECK(!record.RecheckPending());
-        record.BackfillDone();
     }
     {
         sidechain::Mainchain record{params};
         BOOST_CHECK(record.GetSlotIdentity() == (sidechain::SlotIdentity{7, uint256{0x77}}));
         BOOST_CHECK(record.GetFailure(block_a) == sidechain::Mainchain::Failure::RECORD);
         BOOST_CHECK(record.GetFailure(block_b) == sidechain::Mainchain::Failure::MANUAL);
-        BOOST_CHECK(record.RecheckPending());
-        record.RecheckDone();
         record.ForgetFailure(block_a);
     }
     sidechain::Mainchain record{params};
-    BOOST_CHECK(!record.RecheckPending());
     BOOST_CHECK(!record.GetFailure(block_a));
     BOOST_CHECK(record.GetFailure(block_b) == sidechain::Mainchain::Failure::MANUAL);
 }
 
-BOOST_AUTO_TEST_CASE(record_of_old_format_is_filled_in)
+BOOST_AUTO_TEST_CASE(record_format)
 {
-    // A block written before blocks kept their proposed bundles reads with none.
+    // A block on record round-trips, with the bundles it proposed and those pending after it.
     sidechain::MainBlock block;
     block.hash = uint256{7};
     block.bundles.push_back({uint256{0xb}, true});
-    DataStream old_format{};
-    old_format << block.hash << block.prev_hash << block.time << false << block.deposits << block.bundles;
-    sidechain::MainBlock read;
-    old_format >> read;
-    BOOST_CHECK(read == block);
-    BOOST_CHECK(read.proposed.empty());
-    // So does one written before blocks kept the bundles pending after them.
     block.proposed.push_back(uint256{0xc});
-    DataStream version2{};
-    version2 << block.hash << block.prev_hash << block.time << false << block.deposits << block.bundles << block.proposed;
-    version2 >> read;
-    BOOST_CHECK(read == block);
-    BOOST_CHECK(read.pending.empty());
-    // The current format round-trips.
     block.pending.push_back({uint256{0xc}, 12});
     DataStream current{};
     current << block;
+    sidechain::MainBlock read;
     current >> read;
     BOOST_CHECK(read == block);
-    // Backfill fills in a block on record, and only the one it names.
-    sidechain::Mainchain mainchain;
-    sidechain::MainBlock first;
-    first.hash = uint256{1};
-    BOOST_REQUIRE(mainchain.Append(first));
-    BOOST_CHECK(!mainchain.Backfill(0, uint256{9}, {uint256{0xd}}));
-    BOOST_CHECK(mainchain.Backfill(0, uint256{1}, {uint256{0xd}}, {{uint256{0xd}, 5}}));
-    BOOST_CHECK(mainchain.BundlePending(0));
-    BOOST_CHECK(mainchain.SupportedPending(0, 5, uint256{}));
-    BOOST_CHECK(!mainchain.SupportedPending(0, 6, uint256{}));
-    BOOST_CHECK(!mainchain.SupportedPending(0, 5, uint256{0xd}));
-    // Above the record: as after its last block.
-    BOOST_CHECK(mainchain.SupportedPending(7, 5, uint256{}));
-    BOOST_CHECK(!mainchain.SupportedPending(-1, 0, uint256{}));
+
+    // A record kept on disk loads again.
+    const DBParams params{.path = m_args.GetDataDirBase() / "mainchain_format", .cache_bytes = 1 << 20};
+    {
+        sidechain::Mainchain record{params};
+        sidechain::MainBlock first;
+        first.hash = uint256{1};
+        first.proposed.push_back(uint256{0xd});
+        first.pending.push_back({uint256{0xd}, 5});
+        BOOST_REQUIRE(record.Append(first));
+    }
+    {
+        sidechain::Mainchain record{params};
+        BOOST_CHECK_EQUAL(record.Height(), 0);
+        BOOST_CHECK(record.SupportedPending(0, 5, uint256{}));
+        BOOST_CHECK(!record.SupportedPending(0, 6, uint256{}));
+        BOOST_CHECK(!record.SupportedPending(0, 5, uint256{0xd}));
+        // Above the record: as after its last block.
+        BOOST_CHECK(record.SupportedPending(7, 5, uint256{}));
+        BOOST_CHECK(!record.SupportedPending(-1, 0, uint256{}));
+    }
+    // One an older release wrote, with blocks, is refused: its blocks lack what the rules need.
+    CDBWrapper{params}.Write(uint8_t{'v'}, uint32_t{2});
+    BOOST_CHECK_THROW(sidechain::Mainchain{params}, std::runtime_error);
+    // An empty one is taken, in the current format.
+    const DBParams empty{.path = m_args.GetDataDirBase() / "mainchain_format_empty", .cache_bytes = 1 << 20};
+    CDBWrapper{empty}.Write(uint8_t{'v'}, uint32_t{2});
+    {
+        sidechain::Mainchain record{empty};
+        BOOST_CHECK_EQUAL(record.Height(), -1);
+    }
+    uint32_t version{0};
+    BOOST_CHECK(CDBWrapper{empty}.Read(uint8_t{'v'}, version));
+    BOOST_CHECK_EQUAL(version, 3U);
 }
 
 BOOST_AUTO_TEST_CASE(duplicate_commitment_survives_reorg)

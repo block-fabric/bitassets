@@ -2883,16 +2883,6 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     if (state.IsValid()) {
         std::string reject_reason;
         const auto side{m_chainman.SideContext(minted, block_store)};
-        // A record of the mainchain still missing the bundles its blocks proposed, or those pending
-        // after them (Mainchain::NeedsBackfill), cannot tell whether one was pending: the block waits for
-        // it, as for a commitment not on record yet. Not when checking blocks connected before (VerifyDB).
-        // Before anything changes the sidechain database, which nothing would give back here.
-        if (side && !verifying && m_chainman.m_mainchain->NeedsBackfill()) {
-            if (!fJustCheck) m_chainman.m_mainchain->NoteFailure(block_hash, sidechain::Mainchain::Failure::RECORD);
-            state.Invalid(BlockValidationResult::BLOCK_TIME_FUTURE, "bad-sc-main-backfill", "the record of the mainchain is still being filled in");
-            LogInfo("Block validation error: %s", state.ToString());
-            return false;
-        }
         const uint256 scdb_hash{scdb->GetBlockHash()};
         // A sidechain database that has not seen a block yet is empty and fits any block.
         if (scdb->GetBlockHash().IsNull()) scdb->SetBlockHash(hashPrevBlock);
@@ -5585,12 +5575,6 @@ util::Result<void> Chainstate::RollForwardSidechainDB(drivechain::SidechainDB& s
         CAmount minted{0};
         std::optional<sidechain::StoreOverlay> block_store;
         const std::optional<drivechain::SideContext> side{side_store ? m_chainman.SideContext(minted, block_store.emplace(*side_store, /*journal=*/true)) : std::nullopt};
-        // What depends on the record of the mainchain stops here (see ConnectBlock): the block waits
-        // for a record that is still being filled in, or fails against the record as it is.
-        if (stopped_at && side && Assert(m_chainman.m_mainchain)->NeedsBackfill()) {
-            *stopped_at = next;
-            return {};
-        }
         if (!scdb.ConnectBlock(block, height, params, undo, &deposits, reject_reason, side ? &*side : nullptr)) {
             LogError("%s: block %s breaks the drivechain rules (%s)", __func__, next->GetBlockHash().ToString(), reject_reason);
             // Back to the block before it (the undo data is complete at any point of failure); the

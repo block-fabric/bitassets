@@ -49,7 +49,7 @@ Beyond the mainchain tests:
 | `paid_on_another_branch` | A bundle committed on another branch, then paid by the mainchain, removes the withdrawals it paid. |
 | `paid_on_another_branch_oldest_first` | Of identical withdrawals, a payout from another branch removes the oldest. |
 | `pending_bundle_holds_refunds_back_only_with_support` | The double payout: no refund while a bundle of another branch is pending on the mainchain with support; a new bundle can start. |
-| `record_of_old_format_is_filled_in` | A mainchain record written before blocks kept their proposed bundles reads, and is filled in. |
+| `record_format` | A mainchain record keeps the bundles each block proposed and those pending after it; one an older release wrote is refused. |
 | `duplicate_commitment_survives_reorg` | A block committed to twice keeps its first commitment when the mainchain drops the second. |
 
 ## Functional tests
