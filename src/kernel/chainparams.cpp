@@ -345,7 +345,7 @@ public:
         consensus.sidechain.bundle_retry_delay = 20;
         consensus.sidechain.bitassets_reveal_depth = 3;
         // The height of the mainchain block that activated the slot; nothing is left out at 0.
-        consensus.sidechain.main_activation_height = 0; // set after the slot activates on the restarted test network
+        consensus.sidechain.main_activation_height = 1110; // the block that activated the slot on the restarted test network
         // A tenth of the testnet mainchain's withdrawal_min_score (300); proposals within an hour.
         consensus.sidechain.pending_min_score = 30;
         consensus.sidechain.unproposed_expiry_blocks = 60;
