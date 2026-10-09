@@ -71,6 +71,7 @@ class DrivechainTest(BitcoinTestFramework):
         self.test_bmm()
         self.test_restart_and_reindex()
         self.test_reorg()
+        self.test_walletbroadcast_off()
 
     def test_proposals(self):
         self.log.info("Propose a sidechain and ack it until it activates")
@@ -573,6 +574,22 @@ class DrivechainTest(BitcoinTestFramework):
 
         # The sidechain database is part of what a full verification of the chain checks.
         assert node.verifychain(4, 0)
+
+    def test_walletbroadcast_off(self):
+        self.log.info("With -walletbroadcast=0 a deposit is kept for the user to send, not abandoned")
+        self.restart_node(0, extra_args=["-fallbackfee=0.0002", "-walletbroadcast=0"])
+        self.connect_nodes(0, 1)
+        node = self.nodes[0]
+        deposit = node.createsidechaindeposit(SLOT, "frank", 1)
+        assert deposit["txid"] not in node.getrawmempool()
+        wtx = node.gettransaction(deposit["txid"])
+        assert_equal(wtx["confirmations"], 0)
+        assert all(not d.get("abandoned", False) for d in wtx["details"])
+        # The user sends it: it is a valid deposit.
+        node.sendrawtransaction(wtx["hex"])
+        assert deposit["txid"] in node.getrawmempool()
+        self.mine()
+        assert_equal(node.listsidechaindeposits(SLOT)[-1]["txid"], deposit["txid"])
 
 
 if __name__ == '__main__':
