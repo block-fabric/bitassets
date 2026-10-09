@@ -347,14 +347,14 @@ public:
         // The test network had a trade into an abandoned pool before (block 621).
         consensus.sidechain.bitassets_pool_rules_height = 660;
         consensus.sidechain.bitassets_release_height = 720;
-        consensus.sidechain.bitassets_audit_height = 4469; // audits 2-4 on the test network: moved out while the fourth audit's fixes are made
-        consensus.sidechain.bitassets_audit2_height = 4469; // audits 2-4 on the test network: moved out while the fourth audit's fixes are made
+        consensus.sidechain.bitassets_audit_height = 2672; // audits 2-4 on the test network, a few blocks after the deploy
+        consensus.sidechain.bitassets_audit2_height = 2672; // audits 2-4 on the test network, a few blocks after the deploy
         consensus.sidechain.bitassets_reveal_depth = 3;
         // The test network ran without it until then; see SidechainParams.
         consensus.sidechain.single_bundle_height = 3100;
         // The height of the mainchain block that activated the slot; nothing is left out at 0.
         consensus.sidechain.main_activation_height = 2208;
-        consensus.sidechain.audit2_height = 4469; // audits 2-4 on the test network: moved out while the fourth audit's fixes are made
+        consensus.sidechain.audit2_height = 2672; // audits 2-4 on the test network, a few blocks after the deploy
         // A tenth of the testnet mainchain's withdrawal_min_score (300); proposals within an hour.
         consensus.sidechain.pending_min_score = 30;
         consensus.sidechain.unproposed_expiry_blocks = 60;
