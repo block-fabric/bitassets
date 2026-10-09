@@ -24,6 +24,7 @@
 #include <qt/initexecutor.h>
 #include <qt/intro.h>
 #include <qt/networkstyle.h>
+#include <qt/noderpc.h>
 #include <qt/optionsmodel.h>
 #include <qt/platformstyle.h>
 #include <qt/splashscreen.h>
@@ -221,6 +222,9 @@ void BitcoinApplication::setupPlatformStyle()
 
 BitcoinApplication::~BitcoinApplication()
 {
+    // In case requestShutdown did not run (an initialization that failed, the tests): no RPC call
+    // of the pages may still run once the node and the thread's parent (this) are gone.
+    NodeRpc::Stop();
     m_executor.reset();
 
     delete window;
@@ -349,6 +353,9 @@ void BitcoinApplication::requestShutdown()
     // Request node shutdown, which can interrupt long operations, like
     // rescanning a wallet.
     node().startShutdown();
+    // The RPC calls the pages run off the GUI thread: the queued ones are skipped and the one under
+    // way is waited for, so that none runs while the node shuts down.
+    NodeRpc::Stop();
     // Prior to unsetting the client model, stop listening backend signals
     if (clientModel) {
         clientModel->stop();

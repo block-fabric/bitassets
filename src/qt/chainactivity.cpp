@@ -19,6 +19,7 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <utility>
 #include <string>
 #include <vector>
 
@@ -103,11 +104,26 @@ void ChainActivity::showEvent(QShowEvent* event)
 void ChainActivity::refresh()
 {
     if (!m_client_model) return;
+    // Off the GUI thread, after the calls of the other pages (NodeRpc::RunAsync), one at a time.
+    if (m_fetching) {
+        m_refresh_again = true;
+        return;
+    }
+    m_fetching = true;
+    // The client model outlives the thread of RunAsync (NodeRpc::Stop comes first at shutdown).
     ClientModel* const client_model{m_client_model};
-    apply(Fetch([client_model](const std::string& method, const UniValue& params) {
-        QString error;
-        return NodeRpc::Call(client_model, method, params, error);
-    }, m_last));
+    NodeRpc::RunAsync(this, [this, client_model, last = std::move(m_last)]() mutable -> std::function<void()> {
+        Snapshot snapshot{Fetch([client_model](const std::string& method, const UniValue& params) {
+            QString error;
+            return NodeRpc::Call(client_model, method, params, error);
+        }, std::move(last))};
+        // On the GUI thread, if this widget is still there.
+        return [this, snapshot = std::move(snapshot)]() mutable {
+            m_fetching = false;
+            apply(std::move(snapshot));
+            if (std::exchange(m_refresh_again, false) && isVisible()) refresh();
+        };
+    });
 }
 
 ChainActivity::Snapshot ChainActivity::Fetch(const CallFn& call, Snapshot last)

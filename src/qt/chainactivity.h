@@ -81,6 +81,9 @@ private:
     ClientModel* m_client_model{nullptr};
     //! What the last refresh showed.
     Snapshot m_last;
+    //! A Fetch is under way off the GUI thread (with m_last), and whether to refresh again after it.
+    bool m_fetching{false};
+    bool m_refresh_again{false};
     QTableWidget* m_blocks;
     QTableWidget* m_transactions;
     //! Limits how often the tables are refreshed while blocks come in fast.
