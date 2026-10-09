@@ -239,7 +239,6 @@ public:
                        .message_start = {0x5c, 0x1d, 0xec, 0x01}, .default_port = 9655, .bech32_hrp = "sc"});
         // Set when the slot activates on the mainchain: the height of the block that activated it.
         consensus.sidechain.main_activation_height = 0;
-        consensus.sidechain.audit2_height = 0;
         // A tenth of the mainchain's withdrawal_min_score (64800); proposals within a day.
         consensus.sidechain.pending_min_score = 6480;
         consensus.sidechain.unproposed_expiry_blocks = 1440;
@@ -344,11 +343,8 @@ public:
                        .message_start = {0x5c, 0x1d, 0xec, 0x02}, .default_port = 19655, .bech32_hrp = "tsc"});
         // The mainchain of the test network votes on a withdrawal bundle within 600 blocks.
         consensus.sidechain.bundle_retry_delay = 20;
-        // The test network ran without it until then; see SidechainParams.
-        consensus.sidechain.single_bundle_height = 1'000'000;
         // The height of the mainchain block that activated the slot; nothing is left out at 0.
         consensus.sidechain.main_activation_height = 0;
-        consensus.sidechain.audit2_height = 999999999; // AUDIT2_TESTNET: set at deploy
         // A tenth of the testnet mainchain's withdrawal_min_score (300); proposals within an hour.
         consensus.sidechain.pending_min_score = 30;
         consensus.sidechain.unproposed_expiry_blocks = 60;
@@ -461,7 +457,6 @@ public:
         MakeSidechain({.slot = 0, .genesis_message = "Sidechain template, signet", .genesis_time = 1790900000,
                        .message_start = {0x5c, 0x1d, 0xec, 0x03}, .default_port = 39655, .bech32_hrp = "tsc"});
         consensus.sidechain.main_activation_height = 0;
-        consensus.sidechain.audit2_height = 0;
         // The Chains signet has the rules of its main network.
         consensus.sidechain.pending_min_score = 6480;
         consensus.sidechain.unproposed_expiry_blocks = 1440;
@@ -558,8 +553,7 @@ public:
             consensus.sidechain.enabled = true;
             consensus.sidechain.slot = *opts.sidechain_slot;
             consensus.sidechain.bundle_retry_delay = 5;
-            consensus.sidechain.audit2_height = 0;
-            // A tenth of the regtest mainchain's withdrawal_min_score (30).
+                // A tenth of the regtest mainchain's withdrawal_min_score (30).
             consensus.sidechain.pending_min_score = 3;
             consensus.sidechain.unproposed_expiry_blocks = 20;
             // A sidechain has no sidechains of its own.

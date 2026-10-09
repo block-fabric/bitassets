@@ -228,7 +228,7 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
         if (!side.ApplyMainEvents(mainchain.Height(), mainchain, nHeight, side_params, side_outputs, reject_reason)) {
             throw std::runtime_error(strprintf("%s: the block does not fit the mainchain on record (%s)", __func__, reject_reason));
         }
-        const bool main_pending{side.MainPending(mainchain, nHeight, side_params)};
+        const bool main_pending{side.MainPending(mainchain, side_params)};
         // Take transactions out of the block, with what spends their outputs.
         const auto drop{[&](std::set<Txid> dropped) {
             // The fee and sigop lists have no entry for the coinbase: transaction i is entry i - 1.
@@ -256,7 +256,7 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
         }};
         std::optional<uint256> bundle_hash;
         std::vector<COutPoint> bundled;
-        const auto bundle{side.NextBundle(nHeight, pindexPrev->GetBlockHash(), side_params, &bundled, main_pending)};
+        const auto bundle{side.NextBundle(nHeight, pindexPrev->GetBlockHash(), side_params, &bundled)};
         // Not a bundle the mainchain has closed already: the block would be invalid. One proposed ahead
         // and still pending is fine, as in State::ConnectBlock (all closes on record are before the
         // next mainchain block, which commits to this one).
@@ -286,7 +286,7 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
             if (!dropped.empty()) drop(std::move(dropped));
             if (!refund_pending) {
                 bundle_hash = bundle->GetHash().ToUint256();
-                if (!side.StartBundle(*bundle_hash, nHeight, pindexPrev->GetBlockHash(), side_params, reject_reason, main_pending)) bundle_hash.reset();
+                if (!side.StartBundle(*bundle_hash, nHeight, pindexPrev->GetBlockHash(), side_params, reject_reason)) bundle_hash.reset();
             }
         }
         // A transaction of the mempool can break the rules of the sidechain in this block: a refund of a
@@ -304,7 +304,7 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
             drop({pblock->vtx[i]->GetHash()});
         }
         // As many of the payouts owed as a block may pay; the rest wait for the next block.
-        side_outputs = side.TakePayouts(std::move(side_outputs), std::move(side_tx_outputs), nHeight >= side_params.audit2_height);
+        side_outputs = side.TakePayouts(std::move(side_outputs), std::move(side_tx_outputs));
         if (bundle_hash) side_outputs.emplace_back(0, sidechain::BundleCommitScript(*bundle_hash));
         m_chainstate.ReleaseSideCursor();
     }

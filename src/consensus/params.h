@@ -100,40 +100,15 @@ struct SidechainParams {
     /** Number of blocks to wait after a withdrawal bundle failed before the next one can be made. */
     int bundle_retry_delay{144};
     /**
-     * From this height, no withdrawal is refunded, and no bundle started, while a bundle of this
-     * sidechain is pending on the mainchain. It may hold any withdrawal: one committed on another
-     * branch of this chain, after a reorg, holds withdrawals this branch thinks are free; paid,
-     * it would pay them a second time.
-     */
-    int single_bundle_height{0};
-    /**
      * Height of the mainchain block that activated this sidechain in its slot (activationheight in
      * the mainchain's getsidechain). What the mainchain did up to that block, deposits included, was
-     * for whatever held the slot before: from audit2_height on it is not applied. The follower also
-     * stops if the mainchain says another activation. 0 if unknown (nothing is left out).
+     * for whatever held the slot before: it is not applied. The follower also stops if the mainchain
+     * says another activation. 0 if unknown (nothing is left out).
      */
     int main_activation_height{0};
     /**
-     * From this height, the rules of the second audit (2026-10-07): the mainchain's events up to
-     * main_activation_height are left out, and each payout queue gets its share of a block.
-     *
-     * And those of the third (2026-10-08), which takes for granted that the mainchain pays one bundle
-     * per slot and fails the others (its drivechain.single_payout_height, which must be at or below the
-     * mainchain block this height follows):
-     *  - a bundle of another branch of this chain pending on the mainchain no longer holds back a new
-     *    bundle: paying one fails the other, and the withdrawals the other pays are matched here
-     *    (State::ApplyMainEvents);
-     *  - it holds back refunds only with a score of pending_min_score or more on the mainchain, or
-     *    while it leads the slot with a rising score, so that a bundle proposed by anyone (a bare M3)
-     *    does not freeze them;
-     *  - a bundle this chain committed to that the mainchain has not proposed unproposed_expiry_blocks
-     *    mainchain blocks after the commitment fails here.
-     */
-    int audit2_height{0};
-    /**
      * Least mainchain work score with which a bundle pending on the mainchain, other than the one of
-     * this chain, holds back refunds (from audit2_height). A tenth of the mainchain's
-     * withdrawal_min_score: a bundle that miners downvote stays near 0, and one that nobody downvotes
+     * this chain, holds back refunds. A tenth of the mainchain's withdrawal_min_score: a bundle that miners downvote stays near 0, and one that nobody downvotes
      * needs about a tenth of the hashrate upvoting it to get there before it expires. Below it, a
      * bundle is far from being paid: paying it would take a majority of the hashrate upvoting it over
      * the downvotes of the miners who vouch for this chain's bundle.
@@ -148,7 +123,7 @@ struct SidechainParams {
      * not either. Keeping one rising so takes net upvotes in a quarter of the blocks, all along.
      */
     uint32_t pending_min_score{6480};
-    /** Mainchain blocks after its commitment in which the mainchain has to propose a bundle (from audit2_height). */
+    /** Mainchain blocks after its commitment in which the mainchain has to propose a bundle. */
     int unproposed_expiry_blocks{1440};
 };
 

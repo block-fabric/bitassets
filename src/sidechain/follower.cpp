@@ -61,7 +61,7 @@ CAmount ParseAmount(const UniValue& value)
 }
 
 /** The bundles of this sidechain pending after a mainchain block, with their scores. A node that does
- * not say is too old to follow: from SidechainParams::audit2_height they decide whether refunds wait. */
+ * not say is too old to follow: they decide whether refunds wait. */
 std::vector<MainPendingBundle> ParsePending(const UniValue& obj)
 {
     if (!obj.exists("pending")) {
@@ -235,12 +235,6 @@ bool Follower::UpdateRecord(bool may_drop)
             throw std::runtime_error("The mainchain node does not have all the blocks on record yet (is it still syncing?); waiting for it before going on");
         }
         record.BackfillDone();
-        // No block of the active chain acted on what the record missed: nothing to check again. (So
-        // it is for a chainstate built anew, whose blocks waited for the record to be filled in.)
-        const Consensus::SidechainParams& params{m_node.chainman->GetConsensus().sidechain};
-        if (WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Height()) < std::min(params.single_bundle_height, params.audit2_height)) {
-            record.RecheckDone();
-        }
     }
     while (!m_stop) {
         const int height{record.Height()};
@@ -577,9 +571,8 @@ void Follower::CheckActiveChain()
     std::optional<std::string> too_deep;
     if (recheck) {
         LOCK(::cs_main);
-        // The same blocks as those that wait for the record to be filled in (WaitsForBackfill).
-        const Consensus::SidechainParams& params{chainman.GetConsensus().sidechain};
-        const int from{std::max(1, std::min(params.single_bundle_height, params.audit2_height))};
+        // Every block but the first.
+        const int from{1};
         // From the bottom up, up to the first block that acted while a bundle was pending: the
         // lowest to check again, and the scan stops there.
         CBlockIndex* first{nullptr};

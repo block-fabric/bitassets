@@ -99,12 +99,6 @@ using node::SnapshotMetadata;
 static constexpr auto DATABASE_WRITE_INTERVAL_MIN{50min};
 //! Changes of the sidechain state held in memory before they are written out with the coins.
 static constexpr size_t SIDE_CACHE_MAX_BYTES{64 << 20};
-/** Whether a block at `height` acts on the bundles pending on the mainchain, which a record of the
- * mainchain still being filled in (Mainchain::NeedsBackfill) does not know. */
-static bool WaitsForBackfill(const Consensus::SidechainParams& params, int height)
-{
-    return height >= std::min(params.single_bundle_height, params.audit2_height);
-}
 static constexpr auto DATABASE_WRITE_INTERVAL_MAX{70min};
 /** Maximum age of our tip for us to be considered current for fee estimation */
 static constexpr std::chrono::hours MAX_FEE_ESTIMATION_TIP_AGE{3};
@@ -810,7 +804,7 @@ bool MemPoolAccept::DrivechainChecks(Workspace& ws)
                 if (withdrawal->amount < side_params.min_withdrawal) return ws.m_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "bad-sc-withdrawal-amount");
             } else if (const auto refund{sidechain::ParseRefundScript(out.scriptPubKey)}) {
                 std::string reject_reason;
-                const bool main_pending{side.MainPendingNext(*Assert(m_active_chainstate.m_chainman.m_mainchain), m_active_chainstate.m_chain.Height() + 1, side_params)};
+                const bool main_pending{side.MainPendingNext(*Assert(m_active_chainstate.m_chainman.m_mainchain), side_params)};
                 if (!side.CheckRefund(*refund, reject_reason, main_pending)) return ws.m_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, reject_reason);
                 if (const auto other{m_pool.m_refunds.find(refund->withdrawal)}; other != m_pool.m_refunds.end() && !ws.m_conflicts.contains(other->second)) {
                     return ws.m_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "sc-refund-in-mempool");
@@ -2893,7 +2887,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         // after them (Mainchain::NeedsBackfill), cannot tell whether one was pending: the block waits for
         // it, as for a commitment not on record yet. Not when checking blocks connected before (VerifyDB).
         // Before anything changes the sidechain database, which nothing would give back here.
-        if (side && !verifying && WaitsForBackfill(side->params, pindex->nHeight) && m_chainman.m_mainchain->NeedsBackfill()) {
+        if (side && !verifying && m_chainman.m_mainchain->NeedsBackfill()) {
             if (!fJustCheck) m_chainman.m_mainchain->NoteFailure(block_hash, sidechain::Mainchain::Failure::RECORD);
             state.Invalid(BlockValidationResult::BLOCK_TIME_FUTURE, "bad-sc-main-backfill", "the record of the mainchain is still being filled in");
             LogInfo("Block validation error: %s", state.ToString());
@@ -5177,7 +5171,7 @@ void Chainstate::RemoveStaleDrivechainTxs()
     if (m_chainman.GetConsensus().sidechain.enabled) {
         // Nor while a bundle of this sidechain is pending on the mainchain.
         const sidechain::State side{SideState()};
-        const bool main_pending{side.MainPendingNext(*Assert(m_chainman.m_mainchain), tip->nHeight + 1, m_chainman.GetConsensus().sidechain)};
+        const bool main_pending{side.MainPendingNext(*Assert(m_chainman.m_mainchain), m_chainman.GetConsensus().sidechain)};
         for (const auto& [withdrawal, txid] : m_mempool->m_refunds) {
             if (side.GetWithdrawal(withdrawal) && !side.InBundle(withdrawal) && !main_pending) continue;
             if (const CTransactionRef tx{m_mempool->get(txid)}) stale.push_back(tx);
@@ -5593,7 +5587,7 @@ util::Result<void> Chainstate::RollForwardSidechainDB(drivechain::SidechainDB& s
         const std::optional<drivechain::SideContext> side{side_store ? m_chainman.SideContext(minted, block_store.emplace(*side_store, /*journal=*/true)) : std::nullopt};
         // What depends on the record of the mainchain stops here (see ConnectBlock): the block waits
         // for a record that is still being filled in, or fails against the record as it is.
-        if (stopped_at && side && WaitsForBackfill(side->params, height) && Assert(m_chainman.m_mainchain)->NeedsBackfill()) {
+        if (stopped_at && side && Assert(m_chainman.m_mainchain)->NeedsBackfill()) {
             *stopped_at = next;
             return {};
         }
