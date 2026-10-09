@@ -2783,7 +2783,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         // * p2sh (when P2SH enabled in flags and excludes coinbase)
         // * witness (when witness enabled in flags and excludes coinbase)
         nSigOpsCost += GetTransactionSigOpCost(tx, view, flags);
-        if (nSigOpsCost > params.GetConsensus().MaxBlockSigOpsCost(pindex->nHeight)) {
+        if (nSigOpsCost > params.GetConsensus().MaxBlockSigOpsCost()) {
             state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blk-sigops", "too many sigops");
             break;
         }
@@ -4413,7 +4413,7 @@ bool CheckBlock(const CBlock& block, BlockValidationState& state, const Consensu
         nSigOps += GetLegacySigOpCount(*tx);
     }
     // Without the height here: the limit of any height. ConnectBlock applies the one of the block's.
-    if (nSigOps * WITNESS_SCALE_FACTOR > consensusParams.MaxBlockSigOpsCostEver())
+    if (nSigOps * WITNESS_SCALE_FACTOR > consensusParams.MaxBlockSigOpsCost())
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blk-sigops", "out-of-bounds SigOpCount");
 
     if (fCheckPOW && fCheckMerkleRoot)
