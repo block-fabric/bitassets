@@ -2156,6 +2156,9 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
             chainman.GetNotifications().fatalError(err_str);
             return;
         }
+        // The transactions of the blocks a rollback at startup took back (a block of the chain broke
+        // the drivechain rules), before the mempool from disk: some of its transactions spend theirs.
+        chainman.ActiveChainstate().ReaddRolledBackTransactions();
         // Load mempool from disk
         if (auto* pool{chainman.ActiveChainstate().GetMempool()}) {
             const bool loaded{LoadMempool(*pool, ShouldPersistMempool(args) ? MempoolPath(args) : fs::path{}, chainman.ActiveChainstate(), {})};
