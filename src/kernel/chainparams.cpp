@@ -501,14 +501,8 @@ public:
                 dc.withdrawal_min_score = value;
             } else if (name == "max_pending_bundles") {
                 dc.max_pending_bundles = value;
-            } else if (name == "single_payout_height") {
-                dc.single_payout_height = value;
-            } else if (name == "idle_expiry_height") {
-                dc.idle_expiry_height = value;
             } else if (name == "idle_expiry_blocks") {
                 dc.idle_expiry_blocks = value;
-            } else if (name == "audit2_height") {
-                dc.audit2_height = value;
             } else if (name == "upvote_expiry_blocks") {
                 dc.upvote_expiry_blocks = value;
             } else if (name == "unvoted_forget_blocks") {
