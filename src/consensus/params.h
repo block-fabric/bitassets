@@ -104,30 +104,22 @@ struct DrivechainParams {
     /** Maximum number of pending withdrawal bundles per sidechain. */
     uint32_t max_pending_bundles{64};
     /**
-     * From this height, paying a bundle of a sidechain fails its other pending bundles. A sidechain
-     * means one bundle to be paid; others pending for its slot are copies left by a reorg of the
-     * sidechain, holding the same withdrawals, which would otherwise be paid a second time.
+     * A bundle that has been pending idle_expiry_blocks or more and has a score of 0 fails. Miners
+     * downvote the bundles their sidechain node does not vouch for -- a bundle a reorg of the
+     * sidechain left behind, or one proposed to get in the way -- which so go in that many blocks,
+     * rather than the whole withdrawal period.
      */
-    int single_payout_height{0};
-    /**
-     * From idle_expiry_height, a bundle that has been pending idle_expiry_blocks or more and has a
-     * score of 0 fails. Miners downvote the bundles their sidechain node does not vouch for -- a
-     * bundle a reorg of the sidechain left behind, or one proposed to get in the way -- which so go
-     * in that many blocks, rather than the whole withdrawal period.
-     */
-    int idle_expiry_height{0};
     int idle_expiry_blocks{1008};
     /**
-     * From this height, the rules of the second audit:
-     *  - a bundle that upvote_expiry_blocks blocks in a row did not upvote, counting from the block
-     *    that proposed it or from its last upvote, fails. Whoever proposes a bundle nobody vouches
-     *    for (to stall the withdrawals and refunds of a sidechain, whose software waits on what is
-     *    pending) has to keep upvoting it to keep it, rather than wait for the idle expiry;
-     *  - a failed bundle is forgotten withdrawal_period blocks after it failed, so that proposals
-     *    nobody votes for do not add to the state forever (see SidechainDB::ForgetFailedBundles);
-     *    one that no block ever upvoted, unvoted_forget_blocks blocks after it failed.
+     * A bundle that upvote_expiry_blocks blocks in a row did not upvote, counting from the block
+     * that proposed it or from its last upvote, fails. Whoever proposes a bundle nobody vouches for
+     * (to stall the withdrawals and refunds of a sidechain, whose software waits on what is pending)
+     * has to keep upvoting it to keep it, rather than wait for the idle expiry.
+     *
+     * A failed bundle is forgotten withdrawal_period blocks after it failed, so that proposals
+     * nobody votes for do not add to the state forever (see SidechainDB::ForgetFailedBundles); one
+     * that no block ever upvoted, unvoted_forget_blocks blocks after it failed.
      */
-    int audit2_height{0};
     int upvote_expiry_blocks{144};
     int unvoted_forget_blocks{1008};
 };

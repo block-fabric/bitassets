@@ -62,14 +62,13 @@ one helper, which checks three things for **every** block:
 | `full_queue_bundle_after_own_vote` | The miner proposes into a full queue only when that will be accepted. |
 | `one_withdrawal_per_sidechain_per_block` | Two bundles of one sidechain cannot both be paid in one block (the double payout). |
 | `paying_a_bundle_fails_the_others` | Once one bundle of a sidechain is paid, its other pending bundles fail. |
-| `single_payout_activation` | Below `single_payout_height`, the old rule (others stay pending) still applies. |
 | `follow_vote` | The miner upvotes the bundle its sidechain node handed it. |
 | `upvote_last_handed_bundle` | A bundle handed before the last is one the sidechain gave up: no upvote. |
 | `vouching` | The sidechain node vouches for its bundle, or for none; the miner's default vote follows. |
-| `idle_bundles_expire` | From `idle_expiry_height`, a bundle at score 0 for `idle_expiry_blocks` fails. |
-| `unvoted_bundles_expire` | From `audit2_height`, a bundle that `upvote_expiry_blocks` blocks in a row did not upvote fails; an upvote, in any form, starts the count again. |
+| `idle_bundles_expire` | A bundle at score 0 for `idle_expiry_blocks` fails. |
+| `unvoted_bundles_expire` | A bundle that `upvote_expiry_blocks` blocks in a row did not upvote fails; an upvote, in any form, starts the count again. |
 | `miner_keeps_its_bundle_upvoted` | The bundle the miner's sidechain node vouches for is upvoted from the block after its proposal on, and paid, however short `upvote_expiry_blocks`. |
-| `failed_bundles_are_forgotten` | From `audit2_height`, a failed bundle is forgotten a withdrawal period after it failed (and can be proposed again); a paid one never is. |
+| `failed_bundles_are_forgotten` | A failed bundle is forgotten a withdrawal period after it failed (and can be proposed again); a paid one never is. |
 | `state_snapshot_and_index` | The failed bundles by height are rebuilt when a snapshot is read. |
 | `bmm` | Blind merged mining: a request is valid only with the accept for it, on the block it names. |
 | `block_without_coinbase` | A block without a coinbase is refused with a reason, not a crash. |

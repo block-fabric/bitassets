@@ -7,7 +7,7 @@
 - getsidechainevents reports, for every block, the bundles pending after it with their score: the
   same at any later time, after a reorg, a restart and a rebuild of the database.
 - A failed bundle the sidechain database forgot is still "failed", and the miner does not propose it again.
-- A database derived under other drivechain parameters (an activation height that moved) is rebuilt,
+- A database derived under other drivechain parameters (a period that changed) is rebuilt,
   and the blocks are judged again under them: an active block they make invalid is taken back, a
   block found invalid under the former ones may become valid.
 """

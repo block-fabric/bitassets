@@ -230,11 +230,7 @@ public:
         consensus.drivechain.replacement_period = 120;
         consensus.drivechain.withdrawal_period = 600;
         consensus.drivechain.withdrawal_min_score = 300;
-        // The test network ran without it until then; see DrivechainParams.
-        consensus.drivechain.single_payout_height = 7500;
-        consensus.drivechain.idle_expiry_height = 7500;
         consensus.drivechain.idle_expiry_blocks = 30;
-        consensus.drivechain.audit2_height = 8153; // audits 2-4 on the test network, a few blocks after the deploy
         consensus.drivechain.upvote_expiry_blocks = 30;
         consensus.drivechain.unvoted_forget_blocks = 60;
         consensus.fPowAllowMinDifficultyBlocks = true;
@@ -444,14 +440,8 @@ public:
                 dc.withdrawal_min_score = value;
             } else if (name == "max_pending_bundles") {
                 dc.max_pending_bundles = value;
-            } else if (name == "single_payout_height") {
-                dc.single_payout_height = value;
-            } else if (name == "idle_expiry_height") {
-                dc.idle_expiry_height = value;
             } else if (name == "idle_expiry_blocks") {
                 dc.idle_expiry_blocks = value;
-            } else if (name == "audit2_height") {
-                dc.audit2_height = value;
             } else if (name == "upvote_expiry_blocks") {
                 dc.upvote_expiry_blocks = value;
             } else if (name == "unvoted_forget_blocks") {

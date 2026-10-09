@@ -5193,7 +5193,7 @@ bool Chainstate::PrepareDrivechainDB(const CBlockIndex* rebuild_from, bilingual_
         db.Wipe();
         break;
     case drivechain::Database::Format::OTHER_PARAMS:
-        // Derived under other drivechain parameters (an activation height that moved, say): the
+        // Derived under other drivechain parameters (a period that changed, say): the
         // snapshot, the undo data, the events and the deposit index may all differ under these.
         LogInfo("The sidechain database was derived under other drivechain parameters; it is rebuilt from the blocks");
         // So may the validity of blocks: those found invalid under the old rules are judged again.
