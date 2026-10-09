@@ -11,6 +11,8 @@
   and the blocks are judged again under them: an active block they make invalid is taken back, a
   block found invalid under the former ones may become valid.
 """
+from decimal import Decimal
+
 from test_framework.address import address_to_scriptpubkey
 from test_framework.messages import COIN, CTransaction, CTxOut
 from test_framework.script import CScript, OP_RETURN
@@ -192,6 +194,13 @@ class DrivechainHistoryTest(BitcoinTestFramework):
         self.log.info("Rules that changed with the parameters: an active block they make invalid is taken back at startup")
         n0, n1 = self.nodes
         self.sync_all()
+        # A transaction in a block above the one taken back, spending a coin from below it: it
+        # returns to the mempool, as in a reorg.
+        first_deposit_height = n0.getblock(n0.listsidechaindeposits(SLOT)[0]["blockhash"])["height"]
+        coin = next(u for u in n0.listunspent() if n0.getblockcount() - u["confirmations"] + 1 <= first_deposit_height - 101)
+        raw = n0.createrawtransaction([{"txid": coin["txid"], "vout": coin["vout"]}], [{n0.getnewaddress(): coin["amount"] - Decimal("0.001")}])
+        rolled_back = n0.sendrawtransaction(n0.signrawtransactionwithwallet(raw)["hex"])
+        self.generate(n0, 1)
         tip = n0.getbestblockhash()
         height = n0.getblockcount()
         state = n0.getdrivechaininfo()["statehash"]
@@ -203,6 +212,7 @@ class DrivechainHistoryTest(BitcoinTestFramework):
         invalid = [t for t in n0.getchaintips() if t["hash"] == tip]
         assert_equal(invalid[0]["status"], "invalid")
         assert_equal(n0.listactivesidechains(), [])
+        self.wait_until(lambda: rolled_back in n0.getrawmempool())
         # The node goes on under the new rules (and stays off the invalid branch).
         self.generate(n0, 1, sync_fun=self.no_op)
 
