@@ -52,8 +52,7 @@ spends a token without carrying it on, or outputs one it does not have, is inval
 - `addliquidity` puts both assets in, for shares of the pool (tokens like any other). The first
   deposit makes the pool and sets its price; it keeps 1000 shares for good, so that a pool is never
   emptied. Later deposits go in at the pool's price.
-- **The amounts of a deposit are the most that goes in** (the fourth audit's rules, from
-  `bitassets_audit2_height`). Into a pool someone provides liquidity to, the side that gives fewer
+- **The amounts of a deposit are the most that goes in** (the fourth audit's rules). Into a pool someone provides liquidity to, the side that gives fewer
   shares goes in whole and, of the other, only what those shares are worth at the pool's price
   (rounded up: the pool never loses); the rest comes back. The marker lists two result outputs: the
   shares, then what comes back — asset coins, or CHN paid by the coinbase to that output's address
@@ -119,29 +118,20 @@ queue, which pays a bounded number per block: 500 of the sidechain's own; fillin
 pay less is refused; less taken out of a pool, or coming back from a deposit, stays in it, for its
 providers; less from collecting an auction is not paid (it was burned when it went in).
 
-## Rules by height
+## Rules from genesis
 
-The rules of the first audit apply from `bitassets_audit_height`, those of the second (October 2026)
-from `bitassets_audit2_height`: from the start on mainnet, signet and regtest; on the test network
-both from the height set when it is deployed (the first no later than the second, so that what the
-second leaves to the first applies as soon as the second does).
+The rules of the audits apply from block 0 on every network: there are no activation heights, and
+the rules before them are gone.
 
-- Reservations made before the second audit's rules, committing to the name alone, still register
-  after them, under the rule of the first audit (only the oldest reservation of a commitment reveals
-  it), once they are deep enough.
-- A reservation of the name alone **mined** from the second audit's rules on registers nothing (it
-  can only be released, and the name reserved again). The wallet makes reservations bound to their
-  output's script from 100 blocks before the rules, so that one made before them and mined after
-  them still registers; such a reservation registers from the block the rules start at.
-- Under the second audit's rules, whether an asset can be retired is read from counts its record
-  keeps (auctions that hold some of it, its pools with providers), not by going through every
-  auction that quotes it.
+- A reservation registers only bound to its output's script; one of the name alone registers
+  nothing (it can only be released, and the name reserved again).
+- Whether an asset can be retired is read from counts its record keeps (auctions that hold some of
+  it, its pools with providers), not by going through every auction that quotes it.
 - Retiring an asset whose pools hold 1 satoshi of CHN gives it to mainchain miners too (a
-  withdrawal of 1 satoshi, without fee); before the second audit's rules, it stayed in the
-  mainchain's escrow.
+  withdrawal of 1 satoshi, without fee).
 
-A node stores the assets in a layout of its version (`bitassets::STORE_LAYOUT`, 3 since the third
-audit: the counts above); one that finds them in an earlier layout derives the sidechain state again
+A node stores the assets in a layout of its version (`bitassets::STORE_LAYOUT`, 4 since the audits'
+rules apply from genesis); one that finds them in an earlier layout derives the sidechain state again
 from its blocks at startup (a pruned node cannot, and has to be resynced).
 
 ## Commands
