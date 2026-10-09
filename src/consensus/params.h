@@ -100,36 +100,10 @@ struct SidechainParams {
     /** Number of blocks to wait after a withdrawal bundle failed before the next one can be made. */
     int bundle_retry_delay{144};
     /**
-     * BitAssets: the height from which a pool nobody provides liquidity to is closed to trades, and
-     * a pool opens (or reopens) only with a deposit of some size (bitassets/state.h).
-     */
-    int bitassets_pool_rules_height{0};
-    /** BitAssets: the height from which a dead asset can be retired (ReleaseAsset). */
-    int bitassets_release_height{0};
-    /**
-     * From this height, the rules of the audit of October 2026: an asset is registered only from the
-     * oldest reservation of its commitment (a copy, made to register it first once its maker reveals
-     * it, never is); and the withdrawal that gives the CHN of a retired asset to mainchain miners pays
-     * a script of its own (OP_RETURN "release" and the txid), so that it cannot be taken for another.
-     */
-    int bitassets_audit_height{0};
-    /**
-     * From this height, the rules of the second audit of October 2026 (bitassets/state.h): a
-     * reservation commits to the name and to the script of its output, and registers without the
-     * oldest-reservation rule (reservations made before keep it); an auction that quotes an asset and
-     * took nothing in does not keep the asset from being retired, nor pays a later asset of its name;
-     * an auction starts within MAX_AUCTION_DELAY blocks; a name that reads as another asset (CHN, a
-     * number, "0x") is refused; liquidity can be taken out when one side rounds to nothing; CHN
-     * results below MIN_CHN_PAYOUT are not paid out by the coinbase; a registration reveals a
-     * reservation only once it is bitassets_reveal_depth blocks deep; a retired asset's CHN are given
-     * to mainchain miners however few (1 satoshi included).
-     */
-    int bitassets_audit2_height{0};
-    /**
-     * From bitassets_audit2_height: a registration in block h reveals a reservation made in block r
-     * only if h - r >= bitassets_reveal_depth. Whoever makes a block sees every registration waiting
-     * for it, and could otherwise reserve the same name under a nonce of its own and register it in
-     * its own block, ahead of the one it saw.
+     * BitAssets: a registration in block h reveals a reservation made in block r only if
+     * h - r >= bitassets_reveal_depth. Whoever makes a block sees every registration waiting for it,
+     * and could otherwise reserve the same name under a nonce of its own and register it in its own
+     * block, ahead of the one it saw.
      */
     int bitassets_reveal_depth{1};
     /**

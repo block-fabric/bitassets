@@ -477,24 +477,20 @@ bool State::ApplyTxSteps(const CTransaction& tx, int height, const Consensus::Si
     // in CHN, the coinbase pays.
     CAmount released{0};
     bitassets::State assets{Writable()};
-    if (!assets.ApplyTx(tx, height, payouts, reject_reason, params.bitassets_pool_rules_height, &released, params.bitassets_release_height,
-                        params.bitassets_audit_height, params.bitassets_audit2_height, params.bitassets_reveal_depth)) return false;
+    if (!assets.ApplyTx(tx, height, payouts, reject_reason, &released, params.bitassets_reveal_depth)) return false;
     // CHN freed by retiring an asset go to mainchain miners: a withdrawal of 1 satoshi, burned on the
-    // mainchain (a bundle has to pay something), whose fee is the rest. Nobody can take it back.
-    // Before the second audit's rules, a single satoshi freed stayed in the mainchain's escrow, which
-    // nothing on this chain backs any more; from them, it is that withdrawal, with no fee.
-    if (released >= (height >= params.bitassets_audit2_height ? 1 : 2)) {
+    // mainchain (a bundle has to pay something), whose fee is the rest, however few (1 satoshi
+    // included). Nobody can take it back.
+    if (released >= 1) {
         Withdrawal withdrawal;
         withdrawal.outpoint = COutPoint{tx.GetHash(), RELEASE_WITHDRAWAL_INDEX};
         withdrawal.amount = 1;
         withdrawal.main_fee = released - 1;
+        // A script of its own: withdrawals are matched across branches by script and amount, and
+        // releases that looked alike could be taken one for another.
         std::vector<unsigned char> tag{'r', 'e', 'l', 'e', 'a', 's', 'e'};
-        // From the audit's rules, a script of its own: withdrawals are matched across branches by script
-        // and amount, and releases that looked alike could be taken one for another.
-        if (height >= params.bitassets_audit_height) {
-            const uint256 txid{tx.GetHash().ToUint256()};
-            tag.insert(tag.end(), txid.begin(), txid.end());
-        }
+        const uint256 txid{tx.GetHash().ToUint256()};
+        tag.insert(tag.end(), txid.begin(), txid.end());
         withdrawal.main_script = CScript() << OP_RETURN << tag;
         withdrawal.height = height;
         AddWithdrawal(withdrawal);

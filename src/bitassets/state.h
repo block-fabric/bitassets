@@ -78,10 +78,10 @@ inline constexpr uint64_t MIN_OPEN_CHN{1'000'000};
 inline constexpr uint64_t SWAP_FEE_PER_MILLE{3};
 /** Longest an auction may run, in blocks. */
 inline constexpr int32_t MAX_AUCTION_DURATION{1'000'000};
-/** Latest an auction may start, in blocks after the one that makes it (the second audit's rules): about a year. */
+/** Latest an auction may start, in blocks after the one that makes it: about a year. */
 inline constexpr int32_t MAX_AUCTION_DELAY{52'560};
 /**
- * Least CHN a pool or an auction pays out (the second audit's rules): 0.0005 CHN. A payout takes a
+ * Least CHN a pool or an auction pays out: 0.0005 CHN. A payout takes a
  * place in the coinbase's queue, which pays a bounded number per block (half of MAX_PAYOUTS_PER_BLOCK
  * for the sidechain's own): small payouts would delay everyone's. Filling the queue for a block takes
  * 500 swaps of this much each (0.25 CHN turned over, 0.3% of it to the pools each way, and the fees),
@@ -226,8 +226,7 @@ struct MarkerOutput {
 
 struct Reserve {
     static constexpr uint8_t KIND{1};
-    //! ReservationCommitment(name, nonce, script of the reservation's output); before the second
-    //! audit's rules, ReservationCommitment(name, nonce).
+    //! ReservationCommitment(name, nonce, script of the reservation's output).
     uint256 commitment;
     SERIALIZE_METHODS(Reserve, obj) { READWRITE(obj.commitment); }
     friend bool operator==(const Reserve&, const Reserve&) = default;
@@ -287,10 +286,10 @@ struct Swap {
 };
 
 /**
- * Put two assets in their pool (making it, if there is none). Result: the shares, at least `min_shares`.
+ * Put two assets in their pool (making it, if there is none). Results: the shares, at least
+ * `min_shares`, then what goes back.
  *
- * Under the second audit's rules (amm::Provide), the amounts are the most that goes in, and the
- * marker lists two result outputs: the shares, then what goes back. Into a pool someone provides
+ * The amounts are the most that goes in (amm::Provide), and the marker lists two result outputs. Into a pool someone provides
  * liquidity to, the side that gives fewer shares goes in whole, and of the other only what those
  * shares are worth at the pool's price: the rest goes back, as asset coins to the second result
  * output, or, for CHN, paid by the coinbase to its script (CHN under MIN_CHN_PAYOUT stays in the
@@ -395,8 +394,6 @@ std::optional<Marker> GetMarker(const CTransaction& tx, std::string* error = nul
 
 /** The hash of the name of an asset. */
 AssetId HashName(const std::string& name);
-/** What a reservation committed to before the second audit's rules: HMAC-SHA256 with the nonce as key, of the name hash. */
-uint256 ReservationCommitment(const AssetId& name, const uint256& nonce);
 /**
  * What a reservation commits to: HMAC-SHA256 with the nonce as key, of the name hash then the script
  * of the output that carries the reservation when it is made. Bound to that script, a copy of it made
@@ -410,8 +407,8 @@ uint256 PoolId(const AssetId& a, const AssetId& b);
 bool IsAssetName(const std::string& name);
 /**
  * Whether a name reads as another asset where assets are named (rpcutil's ParseAssetArg): CHN in any
- * case, a number ("1739-0029", "0001-1739-0029") or "0x" and anything. Under the second audit's rules
- * no asset is registered under one (a private name is checked as far as it can be: CHN).
+ * case, a number ("1739-0029", "0001-1739-0029") or "0x" and anything. No asset is registered under
+ * one (a private name is checked as far as it can be: CHN).
  */
 bool ReadsAsAnotherAsset(const std::string& name);
 
@@ -564,7 +561,7 @@ struct Auction {
     /**
      * Whether it holds some of an asset, which keeps the asset from being retired: not collected, and
      * selling it, or having taken some of it in. One that sells something else for it and took none
-     * of it in holds none (the second audit's rules; before, any auction not collected of it did).
+     * of it in holds none.
      */
     bool Holds(const AssetId& asset) const { return !closed && (base == asset || (quote == asset && proceeds > 0)); }
 };
@@ -575,9 +572,7 @@ namespace amm {
 uint64_t SwapOut(uint64_t reserve_in, uint64_t reserve_out, uint64_t amount_in);
 /** What has to go in to get `amount_out` out; nullopt if the pool does not hold that much. */
 std::optional<uint64_t> SwapIn(uint64_t reserve_in, uint64_t reserve_out, uint64_t amount_out);
-/** The shares adding `amount0` and `amount1` to a pool makes (MIN_LIQUIDITY included for a new pool); 0 if none. */
-uint64_t SharesFor(const Pool& pool, uint64_t amount0, uint64_t amount1);
-/** What a deposit does under the second audit's rules (Provide). */
+/** What a deposit does (Provide). */
 struct Deposit {
     //! The shares it gives (for a pool it opens, MIN_LIQUIDITY more are kept for good).
     uint64_t shares{0};
@@ -588,7 +583,7 @@ struct Deposit {
     bool opens{false};
 };
 /**
- * A deposit of at most `amount0` and `amount1` into a pool, under the second audit's rules; nullopt
+ * A deposit of at most `amount0` and `amount1` into a pool; nullopt
  * if it gives no shares. Into a pool someone provides liquidity to, it gives the shares of the side
  * that gives fewer, which goes in whole; of the other side, what those shares are worth, rounded up
  * (the pool never loses), unless what would go back is CHN under MIN_CHN_PAYOUT (it goes in too). A
@@ -599,9 +594,9 @@ struct Deposit {
  * the pool goes in at that one's price, its excess back, or is refused by its least shares.
  */
 std::optional<Deposit> Provide(const Pool& pool, uint64_t amount0, uint64_t amount1);
-/** What `shares` take out of a pool. */
+/** What `shares` are worth of a pool, rounded down. */
 std::pair<uint64_t, uint64_t> Withdraw(const Pool& pool, uint64_t shares);
-/** The same under the second audit's rules: CHN below MIN_CHN_PAYOUT is not taken out, it stays in the pool. */
+/** What `shares` take out of a pool: CHN below MIN_CHN_PAYOUT is not taken out, it stays in the pool. */
 std::pair<uint64_t, uint64_t> WithdrawPaid(const Pool& pool, uint64_t shares);
 /**
  * How much worse, in percent, a trade's price is than the pool's price before it (the fee
@@ -648,12 +643,11 @@ struct Result {
 /**
  * The assets, on the store of the sidechain state (sidechain/store.h), one entry per key. Tables:
  * 0x30 what outputs carry, 0x31 assets, 0x32 reservations not revealed yet, 0x33 assets by number,
- * 0x34 pools, 0x35 auctions, 0x36 the order of reservations, 0x3d where reservations were made
- * (ReservationOrigin), 0x3e the history of the data of the
- * assets (by asset, field, then position); single values 0x37 the next number, 0x38 the next
- * order, 0x3f the layout of these tables (STORE_LAYOUT). Indexes, so that no rule reads a table
+ * 0x34 pools, 0x35 auctions, 0x3d where reservations were made (ReservationOrigin), 0x3e the
+ * history of the data of the assets (by asset, field, then position); single values 0x37 the next
+ * number, 0x3f the layout of these tables (STORE_LAYOUT). Indexes, so that no rule reads a table
  * whole: 0x39 outputs by what they carry (its id, then its kind), 0x3a pools by asset, 0x3b
- * auctions not closed by asset, 0x3c reservations by commitment then order. What a block changes,
+ * auctions not closed by asset. What a block changes,
  * the store's journal notes: its undo data.
  */
 class State
@@ -670,14 +664,11 @@ public:
      * changes nothing.
      * @param[out] released  CHN freed by retiring an asset (ReleaseAsset), for mainchain miners
      */
-    [[nodiscard]] bool ApplyTx(const CTransaction& tx, int height, std::vector<CTxOut>& payouts, std::string& reject_reason, int pool_rules_height = 0, CAmount* released = nullptr, int release_height = 0, int audit_height = 0, int audit2_height = 0, int reveal_depth = 0);
-    /**
-     * Whether an asset is dead and can be retired; if not, why (`why`). `audit2`: under the second
-     * audit's rules (see Consensus::SidechainParams::bitassets_audit2_height).
-     */
-    bool Releasable(const AssetId& asset, std::string* why = nullptr, bool audit2 = true) const;
+    [[nodiscard]] bool ApplyTx(const CTransaction& tx, int height, std::vector<CTxOut>& payouts, std::string& reject_reason, CAmount* released = nullptr, int reveal_depth = 0);
+    /** Whether an asset is dead and can be retired; if not, why (`why`). */
+    bool Releasable(const AssetId& asset, std::string* why = nullptr) const;
     /** Whether ApplyTx would accept the transaction now; `results`, if given, gets what it would pay out. */
-    [[nodiscard]] bool CheckTx(const CTransaction& tx, int height, std::string& reject_reason, std::vector<Result>* results = nullptr, int pool_rules_height = 0, int release_height = 0, int audit_height = 0, int audit2_height = 0, int reveal_depth = 0) const;
+    [[nodiscard]] bool CheckTx(const CTransaction& tx, int height, std::string& reject_reason, std::vector<Result>* results = nullptr, int reveal_depth = 0) const;
     /** What the inputs of a transaction carry, in the order of the inputs. */
     std::vector<std::pair<uint32_t, Token>> SpentTokens(const CTransaction& tx) const;
 
@@ -696,8 +687,6 @@ public:
     uint32_t NextSeq() const;
     /** The pool of two assets, if there is one. */
     std::optional<Pool> FindPool(const AssetId& a, const AssetId& b) const;
-    std::optional<uint64_t> OrderOf(const Txid& id) const;
-    uint64_t NextReservationOrder() const;
     void ForEachToken(const std::function<bool(const COutPoint&, const Token&)>& fn) const;
     void ForEachAsset(const std::function<bool(const AssetId&, const AssetRecord&)>& fn) const;
     void ForEachPool(const std::function<bool(const uint256&, const Pool&)>& fn) const;
@@ -712,13 +701,12 @@ public:
 
 private:
     struct Plan;
-    std::optional<Plan> MakePlan(const CTransaction& tx, int height, std::string& reject_reason, int pool_rules_height, int release_height, int audit_height, int audit2_height, int reveal_depth) const;
+    std::optional<Plan> MakePlan(const CTransaction& tx, int height, std::string& reject_reason, int reveal_depth) const;
 
     // Writes, with the indexes kept in step.
     sidechain::StoreOverlay& Writable() const;
     void SetToken(const COutPoint& outpoint, const std::optional<Token>& token);
     void SetReservation(const Txid& id, const std::optional<uint256>& commitment);
-    void SetOrder(const Txid& id, const std::optional<uint64_t>& order);
     void SetPool(const uint256& id, const std::optional<Pool>& pool);
     void SetAuction(const Txid& id, const std::optional<Auction>& auction);
     /** Adds `delta` to a count of the record of an asset (AssetRecord::holding_auctions, provided_pools), if it is registered. */
@@ -736,8 +724,9 @@ private:
  *     where each reservation was made (0x3d); the registrations of an auction's assets in it.
  *  3: in each asset's record, how many auctions hold some of it and how many of its pools have
  *     providers (AssetRecord::holding_auctions, provided_pools).
+ *  4: no order of reservations (0x36, 0x38) nor index of reservations by commitment (0x3c).
  */
-inline constexpr uint32_t STORE_LAYOUT{3};
+inline constexpr uint32_t STORE_LAYOUT{4};
 /** Whether the assets in a store are in the layout of this version, or there are none yet. */
 bool StoreLayoutCurrent(const sidechain::StoreView& view);
 

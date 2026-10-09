@@ -344,11 +344,6 @@ public:
                        .message_start = {0x62, 0x61, 0x73, 0x02}, .default_port = 19355, .bech32_hrp = "tba"});
         // The mainchain of the test network votes on a withdrawal bundle within 600 blocks.
         consensus.sidechain.bundle_retry_delay = 20;
-        // The test network had a trade into an abandoned pool before (block 621).
-        consensus.sidechain.bitassets_pool_rules_height = 660;
-        consensus.sidechain.bitassets_release_height = 720;
-        consensus.sidechain.bitassets_audit_height = 2672; // audits 2-4 on the test network, a few blocks after the deploy
-        consensus.sidechain.bitassets_audit2_height = 2672; // audits 2-4 on the test network, a few blocks after the deploy
         consensus.sidechain.bitassets_reveal_depth = 3;
         // The test network ran without it until then; see SidechainParams.
         consensus.sidechain.single_bundle_height = 3100;

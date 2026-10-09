@@ -125,7 +125,7 @@ UniValue AssetToJSON(Chainstate& chainstate, const bitassets::State& state, cons
     obj.pushKV("registration", record.registration.GetHex());
     const auto data{height ? state.DataAt(asset, *height) : std::optional{record.Current()}};
     if (data) obj.pushKV("data", bitassets::DataToJSON(*data));
-    const bool releasable{state.Releasable(asset, nullptr, chainstate.m_chain.Height() + 1 >= chainstate.m_chainman.GetConsensus().sidechain.bitassets_audit2_height)};
+    const bool releasable{state.Releasable(asset)};
     obj.pushKV("releasable", releasable);
     if (releasable) {
         CAmount fee{0};
@@ -408,8 +408,7 @@ RPCMethod getbitassetsinfo()
             {RPCResult::Type::NUM, "pools", "Pools"},
             {RPCResult::Type::NUM, "auctions", "Auctions not closed"},
             {RPCResult::Type::NUM, "height", "The height of the next block, which the prices are for"},
-            {RPCResult::Type::NUM, "reveal_depth", "How many blocks after the block that made a reservation a block may take its registration, from the next block on (1 before the second audit's rules)"},
-            {RPCResult::Type::NUM, "audit2_height", "The height from which the rules of the second audit apply"},
+            {RPCResult::Type::NUM, "reveal_depth", "How many blocks after the block that made a reservation a block may take its registration"},
         }},
         RPCExamples{HelpExampleCli("getbitassetsinfo", "")},
         [&](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
@@ -428,9 +427,7 @@ RPCMethod getbitassetsinfo()
     result.pushKV("pools", state.PoolCount());
     result.pushKV("auctions", open_auctions);
     result.pushKV("height", chainman.ActiveChain().Height() + 1);
-    const Consensus::SidechainParams& params{chainman.GetConsensus().sidechain};
-    result.pushKV("reveal_depth", chainman.ActiveChain().Height() + 1 >= params.bitassets_audit2_height ? params.bitassets_reveal_depth : 1);
-    result.pushKV("audit2_height", params.bitassets_audit2_height);
+    result.pushKV("reveal_depth", chainman.GetConsensus().sidechain.bitassets_reveal_depth);
     return result;
 },
     };

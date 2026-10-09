@@ -239,13 +239,6 @@ AssetId HashName(const std::string& name)
     return hash;
 }
 
-uint256 ReservationCommitment(const AssetId& name, const uint256& nonce)
-{
-    uint256 commitment;
-    CHMAC_SHA256(nonce.data(), nonce.size()).Write(name.data(), name.size()).Finalize(commitment.data());
-    return commitment;
-}
-
 uint256 ReservationCommitment(const AssetId& name, const uint256& nonce, const CScript& script)
 {
     uint256 commitment;
@@ -399,20 +392,6 @@ std::optional<uint64_t> SwapIn(uint64_t reserve_in, uint64_t reserve_out, uint64
     const arith_uint256 in{arith_uint256{reserve_in} * arith_uint256{amount_out} * 1000 / (arith_uint256{reserve_out - amount_out} * (1000 - SWAP_FEE_PER_MILLE)) + 1};
     if (in > arith_uint256{MAX_AMOUNT}) return std::nullopt;
     return in.GetLow64();
-}
-
-uint64_t SharesFor(const Pool& pool, uint64_t amount0, uint64_t amount1)
-{
-    if (amount0 == 0 || amount1 == 0) return 0;
-    if (pool.shares == 0) {
-        const uint64_t shares{Isqrt(static_cast<unsigned __int128>(amount0) * amount1)};
-        return shares > MIN_LIQUIDITY ? shares : 0;
-    }
-    if (pool.reserve0 == 0 || pool.reserve1 == 0) return 0;
-    const unsigned __int128 s0{static_cast<unsigned __int128>(amount0) * pool.shares / pool.reserve0};
-    const unsigned __int128 s1{static_cast<unsigned __int128>(amount1) * pool.shares / pool.reserve1};
-    const unsigned __int128 shares{std::min(s0, s1)};
-    return shares > MAX_AMOUNT ? 0 : static_cast<uint64_t>(shares);
 }
 
 std::optional<Deposit> Provide(const Pool& pool, uint64_t amount0, uint64_t amount1)
@@ -591,8 +570,8 @@ struct State::Plan {
     std::vector<uint256> pools_gone;
     std::optional<AssetId> asset_gone;
     CAmount released{0};
-    //! An AddLiquidity under the second audit's rules: its two results (the shares, then what goes
-    //! back) go to its two result outputs, the second carrying nothing if nothing, or CHN, goes back.
+    //! An AddLiquidity: its two results (the shares, then what goes back) go to its two result
+    //! outputs, the second carrying nothing if nothing, or CHN, goes back.
     bool returns{false};
     //! Whether the transaction is one of the assets (has a marker or spends tokens): it writes the layout.
     bool assets_tx{false};
@@ -605,13 +584,10 @@ const sidechain::Table<uint256, uint256> RESERVATIONS{0x32};
 const sidechain::Table<uint32_t, uint256> SEQ{0x33};
 const sidechain::Table<uint256, Pool> POOLS{0x34};
 const sidechain::Table<uint256, Auction> AUCTIONS{0x35};
-const sidechain::Table<uint256, uint64_t> ORDER{0x36};
 const sidechain::Cell<uint32_t> NEXT_SEQ{0x37, 0};
-const sidechain::Cell<uint64_t> NEXT_ORDER{0x38, 1};
 constexpr uint8_t TOKENS_BY_ID{0x39};
 constexpr uint8_t POOLS_BY_ASSET{0x3a};
 constexpr uint8_t AUCTIONS_BY_ASSET{0x3b};
-constexpr uint8_t BY_COMMITMENT{0x3c};
 const sidechain::Table<uint256, ReservationOrigin> ORIGINS{0x3d};
 constexpr uint8_t HISTORY{0x3e};
 //! Missing: the layout before it was written down (1).
@@ -649,14 +625,6 @@ sidechain::StoreBytes HistoryKey(const AssetId& asset, DataField field, uint32_t
 {
     sidechain::StoreBytes key{HistoryPrefix(asset, field)};
     sidechain::KeyCodec<uint32_t>::Encode(key, n);
-    return key;
-}
-sidechain::StoreBytes CommitmentKey(const uint256& commitment, uint64_t order, const Txid& id)
-{
-    sidechain::StoreBytes key{BY_COMMITMENT};
-    sidechain::KeyCodec<uint256>::Encode(key, commitment);
-    sidechain::KeyCodec<uint64_t>::Encode(key, order);
-    sidechain::KeyCodec<uint256>::Encode(key, id.ToUint256());
     return key;
 }
 sidechain::StoreBytes Prefix(uint8_t table, const uint256& head)
@@ -708,8 +676,6 @@ std::optional<ReservationOrigin> State::GetReservationOrigin(const Txid& id) con
 std::optional<Pool> State::GetPool(const uint256& id) const { return POOLS.Get(*m_view, id); }
 std::optional<Auction> State::GetAuction(const Txid& id) const { return AUCTIONS.Get(*m_view, id.ToUint256()); }
 uint32_t State::NextSeq() const { return NEXT_SEQ.Get(*m_view); }
-std::optional<uint64_t> State::OrderOf(const Txid& id) const { return ORDER.Get(*m_view, id.ToUint256()); }
-uint64_t State::NextReservationOrder() const { return NEXT_ORDER.Get(*m_view); }
 std::optional<Pool> State::FindPool(const AssetId& a, const AssetId& b) const { return GetPool(PoolId(a, b)); }
 void State::ForEachToken(const std::function<bool(const COutPoint&, const Token&)>& fn) const { TOKENS.ForEach(*m_view, fn); }
 void State::ForEachAsset(const std::function<bool(const AssetId&, const AssetRecord&)>& fn) const { ASSETS.ForEach(*m_view, fn); }
@@ -738,27 +704,11 @@ void State::SetToken(const COutPoint& outpoint, const std::optional<Token>& toke
 void State::SetReservation(const Txid& id, const std::optional<uint256>& commitment)
 {
     sidechain::StoreOverlay& out{Writable()};
-    const uint64_t order{OrderOf(id).value_or(0)};
-    if (const auto old{GetReservation(id)}) out.Erase(CommitmentKey(*old, order, id));
     if (commitment) {
         RESERVATIONS.Put(out, id.ToUint256(), *commitment);
-        out.Put(CommitmentKey(*commitment, order, id), {});
     } else {
         RESERVATIONS.Erase(out, id.ToUint256());
     }
-}
-
-void State::SetOrder(const Txid& id, const std::optional<uint64_t>& order)
-{
-    sidechain::StoreOverlay& out{Writable()};
-    const auto commitment{GetReservation(id)};
-    if (commitment) out.Erase(CommitmentKey(*commitment, OrderOf(id).value_or(0), id));
-    if (order) {
-        ORDER.Put(out, id.ToUint256(), *order);
-    } else {
-        ORDER.Erase(out, id.ToUint256());
-    }
-    if (commitment) out.Put(CommitmentKey(*commitment, order.value_or(0), id), {});
 }
 
 void State::Count(const AssetId& asset, uint32_t AssetRecord::*count, int delta)
@@ -878,7 +828,7 @@ std::optional<AssetId> State::AssetOfSeq(uint32_t seq) const
     return asset;
 }
 
-bool State::Releasable(const AssetId& asset, std::string* why, bool audit2) const
+bool State::Releasable(const AssetId& asset, std::string* why) const
 {
     const auto no{[&](const char* reason) {
         if (why) *why = reason;
@@ -890,25 +840,17 @@ bool State::Releasable(const AssetId& asset, std::string* why, bool audit2) cons
     // What carries it, through the index of outputs by what they carry: one look per kind.
     if (FirstTokenOf(asset, Token::Kind::ASSET)) return no("someone holds some of it");
     if (FirstTokenOf(asset, Token::Kind::CONTROL)) return no("its control coin exists");
-    if (audit2) {
-        // Under the second audit's rules, an auction that sells something else for it and has taken
-        // none of it in holds none of it: it does not keep it alive (else a 1-unit auction that never
-        // starts would, for ever). Bids into it are refused once the asset is gone (MakePlan). The
-        // record counts the others (Auction::Holds): one look, however many auctions quote it.
-        if (record->holding_auctions > 0) return no("an auction of it is not collected");
-    } else {
-        // Before, any auction not collected of it, through the index (which has those alone): the
-        // first entry says.
-        if (m_view->Next(Prefix(AUCTIONS_BY_ASSET, asset), Prefix(AUCTIONS_BY_ASSET, asset))) return no("an auction of it is not collected");
-    }
+    // An auction that sells something else for it and has taken none of it in holds none of it: it
+    // does not keep it alive (else a 1-unit auction that never starts would, for ever). Bids into it
+    // are refused once the asset is gone (MakePlan). The record counts the others (Auction::Holds):
+    // one look, however many auctions quote it.
+    if (record->holding_auctions > 0) return no("an auction of it is not collected");
     if (record->provided_pools > 0) return no("a pool of it has liquidity providers");
     return true;
 }
 
-std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, std::string& reject_reason, int pool_rules_height, int release_height, int audit_height, int audit2_height, int reveal_depth) const
+std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, std::string& reject_reason, int reveal_depth) const
 {
-    const bool pool_rules{height >= pool_rules_height};
-    const bool audit2{height >= audit2_height};
     const auto invalid{[&](const char* reason) -> std::optional<Plan> {
         reject_reason = reason;
         return std::nullopt;
@@ -984,50 +926,28 @@ std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, s
         // Assets registered before, in this block included, are taken.
         if (HasAsset(reg->name)) return invalid("bad-ba-name-taken");
         // A name that reads as another asset (CHN, a number, "0x...") would be mistaken for it.
-        if (audit2 && ((reg->text && ReadsAsAnotherAsset(*reg->text)) || IsChnName(reg->name))) return invalid("bad-ba-name-reserved");
-        const uint256 implied{ReservationCommitment(reg->name, reg->nonce)};
+        if ((reg->text && ReadsAsAnotherAsset(*reg->text)) || IsChnName(reg->name)) return invalid("bad-ba-name-reserved");
+        // A reservation is bound to the script of its output: nobody but its maker can have made it,
+        // so it reveals the name whatever other reservations there are.
         std::optional<Txid> reservation;
-        // Under the second audit's rules, a reservation bound to the script of its output: nobody but
-        // its maker can have made it, so it reveals the name whatever other reservations there are.
-        bool bound{false};
+        std::optional<ReservationOrigin> origin;
         for (const auto& [n, token] : spent) {
             if (token.kind != Token::Kind::RESERVATION) continue;
             const Txid id{Txid::FromUint256(token.id)};
             const auto found{GetReservation(id)};
             if (!found) continue;
-            if (audit2) {
-                const auto origin{GetReservationOrigin(id)};
-                if (origin && *found == ReservationCommitment(reg->name, reg->nonce, origin->script)) {
-                    reservation = id;
-                    bound = true;
-                    break;
-                }
-                // A commitment to the name alone, only from a reservation made before these rules.
-                if (origin && origin->height >= audit2_height) continue;
+            const auto made{GetReservationOrigin(id)};
+            if (made && *found == ReservationCommitment(reg->name, reg->nonce, made->script)) {
+                reservation = id;
+                origin = made;
+                break;
             }
-            if (*found == implied && !reservation) reservation = id;
         }
         if (!reservation) return invalid("bad-ba-no-reservation");
-        // Under the second audit's rules, only once the reservation is deep enough: whoever makes
-        // this block saw the name and the nonce of every registration waiting for it, and could have
-        // reserved the name under a nonce of its own, in this very block, to register it first.
-        if (audit2) {
-            const auto origin{GetReservationOrigin(*reservation)};
-            if (origin && int64_t{height} - origin->height < reveal_depth) return invalid("bad-ba-reservation-too-young");
-        }
-        if (!bound && height >= audit_height) {
-            // Only the oldest reservation of a commitment reveals it: a copy of someone else's, made to
-            // register the asset first once they reveal it, is younger.
-            // The index of reservations by commitment has them oldest first: the first one says.
-            const sidechain::StoreBytes prefix{Prefix(BY_COMMITMENT, implied)};
-            if (const auto first{m_view->Next(prefix, prefix)}) {
-                std::span<const unsigned char> in{first->first};
-                in = in.subspan(prefix.size());
-                const uint64_t order{sidechain::KeyCodec<uint64_t>::Decode(in)};
-                const Txid other{Txid::FromUint256(sidechain::KeyCodec<uint256>::Decode(in))};
-                if (other != *reservation && order < OrderOf(*reservation).value_or(0)) return invalid("bad-ba-reservation-not-first");
-            }
-        }
+        // Only once the reservation is deep enough: whoever makes this block saw the name and the
+        // nonce of every registration waiting for it, and could have reserved the name under a nonce
+        // of its own, in this very block, to register it first.
+        if (int64_t{height} - origin->height < reveal_depth) return invalid("bad-ba-reservation-too-young");
         debit(Token::Kind::RESERVATION, reservation->ToUint256(), 1);
         plan.reservations_gone.push_back(*reservation);
         credit(Token::Kind::CONTROL, reg->name, 1);
@@ -1109,13 +1029,13 @@ std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, s
         if (!found) return invalid("bad-ba-no-pool");
         Pool pool{*found};
         // A pool nobody provides liquidity to is closed: what went in could only buy dust, and stay there.
-        if (pool_rules && amm::Abandoned(pool)) return invalid("bad-ba-pool-closed");
+        if (amm::Abandoned(pool)) return invalid("bad-ba-pool-closed");
         const bool zero_in{pool.asset0 == swap->asset_in};
         uint64_t& reserve_in{zero_in ? pool.reserve0 : pool.reserve1};
         uint64_t& reserve_out{zero_in ? pool.reserve1 : pool.reserve0};
         const uint64_t out{amm::SwapOut(reserve_in, reserve_out, swap->amount_in)};
         if (out == 0 || out < swap->min_out || out >= reserve_out) return invalid("bad-ba-swap-price");
-        if (audit2 && swap->asset_out.IsNull() && out < MIN_CHN_PAYOUT) return invalid("bad-ba-chn-dust");
+        if (swap->asset_out.IsNull() && out < MIN_CHN_PAYOUT) return invalid("bad-ba-chn-dust");
         const auto new_in{Add(reserve_in, swap->amount_in)};
         if (!new_in) return invalid("bad-ba-swap");
         reserve_in = *new_in;
@@ -1141,60 +1061,35 @@ std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, s
         const bool a_first{pool.asset0 == add->asset_a};
         const uint64_t amount0{a_first ? add->amount_a : add->amount_b};
         const uint64_t amount1{a_first ? add->amount_b : add->amount_a};
-        if (audit2) {
-            // The amounts are the most that goes in: at the pool's price, the rest back; or they open
-            // the pool (amm::Provide). Whoever opens a pool first sets its price: a deposit made for
-            // another price goes in at it, or gives fewer shares than it asks for and is refused.
-            if (!Add(pool.reserve0, amount0) || !Add(pool.reserve1, amount1)) return invalid("bad-ba-liquidity");
-            const auto deposit{amm::Provide(pool, amount0, amount1)};
-            if (!deposit || deposit->shares < add->min_shares) return invalid("bad-ba-liquidity-price");
-            if (deposit->opens) {
-                // A pool opens, or reopens, with a deposit worth trading against, not dust.
-                const uint64_t chn_after{pool.asset0.IsNull() ? pool.reserve0 + amount0 : pool.asset1.IsNull() ? pool.reserve1 + amount1 : MIN_OPEN_CHN};
-                if (pool_rules && (deposit->shares < MIN_OPEN_SHARES || chn_after < MIN_OPEN_CHN)) return invalid("bad-ba-pool-too-small");
-                // The MIN_LIQUIDITY shares nobody held (of the pool everyone left) give way to those of the new one.
-                pool.shares = deposit->shares + MIN_LIQUIDITY;
-            } else {
-                const auto total{Add(pool.shares, deposit->shares)};
-                if (!total) return invalid("bad-ba-liquidity");
-                pool.shares = *total;
-            }
-            pool.reserve0 += deposit->take0;
-            pool.reserve1 += deposit->take1;
-            // All of what the transaction offers is taken in; what goes back is a result.
-            take(add->asset_a, add->amount_a);
-            take(add->asset_b, add->amount_b);
-            const uint64_t back0{amount0 - deposit->take0}, back1{amount1 - deposit->take1};
-            // Only the side that gives more shares has any back.
-            if (back0 > 0 && back1 > 0) return invalid("bad-ba-liquidity");
-            plan.results.push_back({id, deposit->shares});
-            plan.results.push_back(back0 > 0 ? Result{pool.asset0, back0} : Result{pool.asset1, back1});
-            plan.returns = true;
-            plan.pool = std::make_pair(id, pool);
-        } else {
-            // Before, both amounts went in whole, and a pool everyone left took them at the price of its dust.
-            const bool fresh{pool.shares == 0};
-            const uint64_t shares{amm::SharesFor(pool, amount0, amount1)};
-            // A new pool keeps MIN_LIQUIDITY of its shares for good.
-            const uint64_t given{fresh ? shares - std::min(shares, MIN_LIQUIDITY) : shares};
-            if (given == 0 || given < add->min_shares) return invalid("bad-ba-liquidity-price");
+        // The amounts are the most that goes in: at the pool's price, the rest back; or they open
+        // the pool (amm::Provide). Whoever opens a pool first sets its price: a deposit made for
+        // another price goes in at it, or gives fewer shares than it asks for and is refused.
+        if (!Add(pool.reserve0, amount0) || !Add(pool.reserve1, amount1)) return invalid("bad-ba-liquidity");
+        const auto deposit{amm::Provide(pool, amount0, amount1)};
+        if (!deposit || deposit->shares < add->min_shares) return invalid("bad-ba-liquidity-price");
+        if (deposit->opens) {
             // A pool opens, or reopens, with a deposit worth trading against, not dust.
-            if (pool_rules && amm::Abandoned(pool)) {
-                const uint64_t chn_in{pool.asset0.IsNull() ? amount0 : pool.asset1.IsNull() ? amount1 : MIN_OPEN_CHN};
-                if (given < MIN_OPEN_SHARES || chn_in < MIN_OPEN_CHN) return invalid("bad-ba-pool-too-small");
-            }
-            const auto r0{Add(pool.reserve0, amount0)};
-            const auto r1{Add(pool.reserve1, amount1)};
-            const auto total{Add(pool.shares, shares)};
-            if (!r0 || !r1 || !total) return invalid("bad-ba-liquidity");
-            pool.reserve0 = *r0;
-            pool.reserve1 = *r1;
+            const uint64_t chn_after{pool.asset0.IsNull() ? pool.reserve0 + amount0 : pool.asset1.IsNull() ? pool.reserve1 + amount1 : MIN_OPEN_CHN};
+            if (deposit->shares < MIN_OPEN_SHARES || chn_after < MIN_OPEN_CHN) return invalid("bad-ba-pool-too-small");
+            // The MIN_LIQUIDITY shares nobody held (of the pool everyone left) give way to those of the new one.
+            pool.shares = deposit->shares + MIN_LIQUIDITY;
+        } else {
+            const auto total{Add(pool.shares, deposit->shares)};
+            if (!total) return invalid("bad-ba-liquidity");
             pool.shares = *total;
-            take(add->asset_a, add->amount_a);
-            take(add->asset_b, add->amount_b);
-            plan.results.push_back({id, given});
-            plan.pool = std::make_pair(id, pool);
         }
+        pool.reserve0 += deposit->take0;
+        pool.reserve1 += deposit->take1;
+        // All of what the transaction offers is taken in; what goes back is a result.
+        take(add->asset_a, add->amount_a);
+        take(add->asset_b, add->amount_b);
+        const uint64_t back0{amount0 - deposit->take0}, back1{amount1 - deposit->take1};
+        // Only the side that gives more shares has any back.
+        if (back0 > 0 && back1 > 0) return invalid("bad-ba-liquidity");
+        plan.results.push_back({id, deposit->shares});
+        plan.results.push_back(back0 > 0 ? Result{pool.asset0, back0} : Result{pool.asset1, back1});
+        plan.returns = true;
+        plan.pool = std::make_pair(id, pool);
     } else if (const auto* remove{op ? std::get_if<RemoveLiquidity>(op) : nullptr}) {
         const uint256 id{PoolId(remove->asset_a, remove->asset_b)};
         const auto found{GetPool(id)};
@@ -1202,12 +1097,12 @@ std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, s
         Pool pool{*found};
         // The shares nobody holds stay.
         if (remove->shares > pool.shares - std::min(pool.shares, MIN_LIQUIDITY)) return invalid("bad-ba-liquidity");
-        // Under the second audit's rules, a side that rounds to nothing (or to CHN dust, which stays in
-        // the pool) is left out, so that a small provider can still leave; one side must give something.
-        const auto [out0, out1]{audit2 ? amm::WithdrawPaid(pool, remove->shares) : amm::Withdraw(pool, remove->shares)};
+        // A side that rounds to nothing (or to CHN dust, which stays in the pool) is left out, so that
+        // a small provider can still leave; one side must give something.
+        const auto [out0, out1]{amm::WithdrawPaid(pool, remove->shares)};
         const bool a_first{pool.asset0 == remove->asset_a};
         const uint64_t out_a{a_first ? out0 : out1}, out_b{a_first ? out1 : out0};
-        if (audit2 ? (out_a == 0 && out_b == 0) : (out_a == 0 || out_b == 0)) return invalid("bad-ba-liquidity-price");
+        if (out_a == 0 && out_b == 0) return invalid("bad-ba-liquidity-price");
         if (out_a < remove->min_a || out_b < remove->min_b) return invalid("bad-ba-liquidity-price");
         pool.reserve0 -= out0;
         pool.reserve1 -= out1;
@@ -1220,7 +1115,7 @@ std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, s
         if (!tradable(create->base) || !tradable(create->quote)) return invalid("bad-ba-asset-unknown");
         if (create->start_height < height) return invalid("bad-ba-auction-started");
         // An auction that never starts would hold what it sells, and the asset it quotes, for ever.
-        if (audit2 && create->start_height > height + MAX_AUCTION_DELAY) return invalid("bad-ba-auction-delay");
+        if (create->start_height > height + MAX_AUCTION_DELAY) return invalid("bad-ba-auction-delay");
         Auction auction;
         auction.base = create->base;
         auction.base_amount = create->base_amount;
@@ -1245,12 +1140,12 @@ std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, s
         // Its assets as they were: one retired (an auction that took none of what it quotes does not
         // keep that from being retired), or retired and registered again, is not what it trades.
         // Collect needs no such rule: what it pays of the asset it quotes is what bids paid in, none.
-        if (audit2 && (registration(auction.base) != auction.base_registration || registration(auction.quote) != auction.quote_registration)) {
+        if ((registration(auction.base) != auction.base_registration || registration(auction.quote) != auction.quote_registration)) {
             return invalid("bad-ba-auction-asset-gone");
         }
         const uint64_t bought{auction.BuysAt(height, bid->quote_amount)};
         if (bought == 0 || bought > auction.remaining || bought < bid->min_base) return invalid("bad-ba-bid-price");
-        if (audit2 && auction.base.IsNull() && bought < MIN_CHN_PAYOUT) return invalid("bad-ba-chn-dust");
+        if (auction.base.IsNull() && bought < MIN_CHN_PAYOUT) return invalid("bad-ba-chn-dust");
         const auto proceeds{Add(auction.proceeds, bid->quote_amount)};
         if (!proceeds) return invalid("bad-ba-bid");
         auction.remaining -= bought;
@@ -1265,8 +1160,8 @@ std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, s
         Auction auction{*found};
         if (!auction.CollectableAt(height)) return invalid("bad-ba-auction-running");
         debit(Token::Kind::RECEIPT, collect->auction.ToUint256(), 1);
-        // Under the second audit's rules, CHN dust is not paid out: it was burned when it went in.
-        const auto paid{[&](const AssetId& asset, uint64_t amount) { return amount > 0 && !(audit2 && asset.IsNull() && amount < MIN_CHN_PAYOUT); }};
+        // CHN dust is not paid out: it was burned when it went in.
+        const auto paid{[&](const AssetId& asset, uint64_t amount) { return amount > 0 && !(asset.IsNull() && amount < MIN_CHN_PAYOUT); }};
         if (paid(auction.base, auction.remaining)) plan.results.push_back({auction.base, auction.remaining});
         if (paid(auction.quote, auction.proceeds)) plan.results.push_back({auction.quote, auction.proceeds});
         auction.remaining = 0;
@@ -1276,9 +1171,8 @@ std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, s
     }
 
     if (const auto* release{op ? std::get_if<ReleaseAsset>(op) : nullptr}) {
-        if (height < release_height) return invalid("bad-ba-release-not-active");
         std::string why;
-        if (!Releasable(release->asset, &why, audit2)) return invalid("bad-ba-release-alive");
+        if (!Releasable(release->asset, &why)) return invalid("bad-ba-release-alive");
         plan.asset_gone = release->asset;
         std::map<AssetId, AssetRecord> others;
         // Its pools, in the order of their ids, through the index of pools by asset.
@@ -1341,13 +1235,8 @@ std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, s
             plan.payouts.emplace_back(static_cast<CAmount>(result.amount), *chn_to);
             continue;
         }
-        Token token;
-        // An AddLiquidity result is shares of the pool; the others are asset coins.
-        const bool shares{op && std::holds_alternative<AddLiquidity>(*op)};
-        token.kind = shares ? Token::Kind::LP : Token::Kind::ASSET;
-        token.id = result.asset;
-        token.amount = result.amount;
-        result_tokens.push_back(token);
+        // An AddLiquidity's results are above; the others are asset coins.
+        result_tokens.push_back(Token{Token::Kind::ASSET, result.asset, result.amount});
     }
     if (result_tokens.size() != result_outputs) return invalid("bad-ba-results");
     for (const auto& [key, balance] : books) {
@@ -1363,17 +1252,17 @@ std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, s
     return plan;
 }
 
-bool State::CheckTx(const CTransaction& tx, int height, std::string& reject_reason, std::vector<Result>* results, int pool_rules_height, int release_height, int audit_height, int audit2_height, int reveal_depth) const
+bool State::CheckTx(const CTransaction& tx, int height, std::string& reject_reason, std::vector<Result>* results, int reveal_depth) const
 {
-    auto plan{MakePlan(tx, height, reject_reason, pool_rules_height, release_height, audit_height, audit2_height, reveal_depth)};
+    auto plan{MakePlan(tx, height, reject_reason, reveal_depth)};
     if (!plan) return false;
     if (results) *results = std::move(plan->results);
     return true;
 }
 
-bool State::ApplyTx(const CTransaction& tx, int height, std::vector<CTxOut>& payouts, std::string& reject_reason, int pool_rules_height, CAmount* released, int release_height, int audit_height, int audit2_height, int reveal_depth)
+bool State::ApplyTx(const CTransaction& tx, int height, std::vector<CTxOut>& payouts, std::string& reject_reason, CAmount* released, int reveal_depth)
 {
-    const auto plan{MakePlan(tx, height, reject_reason, pool_rules_height, release_height, audit_height, audit2_height, reveal_depth)};
+    const auto plan{MakePlan(tx, height, reject_reason, reveal_depth)};
     if (!plan) return false;
     sidechain::StoreOverlay& out{Writable()};
     // In the order the rules have always applied a plan in.
@@ -1386,15 +1275,6 @@ bool State::ApplyTx(const CTransaction& tx, int height, std::vector<CTxOut>& pay
     for (const Txid& id : plan->reservations_gone) {
         SetReservation(id, std::nullopt);
         ORIGINS.Erase(out, id.ToUint256());
-    }
-    // The order of reservations, for the rule that the oldest of a commitment reveals it.
-    if (plan->reservation_made && height >= audit_height) {
-        const uint64_t next{NextReservationOrder()};
-        SetOrder(plan->reservation_made->first, next);
-        NEXT_ORDER.Put(out, next + 1);
-    }
-    for (const Txid& id : plan->reservations_gone) {
-        if (OrderOf(id)) SetOrder(id, std::nullopt);
     }
     // The layout of the assets in the store, with their first change (StoreLayoutCurrent).
     if (plan->assets_tx && LAYOUT.Get(out) != STORE_LAYOUT) LAYOUT.Put(out, STORE_LAYOUT);

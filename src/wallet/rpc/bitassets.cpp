@@ -269,29 +269,19 @@ CScript ChnTo(CWallet& wallet, const std::vector<AssetId>& results)
     return chn ? GetScriptForDestination(NewDestination(wallet, "bitassets payout")) : CScript{};
 }
 
-/**
- * How many blocks before the second audit's rules a reservation is already bound to the script of its
- * output. A reservation of the name alone mined from those rules on registers nothing; one made just
- * before them may wait for a block that long, and be mined after.
- */
-constexpr int BIND_AHEAD{100};
-
 struct OwnReservation {
     COutPoint outpoint;
     Txid id;
     uint256 nonce;
-    //! Bound to the script of its output (the second audit's rules): it registers only under them.
-    bool bound{false};
 };
 
-/** Whether a reservation of the wallet, carried by `dest`, is of `name`; if so, its nonce and whether it is bound. */
-std::optional<std::pair<uint256, bool>> ReservationOf(const CWallet& wallet, const CTxDestination& dest, const uint256& commitment, const AssetId& name)
+/** Whether a reservation of the wallet, carried by `dest`, is of `name`; if so, its nonce. */
+std::optional<uint256> ReservationOf(const CWallet& wallet, const CTxDestination& dest, const uint256& commitment, const AssetId& name)
 {
     if (!std::holds_alternative<WitnessV0KeyHash>(dest)) return std::nullopt;
     const uint256 nonce{ReservationNonce(wallet, dest, name)};
-    // Bound to the script of its output (the second audit's rules), or, made before, to the name alone.
-    if (bitassets::ReservationCommitment(name, nonce, GetScriptForDestination(dest)) == commitment) return std::make_pair(nonce, true);
-    if (bitassets::ReservationCommitment(name, nonce) == commitment) return std::make_pair(nonce, false);
+    // Bound to the script of its output.
+    if (bitassets::ReservationCommitment(name, nonce, GetScriptForDestination(dest)) == commitment) return nonce;
     return std::nullopt;
 }
 
@@ -303,25 +293,20 @@ std::optional<OwnReservation> FindReservation(CWallet& wallet, const AssetId& na
         const Txid id{Txid::FromUint256(owned.token.id)};
         const auto commitment{wallet.chain().getBitAssetsReservation(id)};
         if (!commitment) continue;
-        if (const auto found{ReservationOf(wallet, owned.dest, *commitment, name)}) return OwnReservation{owned.outpoint, id, found->first, found->second};
+        if (const auto nonce{ReservationOf(wallet, owned.dest, *commitment, name)}) return OwnReservation{owned.outpoint, id, *nonce};
     }
     return std::nullopt;
 }
 
 /**
  * The first height from which a block may take the registration of a reservation made in the block
- * at `made`, it and every block after it: under the second audit's rules, a reservation is revealed
- * only `reveal_depth` blocks after the block that made it, and a bound one only under those rules.
- * A registration sent before the rules and mined after them waits as they say.
+ * at `made`, it and every block after it: a reservation is revealed only `reveal_depth` blocks after
+ * the block that made it.
  */
-int RevealHeight(CWallet& wallet, int made, bool bound)
+int RevealHeight(CWallet& wallet, int made)
 {
-    const int audit2{wallet.chain().getBitAssetsAudit2Height()};
-    int from{wallet.chain().getBitAssetsHeight()};
-    if (bound) from = std::max(from, audit2);
     const int64_t deep{int64_t{made} + wallet.chain().getBitAssetsRevealDepth()};
-    if (deep > from && deep > audit2) from = static_cast<int>(deep);
-    return from;
+    return static_cast<int>(std::max<int64_t>(wallet.chain().getBitAssetsHeight(), deep));
 }
 
 UniValue TxResult(const CTransactionRef& tx)
@@ -377,13 +362,9 @@ RPCMethod reserveasset()
     const CTxDestination dest{NewDestination(*pwallet, ReservationLabel(name))};
     Token reservation{UnitToken(Token::Kind::RESERVATION, uint256{})};
     const uint256 nonce{ReservationNonce(*pwallet, dest, asset)};
-    // Under the second audit's rules, the commitment binds the reservation to the script of its
-    // output: a copy of it, made by someone who saw it, can never reveal the name before this one.
-    // Bound already when the rules are near: a reservation of the name alone mined under them would
-    // register nothing (it then registers from the block they start at).
-    const bool bound{int64_t{pwallet->chain().getBitAssetsHeight()} + BIND_AHEAD >= pwallet->chain().getBitAssetsAudit2Height()};
-    const uint256 commitment{bound ? bitassets::ReservationCommitment(asset, nonce, GetScriptForDestination(dest))
-                                   : bitassets::ReservationCommitment(asset, nonce)};
+    // The commitment binds the reservation to the script of its output: a copy of it, made by
+    // someone who saw it, can never reveal the name before this one.
+    const uint256 commitment{bitassets::ReservationCommitment(asset, nonce, GetScriptForDestination(dest))};
     const CTransactionRef tx{Send(*pwallet, bitassets::Reserve{commitment}, {{dest, reservation}}, {})};
     UniValue result(UniValue::VOBJ);
     result.pushKV("txid", tx->GetHash().GetHex());
@@ -421,7 +402,7 @@ RPCMethod registerasset()
     const std::string name{request.params[0].get_str()};
     const AssetId asset{bitassets::HashName(name)};
     if (pwallet->chain().getBitAsset(asset)) throw JSONRPCError(RPC_INVALID_PARAMETER, "An asset of this name is registered");
-    if (bitassets::ReadsAsAnotherAsset(name) && pwallet->chain().getBitAssetsAudit2()) throw JSONRPCError(RPC_INVALID_PARAMETER, "The name reads as another asset (CHN, a number such as 1739-0029, or \"0x\" and a hash)");
+    if (bitassets::ReadsAsAnotherAsset(name)) throw JSONRPCError(RPC_INVALID_PARAMETER, "The name reads as another asset (CHN, a number such as 1739-0029, or \"0x\" and a hash)");
     const int decimals{request.params[2].isNull() ? 0 : request.params[2].getInt<int>()};
     if (decimals < 0 || decimals > bitassets::MAX_DECIMALS) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("The decimals are from 0 to %u", bitassets::MAX_DECIMALS));
     const uint64_t supply{bitassets::ParseUnits(request.params[1], decimals, /*allow_zero=*/true)};
@@ -430,12 +411,8 @@ RPCMethod registerasset()
     // Not before the rules let it be revealed: the registration would not be taken.
     if (const auto made{pwallet->chain().getBitAssetsReservationHeight(reservation->id)}) {
         const int next{pwallet->chain().getBitAssetsHeight()};
-        const int from{RevealHeight(*pwallet, *made, reservation->bound)};
+        const int from{RevealHeight(*pwallet, *made)};
         if (from > next) {
-            const int audit2{pwallet->chain().getBitAssetsAudit2Height()};
-            if (reservation->bound && from == audit2) {
-                throw JSONRPCError(RPC_WALLET_ERROR, strprintf("The reservation is bound to its output, as the rules from block %d have it: it registers the name from that block, in %d blocks", audit2, from - next));
-            }
             throw JSONRPCError(RPC_WALLET_ERROR, strprintf("The reservation is too recent: a registration reveals it only in a block %d blocks after the one that made it (%d), so that whoever makes a block cannot take the name first. Try again from block %d, in %d blocks",
                                                            pwallet->chain().getBitAssetsRevealDepth(), *made, from, from - next));
         }
@@ -576,7 +553,7 @@ RPCMethod listmyassets()
                 taken = pwallet->chain().getBitAsset(asset).has_value();
                 const auto commitment{pwallet->chain().getBitAssetsReservation(id)};
                 const auto mine{commitment ? ReservationOf(*pwallet, owned.dest, *commitment, asset) : std::nullopt};
-                if (made && mine) from = RevealHeight(*pwallet, *made, mine->second);
+                if (made && mine) from = RevealHeight(*pwallet, *made);
             }
             obj.pushKV("taken", taken);
             if (made) obj.pushKV("height", *made);
@@ -852,7 +829,7 @@ RPCMethod swapasset()
     const bool zero_in{pool->asset0 == in.id};
     const uint64_t quote{bitassets::amm::SwapOut(zero_in ? pool->reserve0 : pool->reserve1, zero_in ? pool->reserve1 : pool->reserve0, amount_in)};
     if (quote == 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "Too little: it buys nothing");
-    if (out.id.IsNull() && quote < bitassets::MIN_CHN_PAYOUT && pwallet->chain().getBitAssetsAudit2()) {
+    if (out.id.IsNull() && quote < bitassets::MIN_CHN_PAYOUT) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("Too little: the least CHN paid out is %s", FormatMoney(bitassets::MIN_CHN_PAYOUT)));
     }
     const double max_impact{request.params[4].isNull() ? 10.0 : request.params[4].get_real()};
@@ -889,7 +866,7 @@ RPCMethod addliquidity()
         "set. Into a pool there is, the second amount is worked out from the first at the pool's price, unless given.\n"
         "A pool nobody provides liquidity to any more (abandoned) is reopened as a new pool is made: both amounts are\n"
         "needed, and they set its price (what it holds is the dust it keeps for good, at a price anyone could set).\n"
-        "Under the second audit's rules, the amounts given for an abandoned pool are what it reopens with: the dust it\n"
+        "The amounts given for an abandoned pool are what it reopens with: the dust it\n"
         "holds counts toward them, and the rest goes in. Should someone else reopen or move the pool first, the\n"
         "deposit goes in at the pool's price then, what its price does not take comes back, and it is refused if it\n"
         "gives fewer shares than quoted, less the slippage." + HELP_REQUIRING_PASSPHRASE,
@@ -944,51 +921,33 @@ RPCMethod addliquidity()
         current.asset1 = std::max(a.id, b.id);
     }
     const bool a_first{current.asset0 == a.id};
-    const bool audit2{pwallet->chain().getBitAssetsAudit2()};
     // What the transaction offers, what goes in of it if nothing moves the pool first, and the shares.
     uint64_t offer_a{amount_a}, offer_b{amount_b};
     uint64_t shares{0};
-    if (audit2) {
-        // A pool everyone left holds dust, which the deposit that reopens it merges in: the amounts
-        // given are what it reopens with, at their price, and the dust counts toward them.
-        if (pool && sets_price) {
-            const uint64_t dust_a{a_first ? current.reserve0 : current.reserve1}, dust_b{a_first ? current.reserve1 : current.reserve0};
-            if (amount_a <= dust_a || amount_b <= dust_b) {
-                throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("This pool holds %s %s and %s %s, left by its last providers, which count toward what it reopens with: give more than that of each",
-                                                                    bitassets::FormatUnits(dust_a, a.decimals), a.label, bitassets::FormatUnits(dust_b, b.decimals), b.label));
-            }
-            offer_a = amount_a - dust_a;
-            offer_b = amount_b - dust_b;
+    // A pool everyone left holds dust, which the deposit that reopens it merges in: the amounts
+    // given are what it reopens with, at their price, and the dust counts toward them.
+    if (pool && sets_price) {
+        const uint64_t dust_a{a_first ? current.reserve0 : current.reserve1}, dust_b{a_first ? current.reserve1 : current.reserve0};
+        if (amount_a <= dust_a || amount_b <= dust_b) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("This pool holds %s %s and %s %s, left by its last providers, which count toward what it reopens with: give more than that of each",
+                                                                bitassets::FormatUnits(dust_a, a.decimals), a.label, bitassets::FormatUnits(dust_b, b.decimals), b.label));
         }
-        const auto deposit{bitassets::amm::Provide(current, a_first ? offer_a : offer_b, a_first ? offer_b : offer_a)};
-        if (deposit) {
-            shares = deposit->shares;
-            // Into a pool someone provides liquidity to, only what its price takes is offered: nothing
-            // comes back unless the pool moves first (then the excess does, by the rules).
-            if (!deposit->opens) {
-                offer_a = a_first ? deposit->take0 : deposit->take1;
-                offer_b = a_first ? deposit->take1 : deposit->take0;
-            }
+        offer_a = amount_a - dust_a;
+        offer_b = amount_b - dust_b;
+    }
+    const auto deposit{bitassets::amm::Provide(current, a_first ? offer_a : offer_b, a_first ? offer_b : offer_a)};
+    if (deposit) {
+        shares = deposit->shares;
+        // Into a pool someone provides liquidity to, only what its price takes is offered: nothing
+        // comes back unless the pool moves first (then the excess does, by the rules).
+        if (!deposit->opens) {
+            offer_a = a_first ? deposit->take0 : deposit->take1;
+            offer_b = a_first ? deposit->take1 : deposit->take0;
         }
-    } else {
-        // Into a pool someone provides liquidity to, a deposit gets the shares of the side that gives
-        // fewer, and the rest of the other side would be given away to the pool's providers: only what
-        // the pool's price takes of it goes in (rounded up, so that it gives no fewer shares).
-        if (pool && !sets_price && current.reserve0 > 0 && current.reserve1 > 0) {
-            const uint64_t ra{a_first ? current.reserve0 : current.reserve1}, rb{a_first ? current.reserve1 : current.reserve0};
-            const unsigned __int128 sa{static_cast<unsigned __int128>(amount_a) * current.shares / ra};
-            const unsigned __int128 sb{static_cast<unsigned __int128>(amount_b) * current.shares / rb};
-            const unsigned __int128 fewer{std::min(sa, sb)};
-            const auto worth{[&](uint64_t reserve) { return static_cast<uint64_t>((fewer * reserve + current.shares - 1) / current.shares); }};
-            if (sa < sb) offer_b = worth(rb);
-            if (sb < sa) offer_a = worth(ra);
-        }
-        shares = bitassets::amm::SharesFor(current, a_first ? offer_a : offer_b, a_first ? offer_b : offer_a);
-        if (current.shares == 0) shares = shares > bitassets::MIN_LIQUIDITY ? shares - bitassets::MIN_LIQUIDITY : 0;
     }
     if (shares == 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "Too little: it makes no shares (a new pool needs the product of the amounts, in units, above a million)");
     // Opening (or reopening an abandoned) pool takes a deposit worth trading against: what the pool
-    // holds after it (its dust merged in, under the second audit's rules) is what the amounts give.
+    // holds after it (its dust merged in) is what the amounts give.
     if (bitassets::amm::Abandoned(current)) {
         const uint64_t chn{a.id.IsNull() ? amount_a : b.id.IsNull() ? amount_b : bitassets::MIN_OPEN_CHN};
         if (shares < bitassets::MIN_OPEN_SHARES || chn < bitassets::MIN_OPEN_CHN) {
@@ -1000,10 +959,10 @@ RPCMethod addliquidity()
     CAmount chn_in{0};
     PayIn(*pwallet, a, offer_a, inputs, outs, chn_in);
     PayIn(*pwallet, b, offer_b, inputs, outs, chn_in);
-    // The shares; under the second audit's rules, then what comes back (asset coins, or CHN the
-    // coinbase pays to its address), should the pool move first.
+    // The shares, then what comes back (asset coins, or CHN the coinbase pays to its address),
+    // should the pool move first.
     outs.push_back({ChangeDestination(*pwallet), std::nullopt});
-    if (audit2) outs.push_back({ChangeDestination(*pwallet), std::nullopt});
+    outs.push_back({ChangeDestination(*pwallet), std::nullopt});
     const CTransactionRef tx{Send(*pwallet, bitassets::AddLiquidity{a.id, b.id, offer_a, offer_b, std::max<uint64_t>(1, LessSlippage(shares, slippage))}, outs, inputs, chn_in)};
     amount_a = offer_a;
     amount_b = offer_b;
@@ -1056,13 +1015,11 @@ RPCMethod removeliquidity()
     if (held == 0) NotHeld(*pwallet, Token::Kind::LP, id, "shares of this pool");
     const uint64_t shares{percent >= 100 ? held : static_cast<uint64_t>(static_cast<long double>(held) * percent / 100)};
     if (shares == 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "That is no share at all");
-    // Under the second audit's rules, a side that rounds to nothing, or to CHN dust (which stays in
-    // the pool), is left out; before, both had to give something.
-    const bool audit2{pwallet->chain().getBitAssetsAudit2()};
-    const auto [out0, out1]{audit2 ? bitassets::amm::WithdrawPaid(*pool, shares) : bitassets::amm::Withdraw(*pool, shares)};
+    // A side that rounds to nothing, or to CHN dust (which stays in the pool), is left out.
+    const auto [out0, out1]{bitassets::amm::WithdrawPaid(*pool, shares)};
     const bool a_first{pool->asset0 == a.id};
     const uint64_t out_a{a_first ? out0 : out1}, out_b{a_first ? out1 : out0};
-    if (audit2 ? (out_a == 0 && out_b == 0) : (out_a == 0 || out_b == 0)) throw JSONRPCError(RPC_INVALID_PARAMETER, "Too few shares: they take nothing out of one of the assets");
+    if (out_a == 0 && out_b == 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "Too few shares: they take nothing out of the pool");
     const auto [inputs, total]{Select(*pwallet, Token::Kind::LP, id, shares, "shares of this pool")};
     std::vector<Out> outs;
     if (total > shares) {
@@ -1200,7 +1157,7 @@ RPCMethod bidauction()
     // Never more than what all that is left costs (an amount that buys less costs less than that).
     if (amount > cost) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("The bid would pay %s, more than all that is left costs (%s)", bitassets::FormatUnits(amount, dq), bitassets::FormatUnits(cost, dq)));
     buys = auction->BuysAt(height, amount);
-    if (auction->base.IsNull() && buys < bitassets::MIN_CHN_PAYOUT && pwallet->chain().getBitAssetsAudit2()) {
+    if (auction->base.IsNull() && buys < bitassets::MIN_CHN_PAYOUT) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("Too little: the least CHN paid out is %s", FormatMoney(bitassets::MIN_CHN_PAYOUT)));
     }
     const AssetInfo quote{auction->quote, std::nullopt, dq, LabelOfAsset(*pwallet, auction->quote)};
@@ -1242,9 +1199,8 @@ RPCMethod collectauction()
         throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("The auction is running, with bids: it can be collected after height %d, or once sold out", auction->EndHeight()));
     }
     const auto [inputs, total]{Select(*pwallet, Token::Kind::RECEIPT, id.ToUint256(), 1, "the receipt of this auction")};
-    // Under the second audit's rules, CHN dust is not paid out (it is burned).
-    const bool audit2{pwallet->chain().getBitAssetsAudit2()};
-    const auto paid{[&](const AssetId& asset, uint64_t amount) { return amount > 0 && !(audit2 && asset.IsNull() && amount < bitassets::MIN_CHN_PAYOUT); }};
+    // CHN dust is not paid out (it is burned).
+    const auto paid{[&](const AssetId& asset, uint64_t amount) { return amount > 0 && !(asset.IsNull() && amount < bitassets::MIN_CHN_PAYOUT); }};
     std::vector<AssetId> results;
     if (paid(auction->base, auction->remaining)) results.push_back(auction->base);
     if (paid(auction->quote, auction->proceeds)) results.push_back(auction->quote);

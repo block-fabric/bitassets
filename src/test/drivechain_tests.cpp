@@ -2662,10 +2662,6 @@ BOOST_AUTO_TEST_CASE(database_params_fingerprint)
     BOOST_CHECK(side_changed([](auto& p) { ++p.pending_min_score; }) != side_fingerprint);
     BOOST_CHECK(side_changed([](auto& p) { ++p.unproposed_expiry_blocks; }) != side_fingerprint);
     BOOST_CHECK(side_changed([](auto& p) { ++p.main_activation_height; }) != side_fingerprint);
-    BOOST_CHECK(side_changed([](auto& p) { ++p.bitassets_pool_rules_height; }) != side_fingerprint);
-    BOOST_CHECK(side_changed([](auto& p) { ++p.bitassets_release_height; }) != side_fingerprint);
-    BOOST_CHECK(side_changed([](auto& p) { ++p.bitassets_audit_height; }) != side_fingerprint);
-    BOOST_CHECK(side_changed([](auto& p) { ++p.bitassets_audit2_height; }) != side_fingerprint);
     BOOST_CHECK(side_changed([](auto& p) { ++p.bitassets_reveal_depth; }) != side_fingerprint);
     BOOST_CHECK(side_changed([](auto&) {}) == side_fingerprint);
     {

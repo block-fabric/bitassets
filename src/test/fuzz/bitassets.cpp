@@ -68,7 +68,7 @@ sidechain::StoreBytes Key2(uint8_t table, const uint256& a, const uint256& b)
 /** Every index, rebuilt from the tables, is the one in the store. */
 void CheckIndexes(const sidechain::StoreView& view)
 {
-    std::set<sidechain::StoreBytes> by_id, pools_by_asset, auctions_by_asset, by_commitment, history;
+    std::set<sidechain::StoreBytes> by_id, pools_by_asset, auctions_by_asset, history;
     sidechain::Table<COutPoint, Token>{0x30}.ForEach(view, [&](const COutPoint& outpoint, const Token& token) {
         sidechain::StoreBytes key{0x39};
         sidechain::KeyCodec<uint256>::Encode(key, token.id);
@@ -107,7 +107,6 @@ void CheckIndexes(const sidechain::StoreView& view)
         assert(state.DataAt(id, std::numeric_limits<int>::max()) == record.data);
         return true;
     });
-    const sidechain::Table<uint256, uint64_t> order{0x36};
     // Each reservation, and nothing else, has where it was made.
     std::set<sidechain::StoreBytes> origins;
     sidechain::Table<uint256, uint256>{0x32}.ForEach(view, [&](const uint256& id, const uint256&) {
@@ -115,18 +114,11 @@ void CheckIndexes(const sidechain::StoreView& view)
         return true;
     });
     assert(KeysUnder(view, 0x3d) == origins);
-    sidechain::Table<uint256, uint256>{0x32}.ForEach(view, [&](const uint256& id, const uint256& commitment) {
-        sidechain::StoreBytes key{0x3c};
-        sidechain::KeyCodec<uint256>::Encode(key, commitment);
-        sidechain::KeyCodec<uint64_t>::Encode(key, order.Get(view, id).value_or(0));
-        sidechain::KeyCodec<uint256>::Encode(key, id);
-        by_commitment.insert(key);
-        return true;
-    });
     assert(KeysUnder(view, 0x39) == by_id);
     assert(KeysUnder(view, 0x3a) == pools_by_asset);
     assert(KeysUnder(view, 0x3b) == auctions_by_asset);
-    assert(KeysUnder(view, 0x3c) == by_commitment);
+    // Tables of earlier layouts are not written: the order of reservations, their index by commitment.
+    assert(KeysUnder(view, 0x36).empty() && KeysUnder(view, 0x38).empty() && KeysUnder(view, 0x3c).empty());
     assert(KeysUnder(view, 0x3e) == history);
     assert(StoreLayoutCurrent(view));
 
@@ -177,10 +169,6 @@ void CheckIndexes(const sidechain::StoreView& view)
 FUZZ_TARGET(bitassets_state, .init = initialize_bitassets)
 {
     FuzzedDataProvider fdp{buffer.data(), buffer.size()};
-    const int pool_rules_height{fdp.ConsumeIntegralInRange<int>(0, 10)};
-    const int release_height{fdp.ConsumeIntegralInRange<int>(0, 10)};
-    const int audit_height{fdp.ConsumeIntegralInRange<int>(0, 10)};
-    const int audit2_height{fdp.ConsumeIntegralInRange<int>(0, 20)};
     const int reveal_depth{fdp.ConsumeIntegralInRange<int>(0, 3)};
     const std::vector<AssetId> names{HashName("GOLD"), HashName("SILVER"), HashName("LEAD")};
 
@@ -213,8 +201,8 @@ FUZZ_TARGET(bitassets_state, .init = initialize_bitassets)
             std::vector<std::optional<Token>> outs;
             switch (fdp.ConsumeIntegralInRange<int>(0, 12)) {
             case 0:
-                // Bound to the script of its output (the second audit's rules), or to the name alone.
-                op = Reserve{fdp.ConsumeBool() ? ReservationCommitment(a, nonce, HOLDER) : ReservationCommitment(a, nonce)};
+                // Bound to the script of its output, or to another (which registers nothing).
+                op = Reserve{ReservationCommitment(a, nonce, fdp.ConsumeBool() ? HOLDER : CScript{})};
                 outs.push_back(Token{Token::Kind::RESERVATION, uint256{}, 1});
                 break;
             case 1: {
@@ -230,7 +218,7 @@ FUZZ_TARGET(bitassets_state, .init = initialize_bitassets)
             case 2: op = Mint{a, amount}; outs.push_back(Token{Token::Kind::ASSET, a, amount}); break;
             case 3: op = Burn{spent}; break;
             case 4: op = Swap{a, amount, b, 0, HOLDER}; outs.push_back(std::nullopt); break;
-            case 5: op = AddLiquidity{a, b, amount, fdp.ConsumeIntegralInRange<uint64_t>(0, 5000), 0}; outs.push_back(std::nullopt); break;
+            case 5: op = AddLiquidity{a, b, amount, fdp.ConsumeIntegralInRange<uint64_t>(0, 5000), 0}; outs.push_back(std::nullopt); outs.push_back(std::nullopt); break;
             case 6: op = RemoveLiquidity{a, b, amount, 0, 0, HOLDER}; outs.push_back(std::nullopt); outs.push_back(std::nullopt); break;
             case 7: {
                 CreateAuction auction{a, amount, b, fdp.ConsumeIntegralInRange<uint64_t>(1, 100), fdp.ConsumeIntegralInRange<uint64_t>(0, 100), height, fdp.ConsumeIntegralInRange<int32_t>(1, 10)};
@@ -273,7 +261,7 @@ FUZZ_TARGET(bitassets_state, .init = initialize_bitassets)
             std::vector<CTxOut> payouts;
             std::string reason;
             CAmount released{0};
-            if (!state.ApplyTx(tx, height, payouts, reason, pool_rules_height, &released, release_height, audit_height, audit2_height, reveal_depth)) {
+            if (!state.ApplyTx(tx, height, payouts, reason, &released, reveal_depth)) {
                 assert(!reason.empty());
                 assert(sidechain::StoreHash(block) == before_tx);
             }
