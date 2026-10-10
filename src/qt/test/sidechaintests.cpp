@@ -4,6 +4,8 @@
 
 #include <qt/test/sidechaintests.h>
 
+#include <bitcoin-build-config.h> // IWYU pragma: keep
+
 #include <addresstype.h>
 #include <core_io.h>
 #include <drivechain/sidechain.h>
@@ -28,12 +30,21 @@
 #include <qt/optionsmodel.h>
 #include <qt/platformstyle.h>
 #include <qt/proofoffundsdialog.h>
+#include <qt/sidebarmining.h>
 #include <qt/sidechainpage.h>
+#include <qt/intro.h>
 #include <qt/theme.h>
 #include <qt/timestampdialog.h>
 #include <qt/walletmodel.h>
 #include <rpc/server.h>
+#include <consensus/merkle.h>
+#include <pow.h>
 #include <script/descriptor.h>
+#include <script/sign.h>
+#include <script/signingprovider.h>
+#include <sidechain/follower.h>
+#include <sidechain/mainchain.h>
+#include <sidechain/state.h>
 #include <script/script.h>
 #include <test/util/setup_common.h>
 #include <txmempool.h>
@@ -60,6 +71,8 @@
 #include <QSpinBox>
 #include <QTableWidget>
 #include <QTabWidget>
+#include <QClipboard>
+#include <QGuiApplication>
 #include <QTemporaryFile>
 #include <QTimer>
 
@@ -426,6 +439,250 @@ void TestSidechainPage(interfaces::Node& node)
     RemoveWallet(context, wallet, /*load_on_start=*/std::nullopt);
 }
 
+/**
+ * A chain that is a sidechain, with a record of its mainchain the test writes, and a follower whose
+ * mainchain node cannot be reached (it is never started): what the pages do that needs the mainchain
+ * node fails, which they have to say; the rest works.
+ */
+struct SidechainChain {
+    TestingSetup test{ChainType::REGTEST, {.extra_args = {"-sidechainslot=3"}}};
+    CKey key{GenerateRandomKey()};
+    CScript script{GetScriptForDestination(WitnessV0KeyHash{key.GetPubKey()})};
+
+    SidechainChain()
+    {
+        sidechain::MainClient::Options options;
+        // Nothing listens on port 1.
+        options.port = 1;
+        options.credentials = "user:password";
+        test.m_node.follower = std::make_unique<sidechain::Follower>(test.m_node, std::move(options));
+        Main();
+    }
+    ~SidechainChain() { test.m_node.follower.reset(); }
+
+    sidechain::Mainchain& Record() { return *Assert(test.m_node.chainman->m_mainchain); }
+
+    void Main(const std::function<void(sidechain::MainBlock&)>& fill = {})
+    {
+        sidechain::MainBlock block;
+        block.hash = uint256{static_cast<uint8_t>(Record().Height() + 2)};
+        block.prev_hash = Record().TipHash();
+        if (fill) fill(block);
+        QVERIFY(Record().Append(block));
+    }
+
+    /** A block of the mempool, committed to and connected. */
+    CBlock Mine()
+    {
+        auto block_template{interfaces::MakeMining(test.m_node)->createNewBlock({.coinbase_output_script = CScript() << OP_TRUE}, /*cooldown=*/false)};
+        CBlock block{block_template->getBlock()};
+        block.hashMerkleRoot = BlockMerkleRoot(block);
+        while (!CheckProofOfWork(block.GetHash(), block.nBits, test.m_node.chainman->GetConsensus())) ++block.nNonce;
+        Main([&](sidechain::MainBlock& b) { b.bmm = block.GetHash(); });
+        test.m_node.chainman->ProcessNewBlock(std::make_shared<const CBlock>(block), /*force_processing=*/true, /*min_pow_checked=*/true, /*new_block=*/nullptr);
+        return block;
+    }
+
+    CMutableTransaction Spend(const COutPoint& prevout, const CTxOut& spent, std::vector<CTxOut> outputs)
+    {
+        CMutableTransaction tx;
+        tx.vin.emplace_back(prevout);
+        tx.vout = std::move(outputs);
+        FillableSigningProvider keystore;
+        keystore.AddKey(key);
+        std::map<int, bilingual_str> errors;
+        SignTransaction(tx, &keystore, {{prevout, Coin{spent, 1, false}}}, SignOptions{.sighash_type = SIGHASH_ALL}, errors);
+        return tx;
+    }
+};
+
+/** The Mainchain page and the mining bar of the main window, on a sidechain. */
+void TestSidechainPageOnASidechain(interfaces::Node& node)
+{
+    SidechainChain chain;
+    TestingSetup& test{chain.test};
+    // Coins for the key, from a deposit; then a withdrawal of them, refundable by the key.
+    chain.Main([&](sidechain::MainBlock& b) {
+        sidechain::MainDeposit deposit;
+        deposit.destination = EncodeDestination(WitnessV0KeyHash{chain.key.GetPubKey()});
+        deposit.amount = 10 * COIN;
+        b.deposits.push_back(deposit);
+    });
+    const CBlock funding{chain.Mine()};
+    QCOMPARE(funding.vtx[0]->vout[1].nValue, 10 * COIN);
+    const CTxOut& coin{funding.vtx[0]->vout[1]};
+    const CMutableTransaction withdrawal{chain.Spend(COutPoint{funding.vtx[0]->GetHash(), 1}, coin,
+                                                     {CTxOut{2 * COIN, sidechain::WithdrawalScript(1000, chain.key.GetPubKey().GetID(), chain.script)},
+                                                      CTxOut{coin.nValue - 2 * COIN - 10000, chain.script}})};
+    QVERIFY(WITH_LOCK(::cs_main, return test.m_node.chainman->ProcessTransaction(MakeTransactionRef(withdrawal))).m_result_type == MempoolAcceptResult::ResultType::VALID);
+    chain.Mine();
+    QCOMPARE(WITH_LOCK(::cs_main, return test.m_node.chainman->ActiveChain().Height()), 2);
+
+    auto wallet_loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = wallet_loader.get();
+    node.setContext(&test.m_node);
+    wallet_loader->registerRpcs();
+    if (RPCIsInWarmup(nullptr)) SetRPCWarmupFinished();
+    // The calls off the GUI thread stopped when the node of AppTests shut down.
+    NodeRpc::Restart();
+    std::shared_ptr<CWallet> wallet = std::make_shared<CWallet>(node.context()->chain.get(), "", CreateMockableWalletDatabase());
+    {
+        LOCK(wallet->cs_wallet);
+        wallet->SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+        wallet->SetupDescriptorScriptPubKeyMans();
+        FlatSigningProvider provider;
+        std::string error;
+        auto descs = Parse("combo(" + EncodeSecret(chain.key) + ")", provider, error, /*require_checksum=*/false);
+        QVERIFY(descs.size() == 1);
+        WalletDescriptor w_desc(std::move(descs.at(0)), 0, 0, 1, 1);
+        QVERIFY(wallet->AddWalletDescriptor(w_desc, provider, "", false));
+        wallet->SetLastBlockProcessed(2, WITH_LOCK(node.context()->chainman->GetMutex(), return node.context()->chainman->ActiveChain().Tip()->GetBlockHash()));
+    }
+    {
+        wallet::WalletRescanReserver reserver(*wallet);
+        reserver.reserve();
+        const auto result{wallet->ScanForWalletTransactions(Params().GetConsensus().hashGenesisBlock, /*start_height=*/0, /*max_height=*/{}, reserver, /*save_progress=*/false)};
+        QCOMPARE(result.status, CWallet::ScanResult::SUCCESS);
+    }
+    wallet->SetBroadcastTransactions(true);
+    wallet->m_min_fee = CFeeRate{10000};
+    wallet->m_fallback_fee = CFeeRate{10000};
+    WalletContext& context = *node.walletLoader().context();
+    AddWallet(context, wallet);
+    // However the test ends: no call left under way on the node, and the wallet gone before the chain.
+    struct Cleanup {
+        std::function<void()> fn;
+        ~Cleanup() { fn(); }
+    } cleanup{[&] {
+        NodeRpc::Stop();
+        RemoveWallet(context, wallet, /*load_on_start=*/std::nullopt);
+    }};
+
+    std::unique_ptr<const PlatformStyle> platform_style(PlatformStyle::instantiate("other"));
+    OptionsModel options_model(node);
+    bilingual_str error;
+    QVERIFY(options_model.Init(error));
+    ClientModel client_model(node, &options_model);
+    WalletModel wallet_model(interfaces::MakeWallet(context, wallet), client_model, platform_style.get());
+
+    SidechainPage page(platform_style.get());
+    page.resize(1000, 700);
+    page.setClientModel(&client_model);
+    page.setWalletModel(&wallet_model);
+    page.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&page));
+    const QString summary{page.findChild<QLabel*>("mainchainSummary")->text()};
+    QVERIFY2(page.findChild<QTabWidget*>("mainchainTabs")->isEnabled(), qPrintable(summary));
+    QVERIFY2(summary.contains("cannot be reached"), qPrintable(summary));
+    QVERIFY(page.findChild<QLabel*>("bundleStatus")->text().contains("The next block can start a bundle of 1 withdrawal(s) paying 1.99999000"));
+
+    // Deposit tab: an address of this wallet, which names the sidechain, and to the clipboard.
+    page.findChild<QPushButton*>("depositNewAddress")->click();
+    const QString deposit_address{page.findChild<QLineEdit*>("depositAddress")->text()};
+    QVERIFY(deposit_address.startsWith("s3_"));
+    for (QPushButton* button : page.findChildren<QPushButton*>()) {
+        if (button->text() == "Copy") button->click();
+    }
+    QCOMPARE(QGuiApplication::clipboard()->text(), deposit_address);
+
+    // Withdraw tab: what is not filled in right is said; a withdrawal needs the mainchain node.
+    auto* withdraw_button{page.findChild<QPushButton*>("withdrawButton")};
+    QStringList texts{WithMessageBoxes(QMessageBox::Yes, [&] { withdraw_button->click(); })};
+    QVERIFY(texts.size() == 1 && texts[0].contains("Enter a mainchain address"));
+    page.findChild<QLineEdit*>("withdrawAddress")->setText("mainaddress");
+    page.findChild<QLineEdit*>("withdrawAmount")->setText("1.5");
+    texts = WithMessageBoxes(QMessageBox::Yes, [&] {
+        withdraw_button->click();
+        QVERIFY(QTest::qWaitFor([&] { return withdraw_button->isEnabled(); }, 30000));
+        QTest::qWait(200);
+    });
+    QVERIFY(texts.size() == 2 && texts[0].contains("Withdraw 1.5 to the mainchain address mainaddress"));
+    QVERIFY(texts[1].contains("Cannot reach the mainchain node"));
+
+    // The withdrawal of the key, and a refund of it.
+    auto* withdrawals{page.findChild<QTableWidget*>("withdrawals")};
+    QCOMPARE(withdrawals->rowCount(), 1);
+    QCOMPARE(withdrawals->item(0, 5)->text(), QString::fromStdString(withdrawal.GetHash().GetHex()));
+    auto* refund_button{page.findChild<QPushButton*>("refundButton")};
+    withdrawals->setCurrentCell(-1, -1);
+    texts = WithMessageBoxes(QMessageBox::Ok, [&] { refund_button->click(); });
+    QVERIFY(texts.size() == 1 && texts[0].contains("Select a withdrawal in the list first"));
+    withdrawals->selectRow(0);
+    texts = WithMessageBoxes(QMessageBox::Ok, [&] {
+        refund_button->click();
+        QVERIFY(QTest::qWaitFor([&] { return refund_button->isEnabled(); }, 30000));
+        QTest::qWait(200);
+    });
+    QVERIFY(texts.size() == 1 && texts[0].contains("2.00000000 will be paid back to " + QString::fromStdString(EncodeDestination(WitnessV0KeyHash{chain.key.GetPubKey()}))));
+    QCOMPARE(test.m_node.mempool->size(), size_t{1});
+
+    // Mine tab: mining on and off, with a new address of the wallet; one block by hand needs the mainchain node.
+    auto* status{page.findChild<QLabel*>("bmmStatus")};
+    page.findChild<QPushButton*>("bmmStart")->click();
+    QVERIFY(!page.findChild<QLineEdit*>("bmmAddress")->text().isEmpty());
+    QVERIFY(status->text().contains("Automatic mining is on"));
+    QVERIFY(test.m_node.follower->GetMining().enabled);
+    page.findChild<QPushButton*>("bmmStop")->click();
+    QVERIFY(status->text().contains("Automatic mining is off"));
+    auto* amount{page.findChild<QLineEdit*>("bmmAmount")};
+    auto* once{page.findChild<QPushButton*>("bmmOnce")};
+    amount->setText("lots");
+    texts = WithMessageBoxes(QMessageBox::Ok, [&] { once->click(); });
+    QVERIFY(texts.size() == 1 && texts[0].contains("Enter the offer as a number"));
+    amount->setText("0.0001");
+    texts = WithMessageBoxes(QMessageBox::Ok, [&] {
+        once->click();
+        QVERIFY(QTest::qWaitFor([&] { return once->isEnabled(); }, 30000));
+        QTest::qWait(200);
+    });
+    QVERIFY(texts.size() == 1 && texts[0].contains("Cannot reach the mainchain node"));
+    SaveScreenshot(page, "mainchain-page-sidechain");
+
+    // The mining bar of the main window does the same.
+    std::optional<QString> wallet_name{QString{}};
+    SidebarMining bar([&] { return wallet_name; });
+    bar.setClientModel(&client_model);
+    QVERIFY(bar.isEnabled());
+    auto* bar_auto{bar.findChild<QPushButton*>("sidebarAutoMining")};
+    auto* bar_status{bar.findChild<QLabel*>("sidebarMiningStatus")};
+    bar_auto->click();
+    QVERIFY(bar_auto->isChecked());
+    QVERIFY(test.m_node.follower->GetMining().enabled);
+    // The page, shown, follows.
+    QVERIFY(status->text().contains("Automatic mining is on"));
+    bar_auto->click();
+    QVERIFY(!bar_auto->isChecked());
+    QVERIFY(!test.m_node.follower->GetMining().enabled);
+    auto* bar_fee{bar.findChild<QLineEdit*>("sidebarMiningFee")};
+    auto* bar_once{bar.findChild<QPushButton*>("sidebarMineOnce")};
+    bar_fee->setText("0");
+    bar_once->click();
+    QVERIFY(bar_status->text().contains("Enter the fee as a number above zero"));
+    bar_fee->setText("0.0001");
+    bar_once->click();
+    QVERIFY(QTest::qWaitFor([&] { return bar_once->isEnabled(); }, 30000));
+    QVERIFY(bar_status->text().contains("Cannot reach the mainchain node"));
+    // Without a wallet there is no address to mine to.
+    wallet_name.reset();
+    bar_auto->click();
+    QVERIFY(!bar_auto->isChecked());
+    QVERIFY(bar_status->text().contains("Open or create a wallet first"));
+    bar_once->click();
+    QVERIFY(bar_status->text().contains("Open or create a wallet first"));
+
+    // Hidden, the page stops refreshing.
+    page.hide();
+    QVERIFY(!page.isVisible());
+}
+
+/** The dialog that asks for the data directory names this program. */
+void TestIntro()
+{
+    Intro intro(nullptr, /*blockchain_size_gb=*/1, /*chain_state_size_gb=*/1);
+    QVERIFY(intro.findChild<QLabel*>("lblExplanation1")->text().contains(CLIENT_NAME));
+    QVERIFY(!intro.findChild<QLabel*>("lblExplanation1")->text().contains("Bitcoin"));
+}
+
 //! ChainActivity::Fetch looks up only what it does not know yet, and a reply of an unexpected shape
 //! leaves a table as it was instead of throwing out of a Qt slot (which terminates).
 void TestChainActivityFetch()
@@ -500,4 +757,6 @@ void SidechainTests::sidechainTests()
     QTest::qWait(500);
     TestChainActivityFetch();
     TestSidechainPage(m_node);
+    TestSidechainPageOnASidechain(m_node);
+    TestIntro();
 }
