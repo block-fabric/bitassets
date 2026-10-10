@@ -35,6 +35,8 @@ class StandInMainchain:
         self.no_proposed = False
         # getsidechainevents from this height on answers an error.
         self.fail_from = None
+        # getsidechainevents answers, at this height, a block that does not follow the one before.
+        self.stray_at = None
         # method -> error message to answer with, or HTTP status to answer with and no JSON.
         self.errors = {}
         self.statuses = {}
@@ -82,6 +84,9 @@ class StandInMainchain:
         if self.fail_from is not None and height >= self.fail_from:
             return None, {"code": -1, "message": "the stand-in is not answering this now"}
         answer = [dict(block) for block in self.blocks[height:height + count]]
+        for block in answer:
+            if block["height"] == self.stray_at:
+                block.update({"hash": block_hash(self.stray_at, 0x77), "previousblockhash": block_hash(self.stray_at - 1, 0x78)})
         if self.no_proposed:
             for block in answer:
                 block.pop("proposed")

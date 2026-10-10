@@ -16,7 +16,7 @@ mainchain and acting on it.
   have their commitment again are checked again; rebuilt under other parameters, the sidechain database
   stops at the block (the chain goes back), and a block the operator invalidated stays invalid.
 - A mainchain node that is syncing, too old, without the sidechain, refusing the credentials, answering
-  what is no JSON-RPC, refusing a bundle or the word of this chain.
+  what is no JSON-RPC or blocks that do not follow each other, refusing a bundle or the word of this chain.
 - Blind merged mining: the wallet named with characters to encode, requests that fail, an outbid node,
   a block whose fees do not pay for the request, a saved setting that is no longer valid.
 - Connecting with a cookie file.
@@ -145,6 +145,17 @@ class SidechainRecordTest(BitcoinTestFramework):
             main.ibd = False
         node.syncmainchain()
         assert_equal(node.getmainchaininfo()["bestblockhash"], main.blocks[-1]["hash"])
+
+        self.log.info("Blocks that do not follow each other: those before are taken, then the node asks again later")
+        with main.lock:
+            main.add_block()
+            main.add_block()
+            main.stray_at = main.height()
+        self.sync_error(f"The mainchain node sent blocks that do not follow each other (at height {main.height()})")
+        assert_equal(node.getmainchaininfo()["height"], main.height() - 1)
+        main.stray_at = None
+        node.syncmainchain()
+        assert_equal(node.getmainchaininfo()["height"], main.height())
 
         self.log.info("A mainchain node too old to say what bundles blocks propose is not followed")
         with main.lock:

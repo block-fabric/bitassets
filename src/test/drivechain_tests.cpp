@@ -2781,6 +2781,20 @@ BOOST_AUTO_TEST_CASE(sidechain_failures_by_kind)
     }
 }
 
+BOOST_AUTO_TEST_CASE(sidechain_values_compare)
+{
+    // What the record and the state hold compares field by field.
+    sidechain::MainDeposit deposit{Deposit(COIN)};
+    BOOST_CHECK(deposit == Deposit(COIN));
+    deposit.payouts.emplace_back(1, CScript() << OP_TRUE);
+    BOOST_CHECK(!(deposit == Deposit(COIN)));
+    sidechain::PendingBundle bundle{uint256{1}, {COutPoint{Txid::FromUint256(uint256{2}), 0}}, 3, uint256{4}};
+    sidechain::PendingBundle same{bundle};
+    BOOST_CHECK(bundle == same);
+    same.height = 4;
+    BOOST_CHECK(!(bundle == same));
+}
+
 BOOST_AUTO_TEST_CASE(sidechain_tx_all_or_nothing)
 {
     // A transaction that breaks a rule in its second output leaves no trace of its first: neither the
