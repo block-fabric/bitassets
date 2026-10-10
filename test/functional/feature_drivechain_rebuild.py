@@ -6,6 +6,8 @@
 
 - -reindex-chainstate checks the format of the database as well: one derived under other drivechain
   parameters is wiped before the blocks are connected again.
+- A block file it is rebuilt from that is missing stops the node at startup, with an error that says
+  how to recover.
 - A pruned node that would have to rebuild it from blocks it no longer has refuses to start, and
   leaves the database as it was.
 """
@@ -33,6 +35,30 @@ class DrivechainRebuildTest(BitcoinTestFramework):
         self.wait_until(lambda: node.getblockcount() == 800)
         # Marked as derived under the parameters it was built with: a restart uses it as it is.
         with node.assert_debug_log([], unexpected_msgs=["it is rebuilt from the blocks", "Bringing the sidechain database"]):
+            self.restart_node(0)
+        assert_equal(node.getdrivechaininfo()["statehash"], state)
+
+        self.log.info("A block file the database is rebuilt from that cannot be read: the node does not start, and says how to recover")
+        blocks_dir = node.blocks_path
+        blk = blocks_dir / "blk00001.dat"
+        assert (blocks_dir / "blk00002.dat").exists()
+        self.stop_node(0)
+        saved = blk.read_bytes()
+        # (A missing file is caught earlier, when the block index is loaded: the file stays, its blocks go.)
+        blk.write_bytes(bytes(len(saved)))
+        with node.assert_debug_log(["The sidechain database was derived under other drivechain parameters; it is rebuilt from the blocks",
+                                    "RollForwardSidechainDB: failed to read block"]):
+            node.assert_start_raises_init_error(
+                extra_args=self.extra_args[0] + other,
+                expected_msg="Error loading the sidechain database: a block it has to be derived from could not be read \\(see the log\\). "
+                             "A pruned node no longer has the blocks: rebuild with -reindex.\nPlease restart with -reindex or -reindex-chainstate to recover.",
+                match=ErrorMatch.FULL_REGEX)
+        # With the file back, it is rebuilt; under the former parameters again, it is the same.
+        blk.write_bytes(saved)
+        with node.assert_debug_log(["Bringing the sidechain database from height 0 to the chain tip at height 800"]):
+            self.start_node(0, extra_args=self.extra_args[0] + other)
+        assert_equal(node.getblockcount(), 800)
+        with node.assert_debug_log(["The sidechain database was derived under other drivechain parameters; it is rebuilt from the blocks"]):
             self.restart_node(0)
         assert_equal(node.getdrivechaininfo()["statehash"], state)
 
