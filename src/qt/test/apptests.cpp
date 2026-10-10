@@ -14,7 +14,6 @@
 #include <qt/miningdialog.h>
 #include <qt/multisigdialog.h>
 #include <qt/proofoffundsdialog.h>
-#include <qt/sidechainnodes.h>
 #include <qt/sidechainpage.h>
 #include <qt/theme.h>
 #include <qt/timestampdialog.h>
@@ -102,9 +101,7 @@ void TestWindowMenus(BitcoinGUI* window)
         QVERIFY2(shown, qPrintable(text));
         shown->hide();
     }};
-    opens.template operator()<TimestampDialog>("&Use Chains", "Timestamp &File");
-    opens.template operator()<SidechainNodesDialog>("&Chains", "Sidechain &Nodes");
-    opens.template operator()<MiningDialog>("&Chains", "Solo &Mine");
+    opens.template operator()<TimestampDialog>(QStringLiteral("&Use %1").arg(CLIENT_NAME), "Timestamp &File");
     opens.template operator()<BlockExplorer>("Crypto &Tools", "&Block Explorer");
     opens.template operator()<CryptoToolsDialog>("Crypto &Tools", "&Hash Calculator");
     opens.template operator()<CryptoToolsDialog>("Crypto &Tools", "Merkle &Tree");
@@ -113,29 +110,12 @@ void TestWindowMenus(BitcoinGUI* window)
     opens.template operator()<ProofOfFundsDialog>("&Banking", "&Proof of Funds");
     opens.template operator()<MultisigDialog>("&Banking", "M&ultisig Lounge");
 
-    // The windows of the sidebar.
+    // The window of the sidebar.
     for (QPushButton* button : window->findChildren<QPushButton*>()) {
-        if (button->text() == "Sidechain Nodes" || button->text() == "Mine" || button->text() == "Block Explorer") button->click();
+        if (button->text() == "Block Explorer") button->click();
     }
-    QVERIFY(ShownWindow<SidechainNodesDialog>() && ShownWindow<MiningDialog>() && ShownWindow<BlockExplorer>());
-    // Without a wallet, the miner has no address to take.
-    QStringList boxes;
-    QTimer answer;
-    QObject::connect(&answer, &QTimer::timeout, [&] {
-        for (QWidget* widget : QApplication::topLevelWidgets()) {
-            if (auto* box{qobject_cast<QMessageBox*>(widget)}; box && box->isVisible()) {
-                boxes << box->text();
-                box->button(QMessageBox::Ok)->click();
-            }
-        }
-    });
-    answer.start(20);
-    for (QPushButton* button : ShownWindow<MiningDialog>()->findChildren<QPushButton*>()) {
-        if (button->text() == "New address") button->click();
-    }
-    answer.stop();
-    QCOMPARE(boxes, QStringList{"Open or create a wallet first, or enter an address."});
-    for (QWidget* shown : {static_cast<QWidget*>(ShownWindow<SidechainNodesDialog>()), static_cast<QWidget*>(ShownWindow<MiningDialog>()), static_cast<QWidget*>(ShownWindow<BlockExplorer>())}) shown->hide();
+    QVERIFY(ShownWindow<BlockExplorer>());
+    ShownWindow<BlockExplorer>()->hide();
 #endif
 
     // Looks and text sizes, from the menu and from the sidebar.

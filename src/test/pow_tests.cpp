@@ -387,7 +387,14 @@ BOOST_AUTO_TEST_CASE(asert_large_shift)
 BOOST_AUTO_TEST_CASE(asert_min_difficulty_blocks)
 {
     const auto chain_params{CreateChainParams(*m_node.args, ChainType::TESTNET)};
-    const Consensus::Params& params{chain_params->GetConsensus()};
+    Consensus::Params params{chain_params->GetConsensus()};
+    if (params.sidechain.enabled) {
+        // The blocks of a sidechain carry no work of their own (see CChainParams::MakeSidechain): the
+        // rule is checked with the test network's parameters as the mainchain has them.
+        BOOST_REQUIRE(!params.fPowAllowMinDifficultyBlocks && params.fPowNoRetargeting);
+        params.fPowAllowMinDifficultyBlocks = true;
+        params.fPowNoRetargeting = false;
+    }
     BOOST_REQUIRE(params.fPowAllowMinDifficultyBlocks);
     BOOST_REQUIRE(params.asert_half_life > 0);
     const int anchor_height{params.asert_anchor_height};

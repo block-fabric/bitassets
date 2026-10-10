@@ -33,6 +33,7 @@
 #include <test/util/logging.h>
 #include <test/util/setup_common.h>
 #include <txmempool.h>
+#include <util/result.h>
 #include <util/time.h>
 #include <util/translation.h>
 #include <validation.h>
@@ -50,6 +51,14 @@ using namespace drivechain;
 using namespace std::chrono_literals;
 
 namespace {
+
+/** Chainstate::LoadDrivechainState, with its error in `error` (empty when it succeeded). */
+bool LoadState(Chainstate& chainstate, bilingual_str& error) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    const auto loaded{chainstate.LoadDrivechainState()};
+    error = loaded ? bilingual_str{} : util::ErrorString(loaded);
+    return bool{loaded};
+}
 
 /** A regtest chain of 100 blocks, with what the drivechain tests need on top. */
 struct DrivechainChainSetup : public TestChain100Setup {
@@ -304,7 +313,7 @@ BOOST_AUTO_TEST_CASE(loading_the_sidechain_database)
     const auto load{[&](const SidechainDB& snapshot) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
         DrivechainDB().WriteState(name, snapshot);
         chainstate.m_scdb = SidechainDB{};
-        return chainstate.LoadDrivechainState(error);
+        return LoadState(chainstate, error);
     }};
 
     {
@@ -341,7 +350,7 @@ BOOST_AUTO_TEST_CASE(loading_the_sidechain_database)
     {
         ASSERT_DEBUG_LOG(strprintf("Bringing the sidechain database from height %d to the chain tip", stopped->nHeight));
         chainstate.m_scdb = SidechainDB{};
-        BOOST_CHECK(chainstate.LoadDrivechainState(error));
+        BOOST_CHECK(LoadState(chainstate, error));
     }
     BOOST_CHECK(chainstate.m_scdb == expected);
     BOOST_CHECK(error.empty());
@@ -378,7 +387,7 @@ BOOST_AUTO_TEST_CASE(older_database_format_is_rebuilt)
     bilingual_str error;
     {
         ASSERT_DEBUG_LOG("The sidechain database is in an older format; it is rebuilt from the blocks");
-        BOOST_CHECK(chainstate.LoadDrivechainState(error));
+        BOOST_CHECK(LoadState(chainstate, error));
     }
     BOOST_CHECK(DrivechainDB().IsCurrentFormat());
     BOOST_CHECK(chainstate.m_scdb == expected);
@@ -443,10 +452,9 @@ BOOST_AUTO_TEST_CASE(roll_forward_needs_the_blocks)
     const CBlockIndex* header{m_node.chainman->m_blockman.LookupBlockIndex(next.GetHash())};
     BOOST_REQUIRE(header && !(header->nStatus & BLOCK_HAVE_DATA));
     SidechainDB scdb{chainstate.m_scdb};
-    {
-        ASSERT_DEBUG_LOG("RollForwardSidechainDB: failed to read block " + next.GetHash().ToString());
-        BOOST_CHECK(!chainstate.RollForwardSidechainDB(scdb, chainstate.m_chain.Tip(), header, header->nHeight));
-    }
+    const auto rolled{chainstate.RollForwardSidechainDB(scdb, chainstate.m_chain.Tip(), header, header->nHeight, &chainstate.SideCache())};
+    BOOST_CHECK(!rolled);
+    BOOST_CHECK_EQUAL(util::ErrorString(rolled).original, "Failed to read block " + next.GetHash().ToString() + ". Restart with -reindex.");
     BOOST_CHECK(scdb == chainstate.m_scdb);
 }
 
@@ -555,7 +563,7 @@ BOOST_AUTO_TEST_CASE(snapshot_chainstate_starts_with_an_empty_database)
     bilingual_str error;
     {
         ASSERT_DEBUG_LOG("No sidechain database for the chainstate loaded from a UTXO snapshot; starting with an empty one.");
-        BOOST_CHECK(snapshot.LoadDrivechainState(error));
+        BOOST_CHECK(LoadState(snapshot, error));
     }
     BOOST_CHECK(snapshot.m_scdb.GetBlockHash() == snapshot.m_chain.Tip()->GetBlockHash());
     BOOST_CHECK(snapshot.m_scdb.GetSlots().empty());
@@ -710,24 +718,30 @@ struct SignetSetup : public TestingSetup {
 
 BOOST_FIXTURE_TEST_CASE(no_utxo_snapshots_outside_regtest, MainSetup)
 {
-    // A UTXO snapshot does not hold the drivechain state: only regtest takes one.
+    // A UTXO snapshot does not hold the drivechain state, nor the state of a sidechain: only regtest
+    // takes one.
     TestingSetup& main{*this};
     AutoFile file{nullptr};
     node::SnapshotMetadata metadata{main.m_node.chainman->GetParams().MessageStart()};
     const auto result{main.m_node.chainman->ActivateSnapshot(file, metadata, /*in_memory=*/true)};
     BOOST_REQUIRE(!result);
-    BOOST_CHECK_EQUAL(util::ErrorString(result).original, "UTXO snapshots are not supported with drivechains: the snapshot does not hold the drivechain state");
+    BOOST_CHECK_EQUAL(util::ErrorString(result).original, main.m_node.chainman->GetConsensus().sidechain.enabled ?
+                                                                 "UTXO snapshots are not supported on a sidechain: the snapshot does not hold the sidechain state" :
+                                                                 "UTXO snapshots are not supported with drivechains: the snapshot does not hold the drivechain state");
 }
 
 BOOST_FIXTURE_TEST_CASE(cpu_miner_on_signet, SignetSetup)
 {
-    // Blocks of a signet need the signature of its operator: the CPU miner does not mine them.
+    // Blocks of a signet need the signature of its operator: the CPU miner does not mine them. (On
+    // a sidechain no network's blocks are mined by it: the miners of the mainchain mine them.)
     TestingSetup& signet{*this};
     if (!signet.m_node.mining) signet.m_node.mining = interfaces::MakeMining(signet.m_node);
     node::CpuMiner miner{signet.m_node};
     std::string error;
     BOOST_CHECK(!miner.Start(1, CScript() << OP_TRUE, error));
-    BOOST_CHECK_EQUAL(error, "Blocks of a signet need a signature; use contrib/signet/miner instead");
+    BOOST_CHECK_EQUAL(error, signet.m_node.chainman->GetConsensus().sidechain.enabled ?
+                                 "The blocks of a sidechain are mined by the miners of the mainchain; use setbmm instead" :
+                                 "Blocks of a signet need a signature; use contrib/signet/miner instead");
     BOOST_CHECK(!miner.GetStats().running);
 }
 
