@@ -2,6 +2,8 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <bitcoin-build-config.h> // IWYU pragma: keep
+
 #include <qt/test/apptests.h>
 
 #include <chainparams.h>
@@ -76,6 +78,18 @@ void AppTests::appTests()
 void AppTests::guiTests(BitcoinGUI* window)
 {
     HandleCallback callback{"guiTests", *this};
+#ifdef ENABLE_WALLET
+    // The Assets page, by its action.
+    QAction* assets{nullptr};
+    for (QAction* a : window->findChildren<QAction*>()) {
+        if (a->text() == QStringLiteral("&Assets")) assets = a;
+    }
+    QVERIFY(assets);
+    // Enabled once the node is in sync and a wallet is loaded, which this application is not: what
+    // it does when triggered is the same.
+    Q_EMIT assets->triggered(true);
+    QVERIFY(assets->isChecked());
+#endif // ENABLE_WALLET
     connect(window, &BitcoinGUI::consoleShown, this, &AppTests::consoleTests);
     expectCallback("consoleTests");
     QAction* action = window->findChild<QAction*>("openRPCConsoleAction");
