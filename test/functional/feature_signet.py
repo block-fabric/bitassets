@@ -7,7 +7,8 @@
 from decimal import Decimal
 
 from test_framework.test_framework import BitcoinTestFramework
-from test_framework.util import assert_equal
+from test_framework.descriptors import descsum_create
+from test_framework.util import assert_equal, assert_raises_rpc_error
 
 SIGNET_DEFAULT_CHALLENGE = '5121022eb69a435e256daf541a170b29fdedbd5ef5f6efbd66f67cfec24402a2b1f35551ae'
 
@@ -87,6 +88,11 @@ class SignetBasicTest(BitcoinTestFramework):
         check_getmininginfo(node_idx=0, signet_idx=0)
         check_getmininginfo(node_idx=3, signet_idx=1)
         check_getmininginfo(node_idx=4, signet_idx=2)
+
+        self.log.info("the CPU miner does not mine blocks that need a signature")
+        address = self.nodes[0].deriveaddresses(descsum_create("wpkh(0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798)"))[0]
+        assert_raises_rpc_error(-1, "Blocks of a signet need a signature; use contrib/signet/miner instead", self.nodes[0].setgenerate, True, address)
+        assert_equal(self.nodes[0].getgenerate()["generate"], False)
 
         self.generate(self.nodes[0], 1, sync_fun=self.no_op)
 
