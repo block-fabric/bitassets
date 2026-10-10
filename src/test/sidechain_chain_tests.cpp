@@ -564,4 +564,40 @@ BOOST_AUTO_TEST_CASE(duplicate_table_ids_refuse_to_load)
     BOOST_CHECK_EQUAL(error.original, "Two tables of the sidechain state take the key byte 0x77: this build is broken");
 }
 
+namespace {
+struct MainNetworkSetup : public TestingSetup {
+    MainNetworkSetup() : TestingSetup{ChainType::MAIN} {}
+};
+} // namespace
+
+BOOST_FIXTURE_TEST_CASE(block_weight_limits, MainNetworkSetup)
+{
+    // On the networks of this chain a block may weigh 6 million, of which the transactions other than
+    // the coinbase 4 million: the rest is for the coinbase, which pays deposits and refunds.
+    const Consensus::Params& params{m_node.chainman->GetConsensus()};
+    BOOST_REQUIRE_EQUAL(params.max_block_weight, 6'000'000U);
+    BOOST_REQUIRE_EQUAL(params.max_block_tx_weight, 4'000'000U);
+    const auto with{[&](int count, size_t witness = 0) {
+        auto block_template{interfaces::MakeMining(m_node)->createNewBlock({.coinbase_output_script = CScript() << OP_TRUE}, /*cooldown=*/false)};
+        CBlock block{block_template->getBlock()};
+        for (int i{0}; i < count; ++i) {
+            // About 2.1 million weight units each, below the limit of a transaction.
+            CMutableTransaction tx;
+            tx.vin.emplace_back(COutPoint{Txid::FromUint256(uint256{static_cast<uint8_t>(i + 1)}), 0});
+            tx.vout.emplace_back(0, CScript() << OP_RETURN << std::vector<unsigned char>(525'000, 0x11));
+            if (witness) tx.vin[0].scriptWitness.stack.emplace_back(witness, 0x22);
+            block.vtx.push_back(MakeTransactionRef(std::move(tx)));
+        }
+        node::RegenerateCommitments(block, *m_node.chainman);
+        LOCK(::cs_main);
+        return TestBlockValidity(m_node.chainman->ActiveChainstate(), block, /*check_pow=*/false, /*check_merkle_root=*/true).GetRejectReason();
+    }};
+    // One such transaction is within both limits (it fails later, on its inputs); two are past that of
+    // the transactions; with witnesses, past that of the block; three, past its size without witnesses.
+    BOOST_CHECK_EQUAL(with(1), "bad-txns-inputs-missingorspent");
+    BOOST_CHECK_EQUAL(with(2), "bad-blk-tx-weight");
+    BOOST_CHECK_EQUAL(with(2, 1'000'000), "bad-blk-weight");
+    BOOST_CHECK_EQUAL(with(3), "bad-blk-length");
+}
+
 BOOST_AUTO_TEST_SUITE_END()
