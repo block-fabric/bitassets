@@ -56,6 +56,15 @@
 #include <wallet/test/util.h>
 #include <wallet/wallet.h>
 
+#if defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define CHAINS_TSAN_BUILD
+#endif
+#endif
+#if defined(__SANITIZE_THREAD__)
+#define CHAINS_TSAN_BUILD
+#endif
+
 #include <QApplication>
 #include <QClipboard>
 #include <QComboBox>
@@ -225,8 +234,8 @@ void TestTools(TestChain100Setup& test, ClientModel& client_model)
     QCOMPARE(mining.findChild<QLabel*>("miningStatus")->text(), QString("Mining, threads: 1"));
     QVERIFY(mining.findChild<QPushButton*>("miningStop")->isEnabled());
     QTRY_VERIFY_WITH_TIMEOUT(WITH_LOCK(::cs_main, return test.m_node.chainman->ActiveChain().Height()) >= tip->nHeight + 2, 30000);
-    mining.refresh();
-    QVERIFY(mining.findChild<QLabel*>("miningFound")->text().toInt() >= 2);
+    // The miner counts a block once ProcessNewBlock returns, a moment after the chain shows it.
+    QTRY_VERIFY_WITH_TIMEOUT((mining.refresh(), mining.findChild<QLabel*>("miningFound")->text().toInt() >= 2), 10000);
     SaveScreenshot(mining, "mining");
     mining.findChild<QPushButton*>("miningStop")->click();
     QCOMPARE(mining.findChild<QLabel*>("miningStatus")->text(), QString("Not mining"));
@@ -1347,7 +1356,10 @@ void SidechainTests::sidechainTests()
     NodeRpc::Restart();
     TestChainActivityFetch();
     TestSidechainPage(m_node);
-#ifndef WIN32
+#if !defined(WIN32) && !defined(CHAINS_TSAN_BUILD)
+    // Not under ThreadSanitizer: QProcess starts programs through a vfork-style
+    // clone(CLONE_VM), which the TSan runtime cannot follow (it aborts with
+    // "CHECK failed: tsan_rtl.cpp ... ((!thr->slot)) != (0)").
     TestSidechainNodes();
 #endif
 }
