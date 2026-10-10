@@ -7,6 +7,9 @@
 #include <bitcoin-build-config.h> // IWYU pragma: keep
 
 #include <addresstype.h>
+#include <common/args.h>
+#include <key.h>
+#include <outputtype.h>
 #include <core_io.h>
 #include <drivechain/sidechain.h>
 #include <interfaces/chain.h>
@@ -27,7 +30,15 @@
 #include <qt/multisigdialog.h>
 #include <qt/noderpc.h>
 #include <qt/clientmodel.h>
+#include <qt/guiutil.h>
+#include <qt/optionsdialog.h>
 #include <qt/optionsmodel.h>
+#include <qt/qvalidatedlineedit.h>
+#include <qt/signverifymessagedialog.h>
+#include <qt/themedframe.h>
+#include <qt/transactionfilterproxy.h>
+#include <qt/transactiontablemodel.h>
+#include <qt/walletcontroller.h>
 #include <qt/platformstyle.h>
 #include <qt/proofoffundsdialog.h>
 #include <qt/sidebarmining.h>
@@ -57,6 +68,15 @@
 #include <wallet/wallet.h>
 
 #include <QApplication>
+#include <QClipboard>
+#include <QComboBox>
+#include <QDateTime>
+#include <QInputDialog>
+#include <QMainWindow>
+#include <QProcess>
+#include <QTemporaryDir>
+#include <QToolButton>
+#include <QUrl>
 #include <QFontDatabase>
 #include <QCheckBox>
 #include <QCryptographicHash>
@@ -78,10 +98,13 @@
 
 #include <map>
 #include <memory>
+#include <atomic>
+#include <thread>
 
 using wallet::AddWallet;
 using wallet::CreateMockableWalletDatabase;
 using wallet::CWallet;
+using wallet::GetWallet;
 using wallet::RemoveWallet;
 using wallet::WalletContext;
 using wallet::WalletDescriptor;
@@ -376,6 +399,425 @@ void TestTools(TestChain100Setup& test, ClientModel& client_model)
     QObject::disconnect(counting);
 }
 
+/** A push button of `parent` by its text. */
+QPushButton* Button(QWidget& parent, const QString& text)
+{
+    for (QPushButton* button : parent.findChildren<QPushButton*>()) {
+        if (button->text() == text) return button;
+    }
+    return nullptr;
+}
+
+/**
+ * Answer the dialogs that pop up while `action` runs: input dialogs with `answers` in turn (one
+ * with none left is cancelled), message boxes with `button`. @return the texts of the message boxes
+ */
+QStringList AnswerDialogs(QStringList answers, QMessageBox::StandardButton button, const std::function<void()>& action)
+{
+    QStringList texts;
+    QTimer timer;
+    QObject::connect(&timer, &QTimer::timeout, [&] {
+        for (QWidget* widget : QApplication::topLevelWidgets()) {
+            if (!widget->isVisible()) continue;
+            if (auto* input{qobject_cast<QInputDialog*>(widget)}) {
+                if (answers.isEmpty()) {
+                    input->reject();
+                    continue;
+                }
+                const QString answer{answers.takeFirst()};
+                if (input->inputMode() == QInputDialog::IntInput) {
+                    input->setIntValue(answer.toInt());
+                } else {
+                    input->setTextValue(answer);
+                }
+                input->accept();
+            } else if (auto* box{qobject_cast<QMessageBox*>(widget)}) {
+                texts << box->text();
+                QAbstractButton* choice{box->button(button)};
+                if (!choice) choice = box->button(QMessageBox::Ok);
+                if (choice) choice->click();
+            }
+        }
+    });
+    timer.start(20);
+    action();
+    timer.stop();
+    return texts;
+}
+
+/** The windows and models around the sidechain page: the parts the tests above leave out. */
+void TestMoreWindows(TestChain100Setup& test, ClientModel& client_model, WalletModel& wallet_model, OptionsModel& options_model, const PlatformStyle* platform_style)
+{
+    const int height{WITH_LOCK(::cs_main, return test.m_node.chainman->ActiveChain().Height())};
+
+    // Calls off the GUI thread: the answer comes back on it, to a receiver that is still there.
+    {
+        QObject receiver;
+        bool ran{false};
+        NodeRpc::RunAsync(&receiver, [&]() -> std::function<void()> { return [&] { ran = true; }; });
+        QTRY_VERIFY_WITH_TIMEOUT(ran, 10000);
+        std::optional<UniValue> result;
+        QString error;
+        bool done{false};
+        const auto keep{[&](std::optional<UniValue> r, const QString& e) {
+            result = std::move(r);
+            error = e;
+            done = true;
+        }};
+        NodeRpc::CallAsync(&receiver, &client_model, "getblockcount", UniValue{UniValue::VARR}, keep);
+        QTRY_VERIFY_WITH_TIMEOUT(done, 10000);
+        QVERIFY(result);
+        QCOMPARE(result->getInt<int>(), height);
+        done = false;
+        NodeRpc::CallAsync(&receiver, &client_model, "nosuchcommand", UniValue{UniValue::VARR}, keep);
+        QTRY_VERIFY_WITH_TIMEOUT(done, 10000);
+        QVERIFY(!result);
+        QCOMPARE(error, QString("Method not found"));
+        // Without a node, the answer comes at once.
+        done = false;
+        NodeRpc::CallAsync(&receiver, nullptr, "getblockcount", UniValue{UniValue::VARR}, keep);
+        QVERIFY(done);
+        QCOMPARE(error, QString("The node is not available."));
+        // A receiver gone before the answer hears nothing.
+        bool called{false};
+        auto* gone{new QObject};
+        NodeRpc::CallAsync(gone, &client_model, "getblockcount", UniValue{UniValue::VARR}, [&](std::optional<UniValue>, const QString&) { called = true; });
+        delete gone;
+        // The next call is answered after it: by then the first was dropped.
+        done = false;
+        NodeRpc::CallAsync(&receiver, &client_model, "getblockcount", UniValue{UniValue::VARR}, keep);
+        QTRY_VERIFY_WITH_TIMEOUT(done, 10000);
+        QVERIFY(!called);
+    }
+
+    // The latest blocks and transactions, fetched off the GUI thread when the window shows.
+    {
+        ChainActivity activity;
+        activity.setClientModel(&client_model);
+        auto* blocks{activity.findChild<QTableWidget*>("latestBlocks")};
+        auto* transactions{activity.findChild<QTableWidget*>("latestTransactions")};
+        activity.show();
+        QTRY_VERIFY_WITH_TIMEOUT(blocks->rowCount() > 0, 10000);
+        QCOMPARE(blocks->item(0, 0)->text(), QString::number(height));
+        QString details;
+        QObject::connect(&activity, &ChainActivity::detailsRequested, [&](const QString& hash) { details = hash; });
+        Q_EMIT blocks->cellDoubleClicked(0, 1);
+        QCOMPARE(details, blocks->item(0, 3)->text());
+        // A transaction in the mempool shows on the next refresh; a refresh asked for while one is under way follows it.
+        QString send_error;
+        const auto sent{NodeRpc::Call(&client_model, "sendtoaddress", NodeRpc::Args({EncodeDestination(WitnessV0KeyHash{test.coinbaseKey.GetPubKey()}), 1}), send_error, QString{})};
+        QVERIFY2(sent, qPrintable(send_error));
+        activity.refresh();
+        activity.refresh();
+        QTRY_VERIFY_WITH_TIMEOUT(transactions->rowCount() == 1, 10000);
+        QCOMPARE(transactions->item(0, 3)->text(), QString::fromStdString(sent->get_str()));
+        Q_EMIT transactions->cellDoubleClicked(0, 0);
+        QCOMPARE(details, QString::fromStdString(sent->get_str()));
+        MineBlock(test);
+        activity.refresh();
+        QTRY_VERIFY_WITH_TIMEOUT(transactions->rowCount() == 0 && blocks->item(0, 0)->text() == QString::number(height + 1), 10000);
+        activity.setClientModel(nullptr);
+        activity.refresh();
+    }
+
+    const NodeRpc::WalletNameFn wallet_name{[] { return std::optional<QString>{QString{}}; }};
+    const NodeRpc::WalletNameFn no_wallet{[] { return std::optional<QString>{}; }};
+
+    // The block explorer fills itself when it shows; a double click on a block or a transaction shows it.
+    {
+        BlockExplorer explorer;
+        explorer.setClientModel(&client_model);
+        auto* blocks{explorer.findChild<QTableWidget*>("explorerBlocks")};
+        QCOMPARE(blocks->rowCount(), 0);
+        explorer.show();
+        QVERIFY(blocks->rowCount() > 0);
+        Q_EMIT blocks->cellDoubleClicked(1, 0);
+        QVERIFY(explorer.findChild<QLabel*>("explorerTitle")->text().startsWith(QString("Block %1:").arg(height)));
+        QString send_error;
+        const auto sent{NodeRpc::Call(&client_model, "sendtoaddress", NodeRpc::Args({EncodeDestination(WitnessV0KeyHash{test.coinbaseKey.GetPubKey()}), 1}), send_error, QString{})};
+        QVERIFY2(sent, qPrintable(send_error));
+        explorer.findChild<QLineEdit*>("explorerSearch")->setText(QString::number(height));
+        Q_EMIT explorer.findChild<QLineEdit*>("explorerSearch")->returnPressed();
+        QVERIFY(explorer.findChild<QLabel*>("explorerTitle")->text().startsWith(QString("Block %1:").arg(height)));
+        Button(explorer, "Refresh")->click();
+        auto* mempool{explorer.findChild<QTableWidget*>("explorerMempool")};
+        QCOMPARE(mempool->rowCount(), 1);
+        Q_EMIT mempool->cellDoubleClicked(0, 0);
+        QCOMPARE(explorer.findChild<QLabel*>("explorerTitle")->text(), "Transaction " + QString::fromStdString(sent->get_str()));
+        QCOMPARE(explorer.findChild<QListWidget*>("explorerBlockTxs")->count(), 0);
+        Button(explorer, "Search")->click();
+        explorer.hide();
+        MineBlock(test);
+    }
+
+    // A new address for the miner, from the open wallet; none without one.
+    {
+        MiningDialog mining(wallet_name);
+        mining.setClientModel(&client_model);
+        mining.show();
+        auto* address{mining.findChild<QLineEdit*>("miningAddress")};
+        address->clear();
+        Button(mining, "New address")->click();
+        QVERIFY2(address->text().startsWith(QString::fromStdString(Params().Bech32HRP() + "1")), qPrintable(address->text()));
+        MiningDialog without(no_wallet);
+        without.setClientModel(&client_model);
+        QCOMPARE(AnswerDialogs({}, QMessageBox::Ok, [&] { Button(without, "New address")->click(); }), QStringList{"Open or create a wallet first, or enter an address."});
+        mining.setClientModel(nullptr);
+    }
+
+    // The tabs of the crypto tools, each opened from the menu.
+    {
+        CryptoToolsDialog tools;
+        auto* tabs{tools.findChild<QTabWidget*>()};
+        for (const auto tab : {CryptoToolsDialog::MERKLE, CryptoToolsDialog::ADDRESS, CryptoToolsDialog::HASH}) {
+            tools.showTab(tab);
+            QCOMPARE(tabs->currentIndex(), int{tab});
+            QVERIFY(tools.isVisible());
+        }
+        tools.hide();
+    }
+
+    // Copying a proof of funds.
+    {
+        ProofOfFundsDialog proof(wallet_name);
+        proof.findChild<QPlainTextEdit*>("proofOutput")->setPlainText("a proof");
+        Button(proof, "Copy proof")->click();
+        QCOMPARE(QApplication::clipboard()->text(), QString("a proof"));
+    }
+
+    // Multisig: keys of partners, addresses from a descriptor, removing either, copying them.
+    {
+        QSettings().remove("MultisigKeys");
+        QSettings().remove("MultisigAddresses");
+        MultisigDialog multisig(wallet_name);
+        multisig.setClientModel(&client_model);
+        multisig.show();
+        auto* keys{multisig.findChild<QTableWidget*>("multisigKeys")};
+        auto* name{multisig.findChild<QLineEdit*>("multisigKeyName")};
+        auto* key{multisig.findChild<QLineEdit*>("multisigKey")};
+        QCOMPARE(AnswerDialogs({}, QMessageBox::Ok, [&] { Button(multisig, "Add partner")->click(); }), QStringList{"Enter the name of the partner and their public key."});
+        name->setText("Alice");
+        key->setText("not a key");
+        const QStringList refused{AnswerDialogs({}, QMessageBox::Ok, [&] { Button(multisig, "Add partner")->click(); })};
+        QCOMPARE(refused.size(), 1);
+        QVERIFY2(refused.at(0).startsWith("This is not a public key:"), qPrintable(refused.at(0)));
+        const QString alice{QString::fromStdString(HexStr(GenerateRandomKey().GetPubKey()))};
+        key->setText(alice);
+        Button(multisig, "Add partner")->click();
+        QCOMPARE(keys->rowCount(), 1);
+        QCOMPARE(keys->item(0, 0)->text(), QString("Alice"));
+        QVERIFY(name->text().isEmpty() && key->text().isEmpty());
+        multisig.addOwnKey();
+        QCOMPARE(keys->rowCount(), 2);
+        keys->setCurrentCell(0, 0);
+        Button(multisig, "Copy key")->click();
+        QCOMPARE(QApplication::clipboard()->text(), alice);
+        // (Both tabs have a Remove button: the one of the keys.)
+        QPushButton* remove_key{Button(*keys->parentWidget(), "Remove")};
+        QVERIFY(remove_key);
+        remove_key->click();
+        QCOMPARE(keys->rowCount(), 1);
+        QCOMPARE(keys->item(0, 0)->text(), QString("Me (default wallet)"));
+        keys->setCurrentCell(-1, -1);
+        remove_key->click();
+        QCOMPARE(keys->rowCount(), 1);
+
+        auto* addresses{multisig.findChild<QTableWidget*>("multisigAddresses")};
+        const QString bob{QString::fromStdString(HexStr(GenerateRandomKey().GetPubKey()))};
+        const QString descriptor{QStringLiteral("wsh(sortedmulti(1,%1,%2))").arg(alice, bob)};
+        // Not a descriptor of this window; cancelled at the name; then added; then once more.
+        QCOMPARE(AnswerDialogs({"pkh(" + alice + ")"}, QMessageBox::Ok, [&] { multisig.importAddress(); }), QStringList{"This is not the descriptor of a shared address made in this window."});
+        QVERIFY(AnswerDialogs({descriptor}, QMessageBox::Ok, [&] { multisig.importAddress(); }).isEmpty());
+        QCOMPARE(addresses->rowCount(), 0);
+        QVERIFY(AnswerDialogs({descriptor, "Imported"}, QMessageBox::Ok, [&] { multisig.importAddress(); }).isEmpty());
+        QCOMPARE(addresses->rowCount(), 1);
+        QCOMPARE(addresses->item(0, 0)->text(), QString("Imported"));
+        const QStringList again{AnswerDialogs({descriptor, "Again"}, QMessageBox::Ok, [&] { multisig.importAddress(); })};
+        QCOMPARE(again, QStringList{"This shared address is already in the list, as \"Imported\"."});
+        addresses->setCurrentCell(0, 0);
+        Button(multisig, "Copy address")->click();
+        QCOMPARE(QApplication::clipboard()->text(), addresses->item(0, 3)->text());
+        Button(multisig, "Copy descriptor")->click();
+        QVERIFY(QApplication::clipboard()->text().startsWith(descriptor + "#"));
+        multisig.findChild<QPlainTextEdit*>("multisigPsbt")->setPlainText("cHNidP8B");
+        Button(multisig, "Copy")->click();
+        QCOMPARE(QApplication::clipboard()->text(), QString("cHNidP8B"));
+        // Removing asks first.
+        QCOMPARE(AnswerDialogs({}, QMessageBox::No, [&] { multisig.removeAddress(); }).size(), 1);
+        QCOMPARE(addresses->rowCount(), 1);
+        AnswerDialogs({}, QMessageBox::Yes, [&] { multisig.removeAddress(); });
+        QCOMPARE(addresses->rowCount(), 0);
+        multisig.removeAddress();
+        QSettings().remove("MultisigKeys");
+        QSettings().remove("MultisigAddresses");
+    }
+
+    // The transaction list filters only on what is asked for.
+    {
+        TransactionFilterProxy filter;
+        filter.setSourceModel(wallet_model.getTransactionTableModel());
+        const int all{filter.rowCount()};
+        QVERIFY(all > 1);
+        filter.setShowInactive(false);
+        QCOMPARE(filter.rowCount(), all);
+        filter.setShowInactive(true);
+        const QString txid{filter.index(0, 0).data(TransactionTableModel::TxHashRole).toString()};
+        filter.setSearchString(txid.toUpper());
+        QVERIFY(filter.rowCount() >= 1 && filter.rowCount() < all);
+        filter.setSearchString("no such thing");
+        QCOMPARE(filter.rowCount(), 0);
+        filter.setSearchString({});
+        QCOMPARE(filter.rowCount(), all);
+        filter.setDateRange(QDateTime::currentDateTime().addYears(10), std::nullopt);
+        QCOMPARE(filter.rowCount(), 0);
+        filter.setDateRange(std::nullopt, QDateTime::fromSecsSinceEpoch(0));
+        QCOMPARE(filter.rowCount(), 0);
+        filter.setDateRange(QDateTime::fromSecsSinceEpoch(0), std::nullopt);
+        QCOMPARE(filter.rowCount(), all);
+    }
+
+    // Messages signed with a P2WPKH address in the window, and checked.
+    {
+        SignVerifyMessageDialog sign(platform_style, nullptr);
+        sign.setModel(&wallet_model);
+        const auto destination{wallet_model.wallet().getNewDestination(OutputType::BECH32, "")};
+        QVERIFY(destination);
+        const QString address{QString::fromStdString(EncodeDestination(*destination))};
+        sign.findChild<QValidatedLineEdit*>("addressIn_SM")->setText(address);
+        sign.findChild<QPlainTextEdit*>("messageIn_SM")->setPlainText("signed in the window");
+        sign.findChild<QPushButton*>("signMessageButton_SM")->click();
+        QCOMPARE(sign.findChild<QLabel*>("statusLabel_SM")->text(), QString("<nobr>Message signed.</nobr>"));
+        const QString signature{sign.findChild<QLineEdit*>("signatureOut_SM")->text()};
+        QVERIFY(!signature.isEmpty());
+        sign.findChild<QValidatedLineEdit*>("addressIn_VM")->setText(address);
+        sign.findChild<QPlainTextEdit*>("messageIn_VM")->setPlainText("signed in the window");
+        sign.findChild<QValidatedLineEdit*>("signatureIn_VM")->setText(signature);
+        sign.findChild<QPushButton*>("verifyMessageButton_VM")->click();
+        QCOMPARE(sign.findChild<QLabel*>("statusLabel_VM")->text(), QString("<nobr>Message verified.</nobr>"));
+        // An address of scripts stands for no single key, to sign or to verify with.
+        const auto taproot{wallet_model.wallet().getNewDestination(OutputType::BECH32M, "")};
+        QVERIFY(taproot);
+        sign.findChild<QValidatedLineEdit*>("addressIn_SM")->setText(QString::fromStdString(EncodeDestination(*taproot)));
+        sign.findChild<QPushButton*>("signMessageButton_SM")->click();
+        QVERIFY(sign.findChild<QLabel*>("statusLabel_SM")->text().startsWith("The entered address does not refer to a single key."));
+        sign.findChild<QValidatedLineEdit*>("addressIn_VM")->setText(QString::fromStdString(EncodeDestination(*taproot)));
+        sign.findChild<QPushButton*>("verifyMessageButton_VM")->click();
+        QVERIFY2(!sign.findChild<QLabel*>("statusLabel_VM")->text().contains("Message verified"), qPrintable(sign.findChild<QLabel*>("statusLabel_VM")->text()));
+    }
+
+    // The look, the font and the frame, set in the options.
+    {
+        const bool frame{Theme::SavedFrame()};
+        OptionsDialog options(nullptr, /*enableWallet=*/true);
+        options.setModel(&options_model);
+        options.setCurrentTab(OptionsDialog::TAB_DISPLAY);
+        auto* theme{options.findChild<QComboBox*>("theme")};
+        theme->setCurrentIndex(theme->findData("midnight"));
+        options.findChild<QSpinBox*>("fontSize")->setValue(3);
+        options.findChild<QCheckBox*>("themedFrame")->setChecked(!frame);
+        WithMessageBoxes(QMessageBox::Ok, [&] { options.findChild<QPushButton*>("okButton")->click(); });
+        QCOMPARE(Theme::Saved(), QString("midnight"));
+        QCOMPARE(Theme::SavedFontSizeAdjustment(), 3);
+        QCOMPARE(Theme::SavedFrame(), !frame);
+
+        // The frame of the main window in the colours of the theme: its button maximizes and restores the window.
+        QMainWindow window;
+        ThemedFrame themed(&window);
+        Theme::SaveFrame(true);
+        themed.apply();
+        window.show();
+        QToolButton* maximize{nullptr};
+        for (QToolButton* button : window.findChildren<QToolButton*>()) {
+            if (button->toolTip() == "Maximize") maximize = button;
+        }
+        QVERIFY(maximize);
+        maximize->click();
+        QTRY_VERIFY(window.isMaximized());
+        maximize->click();
+        QTRY_VERIFY(!window.isMaximized());
+        window.hide();
+
+        Theme::SaveFrame(frame);
+        Theme::SaveFont({}, 0);
+        Theme::Apply("system");
+        Theme::Save("system");
+    }
+}
+
+/** Run `work` on a thread of its own while the GUI thread goes on with its events (which the work may wait for). */
+void OffGuiThread(const std::function<void()>& work)
+{
+    std::atomic<bool> finished{false};
+    std::thread thread{[&] {
+        work();
+        finished = true;
+    }};
+    while (!finished) QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    thread.join();
+}
+
+/** WalletController::getOrCreateWallet from the GUI thread and from others; the models it made. */
+void TestWalletController(interfaces::Node& node, ClientModel& client_model, const PlatformStyle* platform_style, WalletContext& context, const std::shared_ptr<CWallet>& wallet)
+{
+    const auto make_wallet{[&](const std::string& name) {
+        auto other{std::make_shared<CWallet>(node.context()->chain.get(), name, CreateMockableWalletDatabase())};
+        {
+            LOCK(other->cs_wallet);
+            other->SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+            other->SetupDescriptorScriptPubKeyMans();
+            const CBlockIndex* tip{WITH_LOCK(node.context()->chainman->GetMutex(), return node.context()->chainman->ActiveChain().Tip())};
+            other->SetLastBlockProcessed(tip->nHeight, tip->GetBlockHash());
+        }
+        AddWallet(context, other);
+        return other;
+    }};
+    std::vector<WalletModel*> announced;
+    QPointer<WalletModel> late;
+    std::shared_ptr<CWallet> third;
+    {
+        WalletController controller(client_model, platform_style, nullptr);
+        QObject::connect(&controller, &WalletController::walletAdded, [&](WalletModel* model) { announced.push_back(model); });
+        // The wallet loaded already has its model, the same whichever thread asks.
+        const QPointer<WalletModel> first{controller.getOrCreateWallet(interfaces::MakeWallet(context, wallet))};
+        QVERIFY(first);
+        QCOMPARE(first->parent(), &controller);
+        QCOMPARE(controller.getOrCreateWallet(interfaces::MakeWallet(context, wallet)).data(), first.data());
+        QPointer<WalletModel> from_thread;
+        OffGuiThread([&] { from_thread = controller.getOrCreateWallet(interfaces::MakeWallet(context, wallet)); });
+        QCOMPARE(from_thread.data(), first.data());
+
+        // A new wallet from another thread: announced, and given its parent, on the GUI thread.
+        const auto second{make_wallet("second")};
+        QPointer<WalletModel> second_model;
+        OffGuiThread([&] { second_model = controller.getOrCreateWallet(interfaces::MakeWallet(context, second)); });
+        QVERIFY(second_model);
+        QTRY_COMPARE(second_model->parent(), &controller);
+        QVERIFY(std::find(announced.begin(), announced.end(), second_model.data()) != announced.end());
+        QCOMPARE(controller.getOrCreateWallet(interfaces::MakeWallet(context, second)).data(), second_model.data());
+        // A model being unloaded is no longer the model of its wallet: loaded again, it gets a new one.
+        second_model->setUnloading();
+        const QPointer<WalletModel> reloaded{controller.getOrCreateWallet(interfaces::MakeWallet(context, second))};
+        QVERIFY(reloaded && reloaded.data() != second_model.data());
+        // Closing all wallets asks first: not now.
+        QCOMPARE(WithMessageBoxes(QMessageBox::Cancel, [&] { controller.closeAllWallets(); }).size(), 1);
+
+        // Registered from another thread, and the controller gone before the GUI thread got to it.
+        third = make_wallet("third");
+        // (The thread is waited for without the events of the GUI thread: the model stays without its parent.)
+        std::thread{[&] { late = controller.getOrCreateWallet(interfaces::MakeWallet(context, third)); }}.join();
+        QVERIFY(late);
+        QVERIFY(late->parent() != &controller);
+    }
+    // The controller deleted the model it had not handed out yet.
+    QVERIFY(!late);
+    QCoreApplication::processEvents();
+    RemoveWallet(context, third, /*load_on_start=*/std::nullopt);
+    for (const char* name : {"second"}) {
+        if (auto other{GetWallet(context, name)}) RemoveWallet(context, other, /*load_on_start=*/std::nullopt);
+    }
+}
+
+
 void TestSidechainPage(interfaces::Node& node)
 {
     TestChain100Setup test;
@@ -435,6 +877,9 @@ void TestSidechainPage(interfaces::Node& node)
     SaveScreenshot(page, "mainchain-page");
 
     TestTools(test, client_model);
+
+    TestMoreWindows(test, client_model, wallet_model, options_model, platform_style.get());
+    TestWalletController(node, client_model, platform_style.get(), context, wallet);
 
     RemoveWallet(context, wallet, /*load_on_start=*/std::nullopt);
 }
@@ -755,6 +1200,8 @@ void SidechainTests::sidechainTests()
     // is open when they fire and store its text through a pointer that is no
     // longer valid. Let them fire now, while there is no message box.
     QTest::qWait(500);
+    // AppTests shut a node down before, which stopped the calls off the GUI thread.
+    NodeRpc::Restart();
     TestChainActivityFetch();
     TestSidechainPage(m_node);
     TestSidechainPageOnASidechain(m_node);

@@ -15,7 +15,7 @@ from test_framework.test_framework import BitcoinTestFramework
 from test_framework.test_node import ErrorMatch
 from test_framework.messages import tx_from_hex
 from test_framework.script import CScript, OP_NOP5, OP_TRUE
-from test_framework.util import assert_equal
+from test_framework.util import assert_equal, assert_raises_rpc_error
 
 # The escrow output of a sidechain slot (OP_DRIVECHAIN is OP_NOP5).
 def escrow_script(slot):
@@ -55,6 +55,9 @@ class DrivechainRebuildTest(BitcoinTestFramework):
         pruned = node.pruneblockchain(400)
         assert pruned > 0
         assert "pruneheight" in node.getblockchaininfo()
+        # What the pruned blocks said cannot be told any more.
+        assert_raises_rpc_error(-1, "Block 1 is not available (pruned?)", node.getsidechainevents, 0, 1, 10)
+        assert_equal(len(node.getsidechainevents(0, 790, 10)), 10)
         self.stop_node(0)
         node.assert_start_raises_init_error(
             extra_args=self.extra_args[0] + other,
