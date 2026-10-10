@@ -5063,7 +5063,7 @@ void Chainstate::EraseDrivechainUndo()
     for (int height{std::max(0, m_drivechain_undo_erased_height + 1)}; height <= last; ++height) {
         hashes.push_back(m_chain[height]->GetBlockHash());
         // In batches: after a long initial sync without a flush there can be many.
-        if (hashes.size() >= 10'000) {
+        if (hashes.size() >= m_drivechain_undo_erase_batch) {
             m_blockman.m_drivechain_db->EraseBlockUndo(hashes);
             hashes.clear();
         }
