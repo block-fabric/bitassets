@@ -137,14 +137,51 @@ class BitAssetsTest(SidechainTest):
         side.mintasset("SILVER", 500)
         self.mine_txs()
         assert_equal(side.getasset("GOLD")["supply"], Decimal("1001000.00"))
+        # To an address given: of another wallet.
+        assert_raises_rpc_error(-5, "Invalid address", side.mintasset, "GOLD", 5, "nonsense")
+        other_gold = self.holding(other, "GOLD")["balance"]
+        side.mintasset("GOLD", 5, other.getnewaddress())
+        self.mine_txs()
+        assert_equal(self.holding(other, "GOLD")["balance"], other_gold + 5)
+        assert_equal(self.holding(side, "GOLD")["control"], True)
+        assert_equal(side.getasset("GOLD")["supply"], Decimal("1001005.00"))
+        # Too little to open a pool: fewer shares than a pool opens with.
+        assert_raises_rpc_error(-8, "Too little to open a pool", side.addliquidity, "SILVER", 100, "CHN", "0.001")
+        assert_raises_rpc_error(-8, "it makes no shares", side.addliquidity, "SILVER", 1, "CHN", "0.000001")
         side.burnasset("GOLD", 100)
         side.updateasset("GOLD", {"info": "One gram of gold, in Zurich"})
         self.mine_txs()
         gold = side.getasset("GOLD")
-        assert_equal(gold["supply"], Decimal("1000900.00"))
+        assert_equal(gold["supply"], Decimal("1000905.00"))
         assert_equal(gold["burned"], Decimal("100.00"))
         assert_equal(gold["data"]["info"], "One gram of gold, in Zurich")
         assert_equal([h["value"] for h in side.getassethistory("GOLD")["info"]], ["One gram of gold", "One gram of gold, in Zurich"])
+
+        self.log.info("Every field of an asset's data, set and deleted")
+        key = side.getaddressinfo(side.getnewaddress())["pubkey"]
+        data = {
+            "commitment": "ab" * 32,
+            "ipv4": "203.0.113.7:8333",
+            "ipv6": "[2001:db8::7]:8333",
+            "encryptionkey": key,
+            "signingkey": key[2:],
+        }
+        side.updateasset("GOLD", data)
+        set_height = self.mine_txs()["height"]
+        assert_equal(side.getasset("GOLD")["data"], {"info": "One gram of gold, in Zurich", **data})
+        side.updateasset("GOLD", {"ipv4": None, "ipv6": None, "encryptionkey": None, "signingkey": None, "commitment": None})
+        deleted_height = self.mine_txs()["height"]
+        assert_equal(side.getasset("GOLD")["data"], {"info": "One gram of gold, in Zurich"})
+        history = side.getassethistory("GOLD")
+        for field, value in data.items():
+            assert_equal([h["value"] for h in history[field]], [None, value, None])
+            assert_equal([h["height"] for h in history[field]], [gold["registered"], set_height, deleted_height])
+        assert_equal(side.getasset("GOLD", set_height)["data"], {"info": "One gram of gold, in Zurich", **data})
+        assert_equal(side.getasset("GOLD", deleted_height)["data"], {"info": "One gram of gold, in Zurich"})
+        assert "data" not in side.getasset("GOLD", gold["registered"] - 1)
+        for bad, message in [({"ipv4": "2001:db8::7"}, "ipv4: an IPv4 address"), ({"signingkey": "00"}, "signingkey: an x-only public key"), ({"commitment": "ab"}, "commitment: 32 bytes"), ({"colour": "gold"}, "Unknown field")]:
+            assert_raises_rpc_error(-8, message, side.updateasset, "GOLD", bad)
+        assert_raises_rpc_error(-8, "Nothing to change", side.updateasset, "GOLD", {})
 
         self.log.info("Control changes hands; a fixed supply cannot change")
         side.transferassetcontrol("SILVER", other.getnewaddress())
@@ -167,6 +204,11 @@ class BitAssetsTest(SidechainTest):
         assert_equal(pool["reserve_b"], Decimal("5.00000000"))
         assert_equal(pool["price"], Decimal("0.0005"))
         assert_equal(side.listpools()[0]["asset_a"], "GOLD")
+        # Those of an asset, which comes first.
+        assert_equal(side.listpools("GOLD"), side.listpools())
+        assert_equal(side.listpools("CHN")[0]["asset_a"], "CHN")
+        assert_equal(side.listpools("CHN")[0]["reserve_a"], pool["reserve_b"])
+        assert_equal(side.listpools("SILVER"), [])
         liquidity = side.listmyassets()["liquidity"]
         assert_equal(len(liquidity), 1)
         assert_equal(liquidity[0]["shares"], added["shares"])
@@ -186,6 +228,8 @@ class BitAssetsTest(SidechainTest):
         self.mine_txs()
 
         self.log.info("Trade in it")
+        # Less CHN out than is paid out: refused.
+        assert_raises_rpc_error(-8, "the least CHN paid out is 0.0005", side.swapasset, "GOLD", "0.5", "CHN")
         quote = other.quoteswap("CHN", "0.1", "GOLD")
         assert_greater_than(quote["amount_out"], 0)
         assert_greater_than(quote["price_impact"], 0)
@@ -245,6 +289,7 @@ class BitAssetsTest(SidechainTest):
         self.mine_txs()
         auction = side.getauction(auction["auction"])
         assert_equal(auction["status"], "sold out")
+        assert_raises_rpc_error(-8, "The auction takes no more bids", other.bidauction, auction["auction"], 1)
         proceeds = auction["proceeds"]
         block_with_collect = None
         side.collectauction(auction["auction"])
@@ -448,6 +493,24 @@ class BitAssetsTest(SidechainTest):
         assert_equal(side.getasset("GOLD"), gold)
         assert_equal(side.listmyassets(), mine)
         self.check_in_sync()
+
+        self.log.info("An auction selling CHN takes no bid that buys CHN dust")
+        sells_chn = other.createauction("CHN", "0.01", "GOLD", 10, 10, 5)["txid"]
+        self.mine_txs()
+        assert_raises_rpc_error(-8, "the least CHN paid out is 0.0005", side.bidauction, sells_chn, "0.1")
+        assert_equal(side.quotebid(sells_chn, 1)["buys"], Decimal("0.00100000"))
+        other.collectauction(sells_chn)
+        self.mine_txs()
+
+        self.log.info("What a wallet did, in words")
+        activity = other.listassetactivity(100)
+        operations = [a["operation"] for a in activity]
+        for operation in ["bid", "release", "register", "auction", "collect", "add liquidity", "remove liquidity", "swap", "transfer"]:
+            assert operation in operations, operation
+        bids = [a["summary"] for a in activity if a["operation"] == "bid"]
+        assert "Bid 2.50000000 CHN for at least 25.00 GOLD" in bids, bids
+        assert_equal([a["summary"] for a in activity if a["operation"] == "release"], ["Retired a dead asset (its pools' CHN go to mainchain miners)"])
+        assert_equal(len(other.listassetactivity(2)), 2)
 
         self.log.info("sendall leaves the outputs that carry tokens alone")
         held = other.listmyassets()

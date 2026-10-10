@@ -170,6 +170,7 @@ BASE_SCRIPTS = [
     'feature_reindex.py',
     'feature_sidechain.py',
     'feature_bitassets.py',
+    'feature_bitassets_invalid.py',
     'feature_sidechain_network.py',
     'feature_sidechain_follower.py',
     'feature_drivechain_rebuild.py',
