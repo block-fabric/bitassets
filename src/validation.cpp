@@ -114,9 +114,6 @@ const std::vector<std::string> CHECKLEVEL_DOC {
  *  noticeably interfere with the pruning mechanism.
  * */
 static constexpr int PRUNE_LOCK_BUFFER{10};
-/** Largest BMM request or deposit the mempool takes (see PreChecks): ten times a TRUC child,
- *  room for a deposit paid from a hundred and more inputs. */
-static constexpr int64_t MAX_DRIVECHAIN_TX_VSIZE{10 * TRUC_CHILD_MAX_VSIZE};
 
 // Return whether the completed full flush should compact chainstate
 static bool ShouldCompactChainstate(bool in_ibd)
