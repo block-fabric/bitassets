@@ -14,6 +14,8 @@
 #include <consensus/amount.h>
 #include <consensus/merkle.h>
 #include <consensus/validation.h>
+#include <chainparams.h>
+#include <init.h>
 #include <drivechain/db.h>
 #include <interfaces/mining.h>
 #include <key.h>
@@ -639,6 +641,53 @@ BOOST_FIXTURE_TEST_CASE(block_weight_limits, MainNetworkSetup)
     BOOST_CHECK_EQUAL(with(2), "bad-blk-tx-weight");
     BOOST_CHECK_EQUAL(with(2, 1'000'000), "bad-blk-weight");
     BOOST_CHECK_EQUAL(with(3), "bad-blk-length");
+}
+
+namespace {
+/** The parameters of a network as a release made from the template could have them: a first block of
+ * its own (not the template's), and the mainchain block that activated the sidechain, or none (0). */
+struct ReleaseParams : public CChainParams {
+    ReleaseParams(const CChainParams& base, int main_activation_height, bool sidechain = true, bool own_genesis = true) : CChainParams{base}
+    {
+        consensus.sidechain.enabled = sidechain;
+        consensus.sidechain.main_activation_height = main_activation_height;
+        if (own_genesis) {
+            CMutableTransaction coinbase{*genesis.vtx[0]};
+            coinbase.vin[0].scriptSig = CScript() << std::vector<unsigned char>{'A', ' ', 's', 'i', 'd', 'e', 'c', 'h', 'a', 'i', 'n'};
+            genesis.vtx[0] = MakeTransactionRef(std::move(coinbase));
+        }
+    }
+};
+} // namespace
+
+BOOST_FIXTURE_TEST_CASE(release_names_the_activation_of_its_slot, BasicTestingSetup)
+{
+    // A sidechain made from the template that does not say which mainchain block activated it: it does
+    // not run on the main network; on a test network or signet it says so in the log.
+    const auto main{CChainParams::Main()};
+    const std::string slot{strprintf("This release names slot %u of the mainchain", main->GetConsensus().sidechain.slot)};
+    {
+        ASSERT_DEBUG_LOG(slot + " but not the height of the block that activated the sidechain there (SidechainParams::main_activation_height): it must not run on the main network.");
+        BOOST_CHECK(!CheckSidechainActivation(ReleaseParams{*main, 0}));
+    }
+    for (const auto& network : {CChainParams::TestNet(), CChainParams::SigNet()}) {
+        ASSERT_DEBUG_LOG(slot + " but not the height of the block that activated the sidechain there (SidechainParams::main_activation_height): set it once the slot activates.");
+        BOOST_CHECK(CheckSidechainActivation(ReleaseParams{*network, 0}));
+    }
+    // Nothing to say: the height named; regtest (its slot is an option); not a sidechain; the
+    // template's own networks, which no slot activated.
+    auto quiet{DebugLogHelper{"This release names slot", [](const std::string* line) {
+                                  BOOST_CHECK_MESSAGE(!line, "unexpected log line: " + (line ? *line : std::string{}));
+                                  return false;
+                              }}};
+    BOOST_CHECK(CheckSidechainActivation(ReleaseParams{*main, 900}));
+    BOOST_CHECK(CheckSidechainActivation(ReleaseParams{*CChainParams::TestNet(), 900}));
+    BOOST_CHECK(CheckSidechainActivation(ReleaseParams{*CChainParams::RegTest(), 0}));
+    BOOST_CHECK(CheckSidechainActivation(ReleaseParams{*main, 0, /*sidechain=*/false}));
+    BOOST_CHECK(CheckSidechainActivation(ReleaseParams{*main, 0, /*sidechain=*/true, /*own_genesis=*/false}));
+    BOOST_CHECK(CheckSidechainActivation(*main));
+    BOOST_CHECK(CheckSidechainActivation(*CChainParams::TestNet()));
+    BOOST_CHECK(CheckSidechainActivation(*CChainParams::SigNet()));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
