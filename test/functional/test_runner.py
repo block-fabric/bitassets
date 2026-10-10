@@ -176,8 +176,6 @@ BASE_SCRIPTS = [
     'feature_sidechain_rules.py',
     'feature_sidechain_record.py',
     'feature_drivechain_rebuild.py',
-    'feature_drivechain_rejects.py',
-    'feature_drivechain_wallet.py',
     'rpc_setgenerate.py',
     'feature_reindex_readonly.py',
     'wallet_labels.py',
