@@ -105,6 +105,8 @@ class BitAssetsTest(SidechainTest):
         other.reserveasset("SECRET")
         self.mine_txs()
         self.mine_txs()
+        # The wallet's reservation of another name is not one of this name.
+        assert_raises_rpc_error(-8, "no reservation", side.registerasset, "BRONZE", 1)
         side.registerasset("SILVER", 0)
         other.registerasset("SECRET", 5, 0, {}, False)
         self.mine_txs()
@@ -445,6 +447,17 @@ class BitAssetsTest(SidechainTest):
         self.sync_mempools()
         assert release not in side.getrawmempool()
         assert replacement in side.getrawmempool()
+        # A package tested as a whole replaces nothing: a release in it that competes with the one
+        # waiting is refused.
+        raw = other.createrawtransaction([], [{"data": data.hex()}])
+        raw = other.fundrawtransaction(raw, {"changePosition": 1, "fee_rate": 200, "lockUnspents": True})["hex"]
+        competing = other.signrawtransactionwithwallet(raw)["hex"]
+        raw = other.createrawtransaction([], [{other.getnewaddress(): 1}])
+        unrelated = other.signrawtransactionwithwallet(other.fundrawtransaction(raw)["hex"])["hex"]
+        other.lockunspent(True)
+        tested = other.testmempoolaccept([competing, unrelated])
+        assert_equal(tested[0]["allowed"], False)
+        assert_equal(tested[0]["reject-reason"], "bip125-replacement-disallowed")
         self.mine_txs()
         assert_raises_rpc_error(-8, "No such asset", side.getasset, "DEAD")
         # Its number names no asset now: never the asset whose name the number is.
