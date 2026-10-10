@@ -2546,4 +2546,336 @@ BOOST_FIXTURE_TEST_CASE(undo_erased_below_the_flushed_block, TestChain100Setup)
     BOOST_CHECK_EQUAL(check(), WITH_LOCK(::cs_main, return chainstate.m_chain.Height()));
 }
 
+namespace {
+/**
+ * A block of the sidechain checked by sidechain::State::ConnectBlock, as height 2 on top of a state
+ * that has one withdrawal (made at height 1, refundable by `key`) and a mainchain record of two
+ * blocks. Each case of the table changes what it needs; Check then records the mainchain block with
+ * the events (`before`), builds the block and commits to it in the next mainchain block.
+ */
+struct SideBlockCase {
+    Consensus::SidechainParams params;
+    SideStore side;
+    sidechain::Mainchain mainchain;
+    CKey key, other_key;
+    CScript pay;
+    COutPoint withdrawal;
+    //! What the mainchain block before the commitment did.
+    sidechain::MainBlock before;
+    //! The outputs of the coinbase after its first.
+    std::vector<CTxOut> coinbase;
+    std::vector<CMutableTransaction> txs;
+    //! Whether the next mainchain block commits to the block; if not, and `assume_at` is set, the
+    //! record assumes a commitment at that height (as when a block is checked before it is offered).
+    bool commit{true};
+    std::optional<int> assume_at;
+    const uint256 prev{0xab};
+    CAmount minted{-1};
+    std::string reason;
+
+    SideBlockCase()
+    {
+        key.MakeNewKey(/*fCompressed=*/true);
+        other_key.MakeNewKey(/*fCompressed=*/true);
+        pay = GetScriptForDestination(WitnessV0KeyHash{key.GetPubKey().GetID()});
+        Extend(mainchain, 2);
+        withdrawal = MakeWithdrawal(side.state, key, pay, 1, params);
+        side.store.TakeUndo();
+    }
+
+    /** The bundle a block at height 2 commits to. */
+    uint256 NextBundle() const { return Assert(side.state.NextBundle(2, prev, params))->GetHash().ToUint256(); }
+
+    /** A transaction that spends some coin and has these outputs. */
+    static CMutableTransaction Tx(std::vector<CTxOut> outputs, uint8_t salt = 0x77)
+    {
+        CMutableTransaction tx;
+        tx.vin.emplace_back(COutPoint{Txid::FromUint256(uint256{salt}), 1});
+        tx.vout = std::move(outputs);
+        return tx;
+    }
+
+    CTxOut Refund(const sidechain::RefundRequest& request) const { return CTxOut{0, sidechain::RefundScript(request)}; }
+    /** What the coinbase pays for a refund of the withdrawal. */
+    CTxOut RefundPayout() const { return CTxOut{COIN, GetScriptForDestination(WitnessV0KeyHash{key.GetPubKey().GetID()})}; }
+
+    CBlock Block() const
+    {
+        CBlock block;
+        block.hashPrevBlock = prev;
+        block.nTime = 1;
+        CMutableTransaction coinbase_tx;
+        coinbase_tx.vin.resize(1);
+        coinbase_tx.vin[0].prevout.SetNull();
+        coinbase_tx.vin[0].scriptSig = CScript() << 2 << OP_0;
+        coinbase_tx.vout.emplace_back(0, CScript() << OP_TRUE);
+        coinbase_tx.vout.insert(coinbase_tx.vout.end(), coinbase.begin(), coinbase.end());
+        block.vtx.push_back(MakeTransactionRef(std::move(coinbase_tx)));
+        for (const CMutableTransaction& tx : txs) block.vtx.push_back(MakeTransactionRef(tx));
+        block.hashMerkleRoot = BlockMerkleRoot(block);
+        return block;
+    }
+
+    bool Check()
+    {
+        Extend(mainchain, 1, [&](sidechain::MainBlock& b) {
+            b.deposits = before.deposits;
+            b.bundles = before.bundles;
+            b.proposed = before.proposed;
+            b.pending = before.pending;
+        });
+        const CBlock block{Block()};
+        std::optional<sidechain::Mainchain::AssumeCommitted> assumed;
+        if (commit) {
+            Extend(mainchain, 1, [&](sidechain::MainBlock& b) { b.bmm = block.GetHash(); });
+        } else if (assume_at) {
+            assumed.emplace(mainchain, *assume_at);
+        }
+        return side.state.ConnectBlock(block, 2, params, mainchain, minted, reason);
+    }
+};
+
+sidechain::MainDeposit Deposit(CAmount amount, const std::string& destination = "not an address")
+{
+    sidechain::MainDeposit deposit;
+    deposit.destination = destination;
+    deposit.amount = amount;
+    deposit.txid = uint256{0xde};
+    return deposit;
+}
+} // namespace
+
+BOOST_AUTO_TEST_CASE(sidechain_block_rejects)
+{
+    // Every reason State::ConnectBlock refuses a block for, each from a block that differs from a valid
+    // one only by what breaks the rule. A failed block leaves its overlay to be dropped, so each case
+    // starts from a state of its own.
+    const struct {
+        std::string reason;
+        std::function<void(SideBlockCase&)> make;
+    } cases[]{
+        // Valid: an empty block, and one that pays a deposit and a refund.
+        {"", [](SideBlockCase&) {}},
+        {"", [](SideBlockCase& c) {
+             c.before.deposits.push_back(Deposit(3 * COIN));
+             c.coinbase.emplace_back(3 * COIN, sidechain::DepositScript("not an address", c.params.slot));
+             c.txs.push_back(SideBlockCase::Tx({c.Refund(SignRefund(c.key, c.withdrawal))}));
+             c.coinbase.push_back(c.RefundPayout());
+         }},
+        // No mainchain block committed to it.
+        {"bmm-unknown", [](SideBlockCase& c) { c.commit = false; }},
+        // Committed before the mainchain block the state already followed.
+        {"bad-sc-main-height", [](SideBlockCase& c) {
+             Extend(c.mainchain, 4);
+             std::vector<CTxOut> payouts;
+             BOOST_REQUIRE_MESSAGE(c.side.state.ApplyMainEvents(5, c.mainchain, 1, c.params, payouts, c.reason), c.reason);
+             c.commit = false;
+             c.assume_at = 3;
+         }},
+        // Committed in a mainchain block the record does not reach yet: what came before is unknown.
+        {"bad-sc-main-unknown", [](SideBlockCase& c) {
+             c.commit = false;
+             c.assume_at = 10;
+         }},
+        // A deposit of more coins than can exist.
+        {"bad-sc-deposit-amount", [](SideBlockCase& c) { c.before.deposits.push_back(Deposit(MAX_MONEY + 1)); }},
+        // Two commitments to bundles.
+        {"bad-sc-bundle-multiple", [](SideBlockCase& c) {
+             c.coinbase.emplace_back(0, sidechain::BundleCommitScript(c.NextBundle()));
+             c.coinbase.emplace_back(0, sidechain::BundleCommitScript(c.NextBundle()));
+         }},
+        // The right bundle, which the mainchain closed before the commitment.
+        {"bad-sc-bundle-closed", [](SideBlockCase& c) {
+             c.before.bundles.push_back({c.NextBundle(), false});
+             c.coinbase.emplace_back(0, sidechain::BundleCommitScript(c.NextBundle()));
+         }},
+        // A bundle while one is pending.
+        {"bad-sc-bundle-not-allowed", [](SideBlockCase& c) {
+             const uint256 hash{c.NextBundle()};
+             BOOST_REQUIRE_MESSAGE(c.side.state.StartBundle(hash, 2, c.prev, c.params, c.reason), c.reason);
+             c.coinbase.emplace_back(0, sidechain::BundleCommitScript(hash));
+         }},
+        // A bundle other than the one the rules make.
+        {"bad-sc-bundle-hash", [](SideBlockCase& c) { c.coinbase.emplace_back(0, sidechain::BundleCommitScript(uint256{0x77})); }},
+        // A withdrawal output that does not parse: its fee is all of its value.
+        {"bad-sc-withdrawal", [](SideBlockCase& c) {
+             c.txs.push_back(SideBlockCase::Tx({CTxOut{COIN, sidechain::WithdrawalScript(COIN, c.key.GetPubKey().GetID(), c.pay)}}));
+         }},
+        {"bad-sc-withdrawal-amount", [](SideBlockCase& c) {
+             c.txs.push_back(SideBlockCase::Tx({CTxOut{c.params.min_withdrawal - 1 + 1000, sidechain::WithdrawalScript(1000, c.key.GetPubKey().GetID(), c.pay)}}));
+         }},
+        // A refund of a withdrawal there is not.
+        {"bad-sc-refund-unknown", [](SideBlockCase& c) {
+             c.txs.push_back(SideBlockCase::Tx({c.Refund(SignRefund(c.key, COutPoint{c.withdrawal.hash, 1}))}));
+         }},
+        // A refund of a withdrawal in the pending bundle.
+        {"bad-sc-refund-in-bundle", [](SideBlockCase& c) {
+             BOOST_REQUIRE_MESSAGE(c.side.state.StartBundle(c.NextBundle(), 2, c.prev, c.params, c.reason), c.reason);
+             c.txs.push_back(SideBlockCase::Tx({c.Refund(SignRefund(c.key, c.withdrawal))}));
+         }},
+        // A refund while a bundle of another branch, with support, is pending on the mainchain.
+        {"bad-sc-refund-bundle-pending", [](SideBlockCase& c) {
+             c.params.pending_min_score = 3;
+             c.before.pending.push_back({uint256{0xf0}, 3});
+             c.txs.push_back(SideBlockCase::Tx({c.Refund(SignRefund(c.key, c.withdrawal))}));
+         }},
+        // A refund signed by another key.
+        {"bad-sc-refund-signature", [](SideBlockCase& c) {
+             c.txs.push_back(SideBlockCase::Tx({c.Refund(SignRefund(c.other_key, c.withdrawal))}));
+         }},
+        // A deposit the coinbase does not pay.
+        {"bad-sc-payouts-missing", [](SideBlockCase& c) { c.before.deposits.push_back(Deposit(3 * COIN)); }},
+        // ... or pays wrong.
+        {"bad-sc-payout", [](SideBlockCase& c) {
+             c.before.deposits.push_back(Deposit(3 * COIN));
+             c.coinbase.emplace_back(3 * COIN - 1, sidechain::DepositScript("not an address", c.params.slot));
+         }},
+        // A refund the coinbase does not pay.
+        {"bad-sc-payouts-missing", [](SideBlockCase& c) { c.txs.push_back(SideBlockCase::Tx({c.Refund(SignRefund(c.key, c.withdrawal))})); }},
+        // Payouts that add up to more coins than can exist, each of them in range.
+        {"bad-sc-payout-amount", [](SideBlockCase& c) {
+             for (int i{0}; i < 2; ++i) {
+                 c.before.deposits.push_back(Deposit(MAX_MONEY / 2 + 1));
+                 c.coinbase.emplace_back(MAX_MONEY / 2 + 1, sidechain::DepositScript("not an address", c.params.slot));
+             }
+         }},
+    };
+    std::set<std::string> seen;
+    for (const auto& test : cases) {
+        SideBlockCase c;
+        test.make(c);
+        c.reason.clear();
+        const bool valid{c.Check()};
+        BOOST_CHECK_MESSAGE(valid == test.reason.empty(), strprintf("expected %s, got %s", test.reason.empty() ? "valid" : test.reason, valid ? "valid" : c.reason));
+        BOOST_CHECK_EQUAL(c.reason, test.reason);
+        if (valid) {
+            // What the coinbase creates on top of the fees: the payouts.
+            CAmount expected{0};
+            for (const CTxOut& out : c.coinbase) expected += out.nValue;
+            BOOST_CHECK_EQUAL(c.minted, expected);
+        }
+        seen.insert(test.reason);
+    }
+    // Every reason in the rules has its case.
+    for (const std::string reason : {"bmm-unknown", "bad-sc-main-height", "bad-sc-main-unknown", "bad-sc-deposit-amount", "bad-sc-bundle-multiple",
+                                     "bad-sc-bundle-closed", "bad-sc-bundle-not-allowed", "bad-sc-bundle-hash", "bad-sc-withdrawal", "bad-sc-withdrawal-amount",
+                                     "bad-sc-refund-unknown", "bad-sc-refund-in-bundle", "bad-sc-refund-bundle-pending", "bad-sc-refund-signature",
+                                     "bad-sc-payouts-missing", "bad-sc-payout", "bad-sc-payout-amount"}) {
+        BOOST_CHECK_MESSAGE(seen.contains(reason), reason);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(sidechain_failures_by_kind)
+{
+    // Which failures depend on the record of the mainchain: those the follower takes back when a
+    // commitment comes back. The form of withdrawals and commitments, and the signature of a refund,
+    // are wrong whatever the mainchain did.
+    for (const std::string reason : {"bad-sc-withdrawal", "bad-sc-withdrawal-amount", "bad-sc-refund-signature", "bad-sc-bundle-multiple"}) {
+        BOOST_CHECK_MESSAGE(sidechain::RecordIndependent(reason), reason);
+    }
+    for (const std::string reason : {"bmm-unknown", "bad-sc-main-height", "bad-sc-main-unknown", "bad-sc-deposit-amount", "bad-sc-bundle-closed",
+                                     "bad-sc-bundle-not-allowed", "bad-sc-bundle-hash", "bad-sc-refund-unknown", "bad-sc-refund-in-bundle",
+                                     "bad-sc-refund-bundle-pending", "bad-sc-payouts-missing", "bad-sc-payout", "bad-sc-payout-amount",
+                                     "bad-a-sidechain-rule-of-its-own"}) {
+        BOOST_CHECK_MESSAGE(!sidechain::RecordIndependent(reason), reason);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(sidechain_tx_all_or_nothing)
+{
+    // A transaction that breaks a rule in its second output leaves no trace of its first: neither the
+    // withdrawal it made nor the refund it paid.
+    SideBlockCase c;
+    const uint256 before{c.side.state.Hash()};
+    CKey key;
+    key.MakeNewKey(/*fCompressed=*/true);
+    const CMutableTransaction tx{SideBlockCase::Tx({
+        c.Refund(SignRefund(c.key, c.withdrawal)),
+        CTxOut{2 * COIN, sidechain::WithdrawalScript(1000, key.GetPubKey().GetID(), c.pay)},
+        CTxOut{COIN, sidechain::WithdrawalScript(COIN, key.GetPubKey().GetID(), c.pay)},
+    })};
+    std::vector<CTxOut> payouts{CTxOut{5, CScript() << OP_TRUE}};
+    std::string reason;
+    BOOST_CHECK(!c.side.state.ApplyTx(CTransaction{tx}, 2, c.params, payouts, reason));
+    BOOST_CHECK_EQUAL(reason, "bad-sc-withdrawal");
+    BOOST_CHECK_EQUAL(payouts.size(), 1U);
+    BOOST_CHECK(c.side.state.Hash() == before);
+    BOOST_CHECK(c.side.state.GetWithdrawal(c.withdrawal));
+    BOOST_CHECK(c.side.store.TakeUndo().entries.empty());
+}
+
+BOOST_AUTO_TEST_CASE(sidechain_rules_in_the_drivechain_database)
+{
+    // The sidechain rules run first in SidechainDB::ConnectBlock. A block without a coinbase is refused
+    // before them; a block that breaks one of them is a failure of the sidechain (`failed`), which the
+    // record of the mainchain may take back; one that breaks a drivechain rule is not.
+    const Consensus::DrivechainParams dc_params{TestParams()};
+    const auto connect{[&](SideBlockCase& c, const CBlock& block, BlockUndo& undo, std::string& reason, bool& failed) {
+        Extend(c.mainchain, 1, [&](sidechain::MainBlock& b) { b.bmm = block.GetHash(); });
+        SidechainDB scdb;
+        scdb.SetBlockHash(block.hashPrevBlock);
+        CAmount minted{-1};
+        const drivechain::SideContext side{c.params, c.mainchain, minted, c.side.store};
+        const bool ok{scdb.ConnectBlock(block, 2, dc_params, undo, nullptr, reason, &side)};
+        failed = side.failed;
+        return ok;
+    }};
+    {
+        // No transactions at all, then a first transaction that is no coinbase.
+        SideBlockCase c;
+        CBlock block{c.Block()};
+        BlockUndo undo;
+        std::string reason;
+        bool failed;
+        block.vtx.clear();
+        BOOST_CHECK(!connect(c, block, undo, reason, failed));
+        BOOST_CHECK_EQUAL(reason, "bad-dc-no-coinbase");
+        BOOST_CHECK(!failed);
+        block = c.Block();
+        block.vtx[0] = MakeTransactionRef(SideBlockCase::Tx({CTxOut{0, CScript() << OP_TRUE}}));
+        reason.clear();
+        BOOST_CHECK(!connect(c, block, undo, reason, failed));
+        BOOST_CHECK_EQUAL(reason, "bad-dc-no-coinbase");
+        BOOST_CHECK(!failed);
+    }
+    {
+        // A sidechain rule.
+        SideBlockCase c;
+        c.txs.push_back(SideBlockCase::Tx({c.Refund(SignRefund(c.other_key, c.withdrawal))}));
+        BlockUndo undo;
+        std::string reason;
+        bool failed;
+        BOOST_CHECK(!connect(c, c.Block(), undo, reason, failed));
+        BOOST_CHECK_EQUAL(reason, "bad-sc-refund-signature");
+        BOOST_CHECK(failed);
+    }
+    {
+        // A drivechain rule: a deposit to a slot no sidechain holds.
+        SideBlockCase c;
+        CMutableTransaction deposit{SideBlockCase::Tx({CTxOut{COIN, EscrowScript(1)}, CTxOut{0, DestinationScript("dest")}})};
+        c.txs.push_back(deposit);
+        BlockUndo undo;
+        std::string reason;
+        bool failed;
+        BOOST_CHECK(!connect(c, c.Block(), undo, reason, failed));
+        BOOST_CHECK_EQUAL(reason, "bad-dc-inactive-sidechain");
+        BOOST_CHECK(!failed);
+    }
+    {
+        // A valid block: its changes to the sidechain state become its undo data.
+        SideBlockCase c;
+        c.txs.push_back(SideBlockCase::Tx({c.Refund(SignRefund(c.key, c.withdrawal))}));
+        c.coinbase.push_back(c.RefundPayout());
+        BlockUndo undo;
+        std::string reason;
+        bool failed;
+        BOOST_REQUIRE_MESSAGE(connect(c, c.Block(), undo, reason, failed), reason);
+        BOOST_CHECK(!failed);
+        BOOST_CHECK(!undo.side.entries.empty());
+        BOOST_CHECK(!c.side.state.GetWithdrawal(c.withdrawal));
+        c.side.store.Revert(undo.side);
+        BOOST_CHECK(c.side.state.GetWithdrawal(c.withdrawal));
+    }
+}
+
 BOOST_AUTO_TEST_SUITE_END()
