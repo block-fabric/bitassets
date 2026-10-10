@@ -833,13 +833,8 @@ bool MemPoolAccept::DrivechainChecks(Workspace& ws)
                     return ws.m_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "ba-registration-in-mempool");
                 }
             }
-            // One release of an asset at a time: the second could never be mined. Another competes
-            // with the one waiting under the replacement rules (PreChecks put it in the conflicts).
-            if (const auto* release{std::get_if<bitassets::ReleaseAsset>(&*marker->operation)}) {
-                if (const auto other{m_pool.m_bitassets_releases.find(release->asset)}; other != m_pool.m_bitassets_releases.end() && !ws.m_conflicts.contains(other->second)) {
-                    return ws.m_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "ba-release-in-mempool");
-                }
-            }
+            // One release of an asset at a time: PreChecks made the one waiting a conflict, which this
+            // one replaces under the replacement rules, or refused this one.
         }
     }
 
