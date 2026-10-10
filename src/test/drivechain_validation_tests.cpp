@@ -23,11 +23,14 @@
 #include <interfaces/mining.h>
 #include <key_io.h>
 #include <logging.h>
+#include <flatfile.h>
 #include <node/blockstorage.h>
+#include <node/chainstate.h>
 #include <node/context.h>
 #include <node/kernel_notifications.h>
 #include <node/cpuminer.h>
 #include <node/utxo_snapshot.h>
+#include <sidechain/store.h>
 #include <test/util/chainstate.h>
 #include <test/util/common.h>
 #include <test/util/logging.h>
@@ -42,6 +45,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <fstream>
 #include <functional>
 #include <memory>
 #include <string>
@@ -62,6 +66,8 @@ bool LoadState(Chainstate& chainstate, bilingual_str& error) EXCLUSIVE_LOCKS_REQ
 
 /** A regtest chain of 100 blocks, with what the drivechain tests need on top. */
 struct DrivechainChainSetup : public TestChain100Setup {
+    explicit DrivechainChainSetup(TestOpts opts = {}) : TestChain100Setup{ChainType::REGTEST, std::move(opts)} {}
+
     const CScript coinbase_script{CScript() << ToByteVector(coinbaseKey.GetPubKey()) << OP_CHECKSIG};
 
     Chainstate& ActiveChainstate() { return m_node.chainman->ActiveChainstate(); }
@@ -438,6 +444,151 @@ BOOST_AUTO_TEST_CASE(rollback_from_an_invalid_block_needs_its_data)
     BOOST_CHECK(chainstate.m_scdb.GetBlockHash() == tip->GetBlockHash());
 }
 
+BOOST_AUTO_TEST_CASE(invalid_active_block_is_taken_back_at_startup)
+{
+    // The snapshot of the sidechain database says slot 0 is inactive below a block that deposits to
+    // it: brought forward at startup, that block breaks a rule whatever the record of the mainchain
+    // says (bad-dc-inactive-sidechain). The chainstate goes back to its parent, the block (and the
+    // one on it) out of the active chain, the block marked invalid; its transactions are offered to
+    // the mempool again.
+    Chainstate& chainstate{ActiveChainstate()};
+    ActivateSidechain(0);
+    const CMutableTransaction deposit{FirstDeposit(0, COIN, 1)};
+    const CBlock depositing{CreateAndProcessBlock({deposit}, coinbase_script)};
+    Mine();
+    {
+        LOCK(::cs_main);
+        CBlockIndex* invalid{m_node.chainman->m_blockman.LookupBlockIndex(depositing.GetHash())};
+        BOOST_REQUIRE(invalid && chainstate.m_chain.Contains(*invalid));
+        BOOST_REQUIRE_EQUAL(chainstate.m_chain.Height(), invalid->nHeight + 1);
+        SidechainDB without_slot;
+        without_slot.SetBlockHash(invalid->pprev->GetBlockHash());
+        DrivechainDB().WriteState(chainstate.DrivechainStateName(), without_slot);
+        chainstate.m_scdb = SidechainDB{};
+        bilingual_str error;
+        {
+            ASSERT_DEBUG_LOG(strprintf("block %s breaks the drivechain rules (bad-dc-inactive-sidechain)", invalid->GetBlockHash().ToString()));
+            ASSERT_DEBUG_LOG(strprintf("Block %s at height %d of the active chain breaks the drivechain rules: the chainstate goes back to height %d",
+                                       invalid->GetBlockHash().ToString(), invalid->nHeight, invalid->nHeight - 1));
+            BOOST_CHECK(LoadState(chainstate, error));
+        }
+        BOOST_CHECK(error.empty());
+        BOOST_CHECK(chainstate.m_chain.Tip() == invalid->pprev);
+        BOOST_CHECK(invalid->nStatus & BLOCK_FAILED_VALID);
+        BOOST_CHECK(chainstate.m_scdb.GetBlockHash() == invalid->pprev->GetBlockHash());
+        BOOST_CHECK(!chainstate.m_scdb.IsActive(0));
+        // The coins went back with it: the coinbase output the deposit spent is there again.
+        BOOST_CHECK(chainstate.CoinsTip().HaveCoin(deposit.vin[0].prevout));
+        BOOST_CHECK(!chainstate.CoinsTip().HaveCoin(COutPoint{deposit.GetHash(), 0}));
+        // On disk as it is now: the snapshot is that of the new tip.
+        SidechainDB written;
+        BOOST_REQUIRE(DrivechainDB().ReadState(chainstate.DrivechainStateName(), written));
+        BOOST_CHECK(written.GetBlockHash() == invalid->pprev->GetBlockHash());
+        BOOST_CHECK(DrivechainDB().IsCurrentFormat());
+    }
+    // The deposit (the only transaction other than the coinbases) is offered to the mempool, where
+    // slot 0 is inactive as the sidechain database now stands.
+    {
+        ASSERT_DEBUG_LOG("0 of the 1 transactions of the blocks taken back at startup returned to the mempool");
+        chainstate.ReaddRolledBackTransactions();
+    }
+    BOOST_CHECK(!m_node.mempool->exists(deposit.GetHash()));
+    // Once only: nothing more to offer.
+    {
+        auto again{Unexpected("taken back at startup returned to the mempool")};
+        chainstate.ReaddRolledBackTransactions();
+    }
+}
+
+BOOST_AUTO_TEST_CASE(roll_forward_reports_the_block_that_breaks_the_rules)
+{
+    // Brought forward by a caller that does not ask which block failed: the error names it.
+    ActivateSidechain(0);
+    const CBlock depositing{CreateAndProcessBlock({FirstDeposit(0, COIN, 1)}, coinbase_script)};
+    LOCK(::cs_main);
+    Chainstate& chainstate{ActiveChainstate()};
+    const CBlockIndex* tip{chainstate.m_chain.Tip()};
+    BOOST_REQUIRE(tip->GetBlockHash() == depositing.GetHash());
+    SidechainDB scdb;
+    scdb.SetBlockHash(tip->pprev->GetBlockHash());
+    sidechain::StoreOverlay store{chainstate.SideCache(), /*journal=*/false};
+    const auto rolled{chainstate.RollForwardSidechainDB(scdb, tip->pprev, tip, tip->nHeight, &store)};
+    BOOST_REQUIRE(!rolled);
+    BOOST_CHECK_EQUAL(util::ErrorString(rolled).original,
+                      strprintf("Block %s breaks the drivechain rules (bad-dc-inactive-sidechain). Restart with -reindex.", tip->GetBlockHash().ToString()));
+    // Back to where it started.
+    BOOST_CHECK(scdb.GetBlockHash() == tip->pprev->GetBlockHash());
+    BOOST_CHECK(!scdb.IsActive(0));
+}
+
+BOOST_AUTO_TEST_CASE(pruned_blocks_stop_loading_the_sidechain_database)
+{
+    // The sidechain database is brought forward, or derived again, from blocks a pruned node may no
+    // longer have: the node does not start then, and a database it could not derive again is left
+    // as it was.
+    Mine(3);
+    LOCK(::cs_main);
+    Chainstate& chainstate{ActiveChainstate()};
+    CBlockIndex* tip{chainstate.m_chain.Tip()};
+    CBlockIndex* missing{tip->pprev};
+    const SidechainDB at_tip{chainstate.m_scdb};
+    const std::string name{chainstate.DrivechainStateName()};
+    bilingual_str error;
+
+    // A snapshot two blocks below the tip; the block above it is gone.
+    SidechainDB behind;
+    behind.SetBlockHash(missing->pprev->GetBlockHash());
+    DrivechainDB().WriteState(name, behind);
+    missing->nStatus &= ~BLOCK_HAVE_DATA;
+    BOOST_CHECK(!LoadState(chainstate, error));
+    BOOST_CHECK_EQUAL(error.original, strprintf("The sidechain state of this node is as of block %d, and the blocks it has to be brought forward with "
+                                                "are pruned (block %d is missing). Restart with -reindex to download them again.",
+                                                missing->nHeight - 1, missing->nHeight));
+
+    // A database of an older format: derived from the first block, which needs them all.
+    const uint256 fingerprint{ParamsFingerprint(m_node.chainman->GetConsensus().drivechain)};
+    const auto old_database{[&](const fs::path& path) {
+        {
+            CDBWrapper old{DBParams{.path = path, .cache_bytes = 1 << 20}};
+            old.Write(uint8_t{'v'}, uint32_t{7});
+            old.Write(std::make_pair(uint8_t{'s'}, std::string{}), uint32_t{1});
+        }
+        return std::make_unique<Database>(DBParams{.path = path, .cache_bytes = 1 << 20}, fingerprint);
+    }};
+    auto current{std::move(m_node.chainman->m_blockman.m_drivechain_db)};
+    m_node.chainman->m_blockman.m_drivechain_db = old_database(m_path_root / "old_pruned");
+    // Missing without the node knowing it pruned (no check before the wipe): found on the way.
+    error = {};
+    BOOST_CHECK(!LoadState(chainstate, error));
+    BOOST_CHECK_EQUAL(error.original, "The sidechain state of this node is in a format an earlier version wrote, or was derived under other drivechain "
+                                      "parameters, and has to be derived again from the blocks, which this node pruned. Restart with -reindex to download them again.");
+
+    // A node that pruned checks before it wipes anything: the old database stays.
+    m_node.chainman->m_blockman.m_drivechain_db = old_database(m_path_root / "old_pruned_2");
+    m_node.chainman->m_blockman.m_have_pruned = true;
+    error = {};
+    {
+        ASSERT_DEBUG_LOG(strprintf("The sidechain database has to be rebuilt from the blocks, and block %s at height %d was pruned", missing->GetBlockHash().ToString(), missing->nHeight));
+        BOOST_CHECK(!LoadState(chainstate, error));
+    }
+    BOOST_CHECK_EQUAL(error.original, strprintf("The sidechain database has to be rebuilt from the blocks (it is in an older format), and this pruned node no longer has block %d. "
+                                                "Nothing was changed: restart with -reindex to download the blocks again, or go back to the former version",
+                                                missing->nHeight));
+    BOOST_CHECK(DrivechainDB().CheckFormat() == Database::Format::OTHER_VERSION);
+    m_node.chainman->m_blockman.m_have_pruned = false;
+
+    // With the block back, both load.
+    missing->nStatus |= BLOCK_HAVE_DATA;
+    error = {};
+    BOOST_CHECK(LoadState(chainstate, error));
+    BOOST_CHECK(chainstate.m_scdb == at_tip);
+    m_node.chainman->m_blockman.m_drivechain_db = std::move(current);
+    DrivechainDB().WriteState(name, behind);
+    BOOST_CHECK(LoadState(chainstate, error));
+    BOOST_CHECK(chainstate.m_scdb == at_tip);
+    BOOST_CHECK(chainstate.m_chain.Tip() == tip);
+}
+
 BOOST_AUTO_TEST_CASE(roll_forward_needs_the_blocks)
 {
     // Deriving the sidechain database stops at a block that cannot be read.
@@ -645,6 +796,79 @@ BOOST_AUTO_TEST_CASE(cpu_miner)
     BOOST_CHECK(WaitFor([&] { return finder.GetStats().blocks_found >= 1; }));
     finder.Stop();
     BOOST_CHECK_GT(WITH_LOCK(::cs_main, return ActiveChainstate().m_chain.Height()), height + 1);
+}
+
+BOOST_AUTO_TEST_SUITE_END()
+
+namespace {
+/** The chain of DrivechainChainSetup with its databases on disk, for a node that starts again. */
+struct OnDiskChainSetup : public DrivechainChainSetup {
+    OnDiskChainSetup() : DrivechainChainSetup{{.coins_db_in_memory = false, .block_tree_db_in_memory = false}} {}
+
+    /** A new chainstate manager on the same data directory, nothing loaded yet. */
+    ChainstateManager& Restart()
+    {
+        ChainstateManager& chainman{*Assert(m_node.chainman)};
+        m_node.validation_signals->SyncWithValidationInterfaceQueue();
+        LOCK(::cs_main);
+        chainman.ResetChainstates();
+        m_node.notifications = std::make_unique<node::KernelNotifications>(Assert(m_node.shutdown_request), m_node.exit_status, *Assert(m_node.warnings));
+        const ChainstateManager::Options chainman_opts{
+            .chainparams = ::Params(),
+            .datadir = chainman.m_options.datadir,
+            .notifications = *m_node.notifications,
+            .signals = m_node.validation_signals.get(),
+        };
+        const node::BlockManager::Options blockman_opts{
+            .chainparams = chainman_opts.chainparams,
+            .blocks_dir = m_args.GetBlocksDirPath(),
+            .notifications = chainman_opts.notifications,
+            .block_tree_db_params = DBParams{
+                .path = chainman.m_options.datadir / "blocks" / "index",
+                .cache_bytes = m_kernel_cache_sizes.block_tree_db,
+                .memory_only = false,
+            },
+        };
+        m_node.chainman.reset();
+        m_node.chainman = std::make_unique<ChainstateManager>(*Assert(m_node.shutdown_signal), chainman_opts, blockman_opts);
+        return *m_node.chainman;
+    }
+};
+} // namespace
+
+BOOST_FIXTURE_TEST_SUITE(drivechain_startup_tests, OnDiskChainSetup)
+
+BOOST_AUTO_TEST_CASE(startup_stops_when_the_sidechain_database_cannot_be_brought_forward)
+{
+    // On disk: the snapshot of the sidechain database two blocks below the tip, and the block above it
+    // unreadable. The chainstate does not load, and says why.
+    Mine(3);
+    uint256 unreadable;
+    {
+        LOCK(::cs_main);
+        Chainstate& chainstate{ActiveChainstate()};
+        chainstate.ForceFlushStateToDisk();
+        const CBlockIndex* broken{chainstate.m_chain.Tip()->pprev};
+        unreadable = broken->GetBlockHash();
+        SidechainDB behind;
+        behind.SetBlockHash(broken->pprev->GetBlockHash());
+        DrivechainDB().WriteState(chainstate.DrivechainStateName(), behind);
+        // Its header overwritten in the block file.
+        const FlatFilePos pos{broken->GetBlockPos()};
+        std::fstream file{fs::PathToString(m_args.GetBlocksDirPath() / fs::u8path(strprintf("blk%05u.dat", pos.nFile))), std::ios::in | std::ios::out | std::ios::binary};
+        BOOST_REQUIRE(file.is_open());
+        file.seekp(pos.nPos);
+        const std::vector<char> junk(80, '\x5a');
+        file.write(junk.data(), junk.size());
+        BOOST_REQUIRE(file.good());
+    }
+    ChainstateManager& chainman{Restart()};
+    node::ChainstateLoadOptions options;
+    options.mempool = m_node.mempool.get();
+    options.coins_db_in_memory = false;
+    const auto [status, error]{node::LoadChainstate(chainman, m_kernel_cache_sizes, options)};
+    BOOST_CHECK(status == node::ChainstateLoadStatus::FAILURE);
+    BOOST_CHECK_EQUAL(error.original, "Error loading the sidechain database: Failed to read block " + unreadable.ToString() + ". Restart with -reindex.");
 }
 
 BOOST_AUTO_TEST_SUITE_END()
