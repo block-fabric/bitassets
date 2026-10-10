@@ -8,7 +8,10 @@
 #include <consensus/params.h>
 #include <sidechain/state.h>
 #include <arith_uint256.h>
+#include <key.h>
 #include <script/script.h>
+#include <univalue.h>
+#include <util/strencodings.h>
 #include <streams.h>
 #include <test/util/setup_common.h>
 
@@ -69,6 +72,12 @@ public:
     }
     bitassets::State View() const { return bitassets::State{*m_store}; }
     const sidechain::StoreView& Store() const { return *m_store; }
+    /** Writes an entry as it is, outside the rules: for states no transaction can make (forged). */
+    void Forge(const sidechain::StoreBytes& key, const sidechain::StoreBytes& value)
+    {
+        m_store->Put(key, value);
+        m_store->TakeUndo();
+    }
     /** How many entries there are under a prefix. */
     size_t Count(const sidechain::StoreBytes& prefix) const
     {
@@ -1047,6 +1056,654 @@ BOOST_AUTO_TEST_CASE(release_of_one_satoshi)
     const uint256 txid{release.GetHash().ToUint256()};
     tag.insert(tag.end(), txid.begin(), txid.end());
     BOOST_CHECK(given->main_script == (CScript() << OP_RETURN << tag));
+}
+
+namespace {
+/** A transaction of a coin of its own (or a coinbase), with these outputs. */
+CTransaction RawTx(std::vector<CTxOut> outs, bool coinbase = false)
+{
+    CMutableTransaction tx;
+    if (coinbase) {
+        tx.vin.emplace_back(COutPoint{});
+        tx.vin[0].scriptSig = CScript() << OP_1 << OP_1;
+    } else {
+        tx.vin.emplace_back(COutPoint{Txid::FromUint256(uint256{static_cast<uint8_t>(++g_nonce)}), static_cast<uint32_t>(g_nonce)});
+    }
+    tx.vout = std::move(outs);
+    return CTransaction{tx};
+}
+
+/** The script of a marker whose data after the tag is `body`, well formed or not. */
+CScript RawMarker(const std::vector<unsigned char>& body)
+{
+    std::vector<unsigned char> data(std::begin(TAG), std::end(TAG));
+    data.insert(data.end(), body.begin(), body.end());
+    return CScript() << OP_RETURN << data;
+}
+
+/** A transaction with token outputs `before` (each of no value, to HOLDER, unless given) then the marker. */
+CTransaction MarkerTx(const Marker& marker, std::vector<CTxOut> before = {}, CAmount value = 0)
+{
+    before.emplace_back(value, MarkerScript(marker));
+    return RawTx(std::move(before));
+}
+
+CTransaction OpTx(Operation op, CAmount value = 0)
+{
+    Marker marker;
+    marker.operation = std::move(op);
+    return MarkerTx(marker, {}, value);
+}
+
+uint256 Filled(uint8_t byte)
+{
+    uint256 value;
+    std::fill(value.begin(), value.end(), byte);
+    return value;
+}
+
+/** The index of pools by asset: what the rules read to retire an asset. */
+sidechain::StoreBytes PoolIndexKey(const AssetId& asset, const uint256& pool)
+{
+    sidechain::StoreBytes key{0x3a};
+    sidechain::KeyCodec<uint256>::Encode(key, asset);
+    sidechain::KeyCodec<uint256>::Encode(key, pool);
+    return key;
+}
+
+// The tables of assets and pools, by their bytes (State's own; a Table of the same byte made here
+// would take the byte a second time, which tells a broken build: sidechain::DuplicateTableIds).
+sidechain::StoreBytes AssetKey(const AssetId& asset) { return sidechain::TableKey(0x31, asset); }
+sidechain::StoreBytes PoolKey(const uint256& pool) { return sidechain::TableKey(0x34, pool); }
+
+/** The message of the JSON-RPC error `fn` throws, or "" if none. */
+std::string RpcError(const std::function<void()>& fn)
+{
+    try {
+        fn();
+    } catch (const UniValue& error) {
+        return error["message"].get_str();
+    }
+    return "";
+}
+} // namespace
+
+BOOST_AUTO_TEST_CASE(check_marker_rejects)
+{
+    // Every reject of the marker alone (CheckMarker, GetMarker, ParseMarkerScript): one transaction
+    // per way, each with the exact reason, the same through the state (MakePlan checks it first).
+    const CScript unspendable{CScript() << OP_TRUE};
+    const CScript burnt{CScript() << OP_RETURN};
+    const uint256 nonce{HashName("nonce")};
+    const Txid some_auction{Txid::FromUint256(uint256{9})};
+    const auto outputs_tx{[](std::vector<MarkerOutput> outs, std::vector<CTxOut> vout) {
+        Marker marker;
+        marker.outputs = std::move(outs);
+        return MarkerTx(marker, std::move(vout));
+    }};
+    const auto reg{[&](const AssetId& name, uint64_t supply, uint8_t decimals, AssetData data, std::optional<std::string> text) {
+        bitassets::Register r;
+        r.name = name;
+        r.nonce = nonce;
+        r.supply = supply;
+        r.decimals = decimals;
+        r.data = std::move(data);
+        r.text = std::move(text);
+        return r;
+    }};
+    const auto update{[](const AssetId& asset, AssetUpdates updates) { return UpdateAsset{asset, std::move(updates)}; }};
+    const EncryptionKey bad_encryption_key{};
+    const SigningKey bad_signing_key{Filled(0xff)};
+    const std::string long_info(MAX_INFO_SIZE + 1, 'x');
+    const std::string long_name(MAX_NAME_TEXT_SIZE + 1, 'N');
+
+    // A marker pushed with OP_PUSHDATA1 where a direct push does: not the one way to write it.
+    CScript pushdata1;
+    {
+        const std::vector<unsigned char> data{0x42, 0x41, 0x53, 0x54, 0, 0, 0};
+        pushdata1.push_back(OP_RETURN);
+        pushdata1.push_back(OP_PUSHDATA1);
+        pushdata1.push_back(static_cast<unsigned char>(data.size()));
+        pushdata1.insert(pushdata1.end(), data.begin(), data.end());
+    }
+    std::vector<unsigned char> bad_update{0, UpdateAsset::KIND};
+    bad_update.insert(bad_update.end(), 32, 0x01);
+    bad_update.push_back(3); // no such update kind
+    std::vector<Token> too_many_burns(MAX_BURNS + 1, Asset(GOLD, 1));
+
+    struct Case {
+        std::string name;
+        CTransaction tx;
+        std::string reason;
+    };
+    const std::vector<Case> cases{
+        // Not a marker that parses.
+        {"marker version 1", RawTx({CTxOut{0, RawMarker({1, 0, 0})}}), "bad-ba-marker"},
+        {"no operation of kind 13", RawTx({CTxOut{0, RawMarker({0, 13, 0})}}), "bad-ba-marker"},
+        {"a byte after the marker", RawTx({CTxOut{0, RawMarker({0, 0, 0, 0})}}), "bad-ba-marker"},
+        {"an operation cut short", RawTx({CTxOut{0, RawMarker({0, Swap::KIND})}}), "bad-ba-marker"},
+        {"more outputs than a marker lists", RawTx({CTxOut{0, RawMarker({0, 0, MAX_MARKER_OUTPUTS + 1})}}), "bad-ba-marker"},
+        {"a token of kind 5", RawTx({CTxOut{0, RawMarker({0, 0, 1, 0, 5})}}), "bad-ba-marker"},
+        {"an update of kind 3", RawTx({CTxOut{0, RawMarker(bad_update)}}), "bad-ba-marker"},
+        {"a count not written in the fewest bytes", RawTx({CTxOut{0, RawMarker({0, 0, 0xfd, 0, 0})}}), "bad-ba-marker"},
+        {"pushed with OP_PUSHDATA1", RawTx({CTxOut{0, pushdata1}}), "bad-ba-marker"},
+        {"an opcode after the push", RawTx({CTxOut{0, RawMarker({0, 0, 0}) << OP_1}}), "bad-ba-marker"},
+        {"two markers", RawTx({CTxOut{0, MarkerScript(Marker{})}, CTxOut{0, MarkerScript(Marker{})}}), "bad-ba-markers"},
+        // A marker of a coinbase, or of a value it cannot have.
+        {"a marker in a coinbase", RawTx({CTxOut{0, MarkerScript(Marker{})}}, /*coinbase=*/true), "bad-ba-coinbase"},
+        {"a negative marker value", MarkerTx(Marker{}, {}, -1), "bad-ba-marker-value"},
+        {"a marker value above MAX_MONEY", OpTx(Swap{CHN, 1, GOLD, 0, {}}, MAX_MONEY + 1), "bad-ba-marker-value"},
+        {"CHN burned without an operation", MarkerTx(Marker{}, {}, 1), "bad-ba-marker-value"},
+        // The outputs it lists.
+        {"an output past the end", outputs_tx({{5, Asset(GOLD, 1)}}, {}), "bad-ba-outputs"},
+        {"the marker as an output", outputs_tx({{0, Asset(GOLD, 1)}}, {}), "bad-ba-outputs"},
+        {"outputs out of order", outputs_tx({{1, Asset(GOLD, 1)}, {0, Asset(GOLD, 1)}}, {CTxOut{0, HOLDER}, CTxOut{0, HOLDER}}), "bad-ba-outputs"},
+        {"an output twice", outputs_tx({{0, Asset(GOLD, 1)}, {0, Asset(GOLD, 1)}}, {CTxOut{0, HOLDER}}), "bad-ba-outputs"},
+        {"a token output of value", outputs_tx({{0, Asset(GOLD, 1)}}, {CTxOut{1, HOLDER}}), "bad-ba-token-output"},
+        {"a token output nobody can spend", outputs_tx({{0, Asset(GOLD, 1)}}, {CTxOut{0, unspendable}}), "bad-ba-token-output"},
+        {"a result output nobody can spend", outputs_tx({{0, std::nullopt}}, {CTxOut{0, burnt}}), "bad-ba-token-output"},
+        {"a token of no units", outputs_tx({{0, Asset(GOLD, 0)}}, {CTxOut{0, HOLDER}}), "bad-ba-amount"},
+        {"a token above MAX_AMOUNT", outputs_tx({{0, Token{Token::Kind::LP, GOLD, MAX_AMOUNT + 1}}}, {CTxOut{0, HOLDER}}), "bad-ba-amount"},
+        {"coins of no asset", outputs_tx({{0, Asset(uint256{}, 1)}}, {CTxOut{0, HOLDER}}), "bad-ba-token-id"},
+        {"a control coin of no asset", outputs_tx({{0, Unit(Token::Kind::CONTROL, uint256{})}}, {CTxOut{0, HOLDER}}), "bad-ba-token-id"},
+        {"shares of no pool", outputs_tx({{0, Token{Token::Kind::LP, uint256{}, 5}}}, {CTxOut{0, HOLDER}}), "bad-ba-token-id"},
+        // Where CHN is paid.
+        {"swap: CHN to a script nobody spends", OpTx(Swap{CHN, 1, GOLD, 0, burnt}), "bad-ba-chn-to"},
+        {"remove: CHN to a script nobody spends", OpTx(RemoveLiquidity{GOLD, CHN, 1, 0, 0, burnt}), "bad-ba-chn-to"},
+        {"bid: CHN to a script nobody spends", OpTx(Bid{some_auction, 1, 0, burnt}), "bad-ba-chn-to"},
+        {"collect: CHN to a script nobody spends", OpTx(Collect{some_auction, unspendable}), "bad-ba-chn-to"},
+        // Registrations.
+        {"a supply above MAX_AMOUNT", OpTx(reg(GOLD, MAX_AMOUNT + 1, 0, {}, "GOLD")), "bad-ba-supply"},
+        {"13 decimals", OpTx(reg(GOLD, 1, MAX_DECIMALS + 1, {}, "GOLD")), "bad-ba-supply"},
+        {"an info too long", OpTx(reg(GOLD, 1, 0, AssetData{.info = long_info}, "GOLD")), "bad-ba-data"},
+        {"an encryption key not on the curve", OpTx(reg(GOLD, 1, 0, AssetData{.encryption_key = bad_encryption_key}, "GOLD")), "bad-ba-data"},
+        {"a signing key not on the curve", OpTx(reg(GOLD, 1, 0, AssetData{.signing_key = bad_signing_key}, "GOLD")), "bad-ba-data"},
+        {"a name with a space at its start", OpTx(reg(HashName(" GOLD"), 1, 0, {}, " GOLD")), "bad-ba-name-text"},
+        {"a name too long", OpTx(reg(HashName(long_name), 1, 0, {}, long_name)), "bad-ba-name-text"},
+        {"a name not of its hash", OpTx(reg(SILVER, 1, 0, {}, "GOLD")), "bad-ba-name-text"},
+        {"no name", OpTx(reg(uint256{}, 1, 0, {}, std::nullopt)), "bad-ba-name"},
+        // Mints and updates.
+        {"a mint of nothing", OpTx(Mint{GOLD, 0}), "bad-ba-amount"},
+        {"a mint above MAX_AMOUNT", OpTx(Mint{GOLD, MAX_AMOUNT + 1}), "bad-ba-amount"},
+        {"a mint of no asset", OpTx(Mint{uint256{}, 5}), "bad-ba-amount"},
+        {"an update of no asset", OpTx(update(uint256{}, AssetUpdates{.info = {UpdateKind::SET, "x"}})), "bad-ba-data"},
+        {"an update of nothing", OpTx(update(GOLD, AssetUpdates{})), "bad-ba-data"},
+        {"an update to an info too long", OpTx(update(GOLD, AssetUpdates{.info = {UpdateKind::SET, long_info}})), "bad-ba-data"},
+        {"an update to a bad encryption key", OpTx(update(GOLD, AssetUpdates{.encryption_key = {UpdateKind::SET, bad_encryption_key}})), "bad-ba-data"},
+        {"an update to a bad signing key", OpTx(update(GOLD, AssetUpdates{.signing_key = {UpdateKind::SET, bad_signing_key}})), "bad-ba-data"},
+        // Burns.
+        {"a burn of nothing", OpTx(Burn{}), "bad-ba-burn"},
+        {"a burn of 17 tokens", OpTx(Burn{too_many_burns}), "bad-ba-burn"},
+        {"a burn of shares", OpTx(Burn{{Token{Token::Kind::LP, GOLD, 1}}}), "bad-ba-burn"},
+        {"a burn of a receipt", OpTx(Burn{{Unit(Token::Kind::RECEIPT, GOLD)}}), "bad-ba-burn"},
+        {"a burn of no asset", OpTx(Burn{{Asset(uint256{}, 1)}}), "bad-ba-burn"},
+        {"a burn of no units", OpTx(Burn{{Asset(GOLD, 0)}}), "bad-ba-burn"},
+        {"a burn above MAX_AMOUNT", OpTx(Burn{{Asset(GOLD, MAX_AMOUNT + 1)}}), "bad-ba-burn"},
+        {"a burn of 2 control coins of one", OpTx(Burn{{Token{Token::Kind::CONTROL, GOLD, 2}}}), "bad-ba-burn"},
+        {"a burn of 2 of one reservation", OpTx(Burn{{Token{Token::Kind::RESERVATION, GOLD, 2}}}), "bad-ba-burn"},
+        // Pools.
+        {"a swap of an asset for itself", OpTx(Swap{GOLD, 1, GOLD, 0, {}}), "bad-ba-swap"},
+        {"a swap of nothing", OpTx(Swap{GOLD, 0, CHN, 0, HOLDER}), "bad-ba-swap"},
+        {"a swap above MAX_AMOUNT", OpTx(Swap{GOLD, MAX_AMOUNT + 1, CHN, 0, HOLDER}), "bad-ba-swap"},
+        {"a swap asking above MAX_AMOUNT", OpTx(Swap{GOLD, 1, CHN, MAX_AMOUNT + 1, HOLDER}), "bad-ba-swap"},
+        {"a pool of an asset and itself", OpTx(AddLiquidity{GOLD, GOLD, 1, 1, 0}), "bad-ba-liquidity"},
+        {"a deposit of none of the first", OpTx(AddLiquidity{GOLD, CHN, 0, 1, 0}), "bad-ba-liquidity"},
+        {"a deposit of none of the second", OpTx(AddLiquidity{GOLD, CHN, 1, 0, 0}), "bad-ba-liquidity"},
+        {"a deposit above MAX_AMOUNT", OpTx(AddLiquidity{GOLD, CHN, MAX_AMOUNT + 1, 1, 0}), "bad-ba-liquidity"},
+        {"a deposit asking shares above MAX_AMOUNT", OpTx(AddLiquidity{GOLD, CHN, 1, 1, MAX_AMOUNT + 1}), "bad-ba-liquidity"},
+        {"a withdrawal from a pool of an asset and itself", OpTx(RemoveLiquidity{GOLD, GOLD, 1, 0, 0, {}}), "bad-ba-liquidity"},
+        {"a withdrawal of no shares", OpTx(RemoveLiquidity{GOLD, CHN, 0, 0, 0, {}}), "bad-ba-liquidity"},
+        {"a withdrawal asking above MAX_AMOUNT of the first", OpTx(RemoveLiquidity{GOLD, CHN, 1, MAX_AMOUNT + 1, 0, {}}), "bad-ba-liquidity"},
+        {"a withdrawal asking above MAX_AMOUNT of the second", OpTx(RemoveLiquidity{GOLD, CHN, 1, 0, MAX_AMOUNT + 1, {}}), "bad-ba-liquidity"},
+        // Auctions.
+        {"an auction of an asset for itself", OpTx(CreateAuction{GOLD, 1, GOLD, 10, 10, 1, 10}), "bad-ba-auction"},
+        {"an auction of nothing", OpTx(CreateAuction{GOLD, 0, CHN, 10, 10, 1, 10}), "bad-ba-auction"},
+        {"an auction ending at no price", OpTx(CreateAuction{GOLD, 1, CHN, 10, 0, 1, 10}), "bad-ba-auction-price"},
+        {"an auction whose price rises", OpTx(CreateAuction{GOLD, 1, CHN, 10, 11, 1, 10}), "bad-ba-auction-price"},
+        {"an auction starting above MAX_AMOUNT", OpTx(CreateAuction{GOLD, 1, CHN, MAX_AMOUNT + 1, 10, 1, 10}), "bad-ba-auction-price"},
+        {"an auction of no blocks", OpTx(CreateAuction{GOLD, 1, CHN, 10, 10, 1, 0}), "bad-ba-auction-duration"},
+        {"an auction too long", OpTx(CreateAuction{GOLD, 1, CHN, 10, 10, 1, MAX_AUCTION_DURATION + 1}), "bad-ba-auction-duration"},
+        {"an auction starting below height 0", OpTx(CreateAuction{GOLD, 1, CHN, 10, 10, -1, 10}), "bad-ba-auction-duration"},
+        {"a bid of nothing", OpTx(Bid{some_auction, 0, 0, {}}), "bad-ba-bid"},
+        {"a bid above MAX_AMOUNT", OpTx(Bid{some_auction, MAX_AMOUNT + 1, 0, {}}), "bad-ba-bid"},
+        {"a bid asking above MAX_AMOUNT", OpTx(Bid{some_auction, 1, MAX_AMOUNT + 1, {}}), "bad-ba-bid"},
+    };
+    const TState state;
+    std::set<std::string> reasons;
+    for (const Case& c : cases) {
+        std::string reason;
+        BOOST_CHECK_MESSAGE(!CheckMarker(c.tx, reason), c.name);
+        BOOST_CHECK_MESSAGE(reason == c.reason, c.name << ": " << reason << ", not " << c.reason);
+        std::string through_state;
+        BOOST_CHECK_MESSAGE(!state.CheckTx(c.tx, 100, through_state), c.name);
+        BOOST_CHECK_MESSAGE(through_state == c.reason, c.name << " (state): " << through_state);
+        reasons.insert(c.reason);
+    }
+    // Each reason CheckMarker gives. Not here: the amount of a control coin, reservation or receipt a
+    // marker lists other than 1 (bad-ba-amount): the marker does not write one for those kinds, and
+    // reading one sets it to 1, so no marker can carry another.
+    BOOST_CHECK_EQUAL(reasons.size(), 20u);
+
+    // And what each of those transactions was close to is well formed.
+    const std::vector<CTransaction> good{
+        outputs_tx({{0, Asset(GOLD, 1)}, {1, std::nullopt}}, {CTxOut{0, HOLDER}, CTxOut{0, HOLDER}}),
+        outputs_tx({{0, Unit(Token::Kind::RESERVATION, uint256{})}, {1, Unit(Token::Kind::RECEIPT, uint256{})}}, {CTxOut{0, HOLDER}, CTxOut{0, HOLDER}}),
+        OpTx(Swap{CHN, 1, GOLD, 0, HOLDER}, 1),
+        OpTx(reg(GOLD, MAX_AMOUNT, MAX_DECIMALS, AssetData{.info = std::string(MAX_INFO_SIZE, 'x')}, "GOLD")),
+        OpTx(Burn{std::vector<Token>(MAX_BURNS, Asset(GOLD, 1))}),
+        OpTx(CreateAuction{GOLD, 1, CHN, 10, 10, 0, MAX_AUCTION_DURATION}),
+        OpTx(Collect{some_auction, {}}),
+    };
+    for (const CTransaction& tx : good) {
+        std::string reason;
+        BOOST_CHECK_MESSAGE(CheckMarker(tx, reason), reason);
+    }
+    // A transaction without a marker has nothing to check.
+    std::string reason;
+    BOOST_CHECK(CheckMarker(RawTx({CTxOut{1, HOLDER}}), reason));
+    BOOST_CHECK(reason.empty());
+}
+
+BOOST_AUTO_TEST_CASE(plan_rejects)
+{
+    // The rejects of the rules against the state that no other test reaches, one transaction each.
+    Fixture f;
+    const auto [control, coins]{f.Issue("GOLD", 1'000'000)};
+    const AssetId unknown{HashName("UNKNOWN")};
+
+    // Assets nobody registered.
+    BOOST_CHECK_EQUAL(f.Reject(MakeTx({}, Mint{unknown, 5}, {Asset(unknown, 5)})), "bad-ba-asset-unknown");
+    BOOST_CHECK_EQUAL(f.Reject(MakeTx({}, UpdateAsset{unknown, AssetUpdates{.info = {UpdateKind::SET, "x"}}}, {})), "bad-ba-asset-unknown");
+    BOOST_CHECK_EQUAL(f.Reject(MakeTx({}, Burn{{Asset(unknown, 5)}}, {})), "bad-ba-asset-unknown");
+    BOOST_CHECK_EQUAL(f.Reject(MakeTx({coins}, AddLiquidity{GOLD, unknown, 100'000, 100'000, 1}, {Asset(GOLD, 900'000), std::nullopt, std::nullopt})), "bad-ba-asset-unknown");
+    BOOST_CHECK_EQUAL(f.Reject(MakeTx({}, CreateAuction{unknown, 1, CHN, 10, 10, f.height + 1, 10}, {Unit(Token::Kind::RECEIPT, uint256{})})), "bad-ba-asset-unknown");
+    BOOST_CHECK_EQUAL(f.Reject(MakeTx({coins}, CreateAuction{GOLD, 1, unknown, 10, 10, f.height + 1, 10}, {Asset(GOLD, 999'999), Unit(Token::Kind::RECEIPT, uint256{})})), "bad-ba-asset-unknown");
+
+    // Burns of more than there is, or of a reservation there is not.
+    BOOST_CHECK_EQUAL(f.Reject(MakeTx({}, Burn{{Unit(Token::Kind::RESERVATION, uint256{7})}}, {})), "bad-ba-burn");
+    BOOST_CHECK_EQUAL(f.Reject(MakeTx({coins}, Burn{{Asset(GOLD, 1'000'001)}}, {})), "bad-ba-burn");
+    // Two burns of one asset in a transaction count together.
+    BOOST_CHECK_EQUAL(f.Reject(MakeTx({coins}, Burn{{Asset(GOLD, 600'000), Asset(GOLD, 600'000)}}, {})), "bad-ba-burn");
+
+    // A supply beyond MAX_AMOUNT.
+    const auto [big_control, big_coins]{f.Issue("BIG", MAX_AMOUNT)};
+    const AssetId big{HashName("BIG")};
+    BOOST_CHECK_EQUAL(f.Reject(MakeTx({big_control}, Mint{big, 1}, {Unit(Token::Kind::CONTROL, big), Asset(big, 1)})), "bad-ba-supply");
+
+    // A pool of GOLD and CHN.
+    const CTransaction added{MakeTx({coins}, AddLiquidity{GOLD, CHN, 100'000, 50'000'000, 1}, {Asset(GOLD, 900'000), std::nullopt, std::nullopt}, 50'000'000)};
+    std::string reason;
+    BOOST_REQUIRE_MESSAGE(f.Apply(added, &reason), reason);
+    const uint256 id{PoolId(GOLD, CHN)};
+    const COutPoint gold{added.GetHash(), 0};
+    // What would go in takes a reserve beyond MAX_AMOUNT: a swap, a deposit.
+    BOOST_CHECK_EQUAL(f.Reject(MakeTx({gold}, Swap{GOLD, MAX_AMOUNT, CHN, 1, HOLDER}, {})), "bad-ba-swap");
+    BOOST_CHECK_EQUAL(f.Reject(MakeTx({gold}, AddLiquidity{GOLD, CHN, MAX_AMOUNT, 1'000, 1}, {std::nullopt, std::nullopt}, 1'000)), "bad-ba-liquidity");
+    // More shares out than are held: the MIN_LIQUIDITY nobody holds stay.
+    const uint64_t shares{f.state.Pools().at(id).shares};
+    BOOST_CHECK_EQUAL(f.Reject(MakeTx({COutPoint{added.GetHash(), 1}}, RemoveLiquidity{GOLD, CHN, shares - MIN_LIQUIDITY + 1, 0, 0, HOLDER}, {std::nullopt})), "bad-ba-liquidity");
+    // No pool to take shares out of; no auction to bid on or collect.
+    BOOST_CHECK_EQUAL(f.Reject(MakeTx({}, RemoveLiquidity{GOLD, big, 1, 0, 0, {}}, {std::nullopt})), "bad-ba-no-pool");
+    const Txid nothing{Txid::FromUint256(uint256{0x42})};
+    BOOST_CHECK_EQUAL(f.Reject(MakeTx({}, Bid{nothing, 10, 1, HOLDER}, {}, 10)), "bad-ba-no-auction");
+    BOOST_CHECK_EQUAL(f.Reject(MakeTx({}, Collect{nothing, HOLDER}, {})), "bad-ba-no-auction");
+    // Results the outputs do not match: GOLD bought with no output for it; CHN sold with one.
+    BOOST_CHECK_EQUAL(f.Reject(MakeTx({}, Swap{CHN, 1'000'000, GOLD, 1, {}}, {}, 1'000'000)), "bad-ba-results");
+    BOOST_CHECK_EQUAL(f.Reject(MakeTx({gold}, Swap{GOLD, 1'000, CHN, 1, HOLDER}, {Asset(GOLD, 899'000), std::nullopt})), "bad-ba-results");
+
+    // An auction selling CHN: a bid that buys CHN dust.
+    Fixture g;
+    const auto [g_control, g_gold]{g.Issue("GOLD", 1'000'000)};
+    const CTransaction chn_auction{MakeTx({}, CreateAuction{CHN, 1'000'000, GOLD, 1'000, 1'000, g.height, 10}, {Unit(Token::Kind::RECEIPT, uint256{})}, 1'000'000)};
+    BOOST_REQUIRE_MESSAGE(g.Apply(chn_auction, &reason), reason);
+    // 10 GOLD buys 10 000 satoshis: under MIN_CHN_PAYOUT; 50 buy as much as that.
+    BOOST_CHECK_EQUAL(g.Reject(MakeTx({g_gold}, Bid{chn_auction.GetHash(), 10, 1, HOLDER}, {Asset(GOLD, 999'990)})), "bad-ba-chn-dust");
+    BOOST_CHECK(g.Apply(MakeTx({g_gold}, Bid{chn_auction.GetHash(), 50, 1, HOLDER}, {Asset(GOLD, 999'950)}), &reason));
+
+    // Proceeds beyond MAX_AMOUNT: two bids of 2^62 each, at the price of MAX_AMOUNT for 2.
+    Fixture h;
+    const auto [h_gold_control, h_gold]{h.Issue("GOLD", 10)};
+    const auto [h_silver_control, h_silver]{h.Issue("SILVER", MAX_AMOUNT)};
+    const CTransaction dear{MakeTx({h_gold}, CreateAuction{GOLD, 2, SILVER, MAX_AMOUNT, MAX_AMOUNT, h.height, 10}, {Asset(GOLD, 8), Unit(Token::Kind::RECEIPT, uint256{})})};
+    BOOST_REQUIRE_MESSAGE(h.Apply(dear, &reason), reason);
+    const uint64_t half{uint64_t{1} << 62};
+    const CTransaction first_bid{MakeTx({h_silver}, Bid{dear.GetHash(), half, 1, {}}, {Asset(SILVER, MAX_AMOUNT - half), std::nullopt})};
+    BOOST_REQUIRE_MESSAGE(h.Apply(first_bid, &reason), reason);
+    BOOST_CHECK_EQUAL(h.state.Auctions().at(dear.GetHash()).remaining, 1u);
+    BOOST_CHECK_EQUAL(h.Reject(MakeTx({COutPoint{first_bid.GetHash(), 0}}, Bid{dear.GetHash(), half, 1, {}}, {std::nullopt})), "bad-ba-bid");
+
+    // CHN paid out beyond MAX_MONEY: a pool that holds more CHN than there can be (the state alone does
+    // not know how much CHN there is: the chain does, MAX_MONEY in all).
+    Fixture k;
+    const uint64_t lots{1'000'000'000'000'000'000};
+    const auto [k_control, k_coins]{k.Issue("GOLD", lots)};
+    const uint64_t gold_in{1'000'000'000'000'000}, chn_in{2'000'000'000'000'000};
+    const CTransaction k_open{MakeTx({k_coins}, AddLiquidity{GOLD, CHN, gold_in, chn_in, 1}, {Asset(GOLD, lots - gold_in), std::nullopt, std::nullopt}, chn_in)};
+    BOOST_REQUIRE_MESSAGE(k.Apply(k_open, &reason), reason);
+    const CTransaction k_more{MakeTx({COutPoint{k_open.GetHash(), 0}}, AddLiquidity{GOLD, CHN, gold_in, chn_in, 1}, {Asset(GOLD, lots - 2 * gold_in), std::nullopt, std::nullopt}, chn_in)};
+    BOOST_REQUIRE_MESSAGE(k.Apply(k_more, &reason), reason);
+    BOOST_CHECK_EQUAL(k.state.Pools().at(id).reserve0, 2 * chn_in);
+    const uint64_t k_swap_in{100'000'000'000'000'000};
+    BOOST_REQUIRE(amm::SwapOut(2 * gold_in, 2 * chn_in, k_swap_in) > static_cast<uint64_t>(MAX_MONEY));
+    BOOST_CHECK_EQUAL(k.Reject(MakeTx({COutPoint{k_more.GetHash(), 0}}, Swap{GOLD, k_swap_in, CHN, 1, HOLDER}, {Asset(GOLD, lots - 2 * gold_in - k_swap_in)})), "bad-ba-chn-amount");
+}
+
+BOOST_AUTO_TEST_CASE(defensive_rejects)
+{
+    // Rejects no transaction reaches from a state the rules made: they keep a state that could
+    // only be forged (here, written as it is) from going wrong. Each is shown on such a state.
+    // Written by the bytes of the tables, not by tables of their own: no byte is taken twice.
+    BOOST_CHECK(sidechain::DuplicateTableIds().empty());
+    std::string reason;
+
+    // Burned beyond MAX_AMOUNT: what is burned is at most what was minted, less the supply left.
+    Fixture f;
+    const auto [control, coins]{f.Issue("GOLD", 1'000)};
+    AssetRecord record{f.state.Assets().at(GOLD)};
+    record.burned = MAX_AMOUNT - 1;
+    f.state.Forge(AssetKey(GOLD), sidechain::EncodeValue(record));
+    BOOST_CHECK_EQUAL(f.Reject(MakeTx({coins}, Burn{{Asset(GOLD, 5)}}, {Asset(GOLD, 995)})), "bad-ba-burn");
+
+    // Shares beyond MAX_AMOUNT: a pool's shares are at most the root of the product of its reserves.
+    Fixture g;
+    const auto [gc, g_gold]{g.Issue("GOLD", 1'000)};
+    const auto [sc, g_silver]{g.Issue("SILVER", 1'000)};
+    Pool pool;
+    pool.asset0 = std::min(GOLD, SILVER);
+    pool.asset1 = std::max(GOLD, SILVER);
+    pool.reserve0 = pool.reserve1 = 1'000;
+    pool.shares = MAX_AMOUNT - 10;
+    g.state.Forge(PoolKey(PoolId(GOLD, SILVER)), sidechain::EncodeValue(pool));
+    BOOST_CHECK_EQUAL(g.Reject(MakeTx({g_gold, g_silver}, AddLiquidity{GOLD, SILVER, 1'000, 1'000, 1}, {std::nullopt, std::nullopt})), "bad-ba-liquidity");
+
+    // CHN freed beyond MAX_MONEY by retiring an asset: its pools hold at most all the CHN there is.
+    Fixture h;
+    const auto [h_control, h_coins]{h.Issue("GOLD", 1'000)};
+    BOOST_REQUIRE(h.Apply(MakeTx({h_control, h_coins}, Burn{{Unit(Token::Kind::CONTROL, GOLD), Asset(GOLD, 1'000)}}, {})));
+    BOOST_REQUIRE(h.state.Releasable(GOLD));
+    Pool dead;
+    dead.asset0 = CHN;
+    dead.asset1 = GOLD;
+    dead.reserve0 = static_cast<uint64_t>(MAX_MONEY) + 1;
+    dead.reserve1 = 1;
+    dead.shares = MIN_LIQUIDITY;
+    const uint256 dead_id{PoolId(CHN, GOLD)};
+    h.state.Forge(PoolKey(dead_id), sidechain::EncodeValue(dead));
+    h.state.Forge(PoolIndexKey(CHN, dead_id), {});
+    h.state.Forge(PoolIndexKey(GOLD, dead_id), {});
+    BOOST_REQUIRE(h.state.Releasable(GOLD));
+    BOOST_CHECK_EQUAL(h.Reject(MakeTx({}, ReleaseAsset{GOLD}, {})), "bad-ba-release");
+    // At MAX_MONEY, it is retired.
+    dead.reserve0 = static_cast<uint64_t>(MAX_MONEY);
+    h.state.Forge(PoolKey(dead_id), sidechain::EncodeValue(dead));
+    CAmount released{0};
+    BOOST_CHECK_MESSAGE(h.state.ApplyTx(MakeTx({}, ReleaseAsset{GOLD}, {}), h.height, h.undo, h.payouts, reason, &released), reason);
+    BOOST_CHECK_EQUAL(released, MAX_MONEY);
+
+    // Not reached even so: an AddLiquidity where both sides have something back (amm::Provide takes
+    // one side whole), bad-ba-liquidity at the check of what goes back.
+}
+
+BOOST_AUTO_TEST_CASE(update_every_field)
+{
+    // Every field of an asset's data set, then deleted: its history, and the data at each height.
+    Fixture f;
+    const auto [control, coins]{f.Issue("GOLD", 10)};
+    const CKey key{GenerateRandomKey()};
+    const CPubKey pubkey{key.GetPubKey()};
+    EncryptionKey encryption_key;
+    std::copy(pubkey.begin(), pubkey.end(), encryption_key.begin());
+    const XOnlyPubKey xonly{pubkey};
+    const SigningKey signing_key{std::span<const unsigned char>{xonly.data(), xonly.size()}};
+    const SocketV4 v4{{203, 0, 113, 7}, 8333};
+    const SocketV6 v6{{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7}, 0};
+    const uint256 commitment{HashName("terms")};
+
+    AssetUpdates set;
+    set.commitment = {UpdateKind::SET, commitment};
+    set.ipv4 = {UpdateKind::SET, v4};
+    set.ipv6 = {UpdateKind::SET, v6};
+    set.encryption_key = {UpdateKind::SET, encryption_key};
+    set.signing_key = {UpdateKind::SET, signing_key};
+    set.info = {UpdateKind::SET, "All of it"};
+    // The marker carries every field as it was.
+    Marker marker;
+    marker.operation = UpdateAsset{GOLD, set};
+    marker.outputs = {{0, Unit(Token::Kind::CONTROL, GOLD)}};
+    const auto parsed{ParseMarkerScript(MarkerScript(marker))};
+    BOOST_REQUIRE(parsed);
+    BOOST_CHECK(*parsed == marker);
+
+    f.height = 101;
+    const CTransaction updated{MakeTx({control}, UpdateAsset{GOLD, set}, {Unit(Token::Kind::CONTROL, GOLD)})};
+    std::string reason;
+    BOOST_REQUIRE_MESSAGE(f.Apply(updated, &reason), reason);
+    const AssetData all{f.state.Assets().at(GOLD).Current()};
+    BOOST_CHECK(all.commitment == commitment);
+    BOOST_CHECK(all.ipv4 == v4);
+    BOOST_CHECK(all.ipv6 == v6);
+    BOOST_CHECK(all.encryption_key == encryption_key);
+    BOOST_CHECK(all.signing_key == signing_key);
+    BOOST_CHECK(all.info == "All of it");
+    // Each as it is stored, the same back.
+    BOOST_CHECK(sidechain::DecodeValue<AssetData>(sidechain::EncodeValue(all)) == all);
+    BOOST_CHECK(sidechain::DecodeValue<SocketV4>(sidechain::EncodeValue(v4)) == v4);
+    BOOST_CHECK(sidechain::DecodeValue<SocketV6>(sidechain::EncodeValue(v6)) == v6);
+
+    // Deleted, all but the info, which is kept.
+    AssetUpdates deleted;
+    deleted.commitment = {UpdateKind::DELETE, std::nullopt};
+    deleted.ipv4 = {UpdateKind::DELETE, std::nullopt};
+    deleted.ipv6 = {UpdateKind::DELETE, std::nullopt};
+    deleted.encryption_key = {UpdateKind::DELETE, std::nullopt};
+    deleted.signing_key = {UpdateKind::DELETE, std::nullopt};
+    f.height = 102;
+    const CTransaction removed{MakeTx({COutPoint{updated.GetHash(), 0}}, UpdateAsset{GOLD, deleted}, {Unit(Token::Kind::CONTROL, GOLD)})};
+    BOOST_REQUIRE_MESSAGE(f.Apply(removed, &reason), reason);
+    const AssetData left{f.state.Assets().at(GOLD).Current()};
+    BOOST_CHECK(left == (AssetData{.info = "All of it"}));
+    const AssetRecord record{f.state.Assets().at(GOLD)};
+    for (const DataField field : {DataField::COMMITMENT, DataField::IPV4, DataField::IPV6, DataField::ENCRYPTION_KEY, DataField::SIGNING_KEY}) {
+        BOOST_CHECK_EQUAL(record.changes[static_cast<size_t>(field)], 3u);
+    }
+    BOOST_CHECK_EQUAL(record.changes[static_cast<size_t>(DataField::INFO)], 2u);
+
+    const AssetHistory history{f.state.View().GetHistory(GOLD)};
+    BOOST_REQUIRE_EQUAL(history.ipv4.size(), 3u);
+    BOOST_CHECK(!history.ipv4[0].value);
+    BOOST_CHECK(history.ipv4[1] == (Stamped<SocketV4>{v4, updated.GetHash(), 101}));
+    BOOST_CHECK(history.ipv4[2] == (Stamped<SocketV4>{std::nullopt, removed.GetHash(), 102}));
+    BOOST_REQUIRE_EQUAL(history.ipv6.size(), 3u);
+    BOOST_CHECK(history.ipv6[1].value == v6);
+    BOOST_REQUIRE_EQUAL(history.encryption_key.size(), 3u);
+    BOOST_CHECK(history.encryption_key[1].value == encryption_key);
+    BOOST_REQUIRE_EQUAL(history.signing_key.size(), 3u);
+    BOOST_CHECK(history.signing_key[1].value == signing_key);
+    BOOST_REQUIRE_EQUAL(history.commitment.size(), 3u);
+    BOOST_CHECK(history.commitment[1].value == commitment);
+    BOOST_REQUIRE_EQUAL(history.info.size(), 2u);
+    // At each height.
+    BOOST_CHECK(f.state.View().DataAt(GOLD, 100) == AssetData{});
+    BOOST_CHECK(f.state.View().DataAt(GOLD, 101) == all);
+    BOOST_CHECK(f.state.View().DataAt(GOLD, 102) == left);
+
+    // Undone, block by block.
+    TUndo second;
+    second.parts.push_back(f.undo.parts.back());
+    f.state.Revert(second);
+    BOOST_CHECK(f.state.Assets().at(GOLD).Current() == all);
+    BOOST_CHECK_EQUAL(f.state.View().GetHistory(GOLD).ipv4.size(), 2u);
+}
+
+BOOST_AUTO_TEST_CASE(auction_undo)
+{
+    // Undoing the block that made an auction, and those that bid on it and collected it.
+    Fixture f;
+    const auto [control, coins]{f.Issue("GOLD", 100)};
+    const TState before{f.state};
+    const AssetRecord gold_before{f.state.Assets().at(GOLD)};
+    const auto block{[&](const CTransaction& tx) {
+        f.undo = TUndo{};
+        std::string reason;
+        BOOST_REQUIRE_MESSAGE(f.Apply(tx, &reason), reason);
+        return f.undo;
+    }};
+    const CTransaction made{MakeTx({coins}, CreateAuction{GOLD, 40, CHN, 400'000, 400'000, f.height, 10}, {Asset(GOLD, 60), Unit(Token::Kind::RECEIPT, uint256{})})};
+    const TUndo undo_made{block(made)};
+    const Txid id{made.GetHash()};
+    const TState after_made{f.state};
+    BOOST_CHECK_EQUAL(f.state.Assets().at(GOLD).holding_auctions, 1u);
+    const CTransaction bid{MakeTx({}, Bid{id, 100'000, 1, {}}, {std::nullopt}, 100'000)};
+    const TUndo undo_bid{block(bid)};
+    const TState after_bid{f.state};
+    f.height += 10;
+    const CTransaction collect{MakeTx({COutPoint{id, 1}}, Collect{id, HOLDER}, {std::nullopt})};
+    const TUndo undo_collect{block(collect)};
+    BOOST_CHECK(f.state.Auctions().at(id).closed);
+    BOOST_CHECK_EQUAL(f.state.Assets().at(GOLD).holding_auctions, 0u);
+
+    f.state.Revert(undo_collect);
+    BOOST_CHECK(f.state == after_bid);
+    BOOST_CHECK(!f.state.Auctions().at(id).closed);
+    f.state.Revert(undo_bid);
+    BOOST_CHECK(f.state == after_made);
+    BOOST_CHECK_EQUAL(f.state.Auctions().at(id).remaining, 40u);
+    f.state.Revert(undo_made);
+    BOOST_CHECK(f.state == before);
+    BOOST_CHECK(f.state.Auctions().empty());
+    BOOST_CHECK(!f.state.Tokens().contains(COutPoint{id, 1}));
+    BOOST_CHECK(f.state.Tokens().at(coins) == Asset(GOLD, 100));
+    BOOST_CHECK(f.state.Assets().at(GOLD) == gold_before);
+    // The index of auctions by asset is empty again.
+    sidechain::StoreBytes by_gold{0x3b};
+    by_gold.insert(by_gold.end(), GOLD.begin(), GOLD.end());
+    BOOST_CHECK_EQUAL(f.state.Count(by_gold), 0u);
+}
+
+BOOST_AUTO_TEST_CASE(release_burns_paired_asset)
+{
+    // Retiring an asset whose pool is with another asset, not CHN: what the pool holds of the other
+    // asset is burned, its supply down and its burned up by as much; undone, all of it is back.
+    Fixture f;
+    const auto [gc, gold]{f.Issue("GOLD", 10'000'000)};
+    const auto [sc, silver]{f.Issue("SILVER", 2'000'000)};
+    const CTransaction added{MakeTx({gold, silver}, AddLiquidity{GOLD, SILVER, 1'000'000, 1'000'000, 1}, {Asset(GOLD, 9'000'000), Asset(SILVER, 1'000'000), std::nullopt, std::nullopt})};
+    std::string reason;
+    BOOST_REQUIRE_MESSAGE(f.Apply(added, &reason), reason);
+    const uint256 id{PoolId(GOLD, SILVER)};
+    const COutPoint lp{added.GetHash(), 2};
+    const uint64_t held{f.state.Tokens().at(lp).amount};
+    const auto [w0, w1]{amm::Withdraw(f.state.Pools().at(id), held)};
+    const bool gold_first{f.state.Pools().at(id).asset0 == GOLD};
+    const uint64_t gold_out{gold_first ? w0 : w1}, silver_out{gold_first ? w1 : w0};
+    const CTransaction removed{MakeTx({lp}, RemoveLiquidity{GOLD, SILVER, held, gold_out, silver_out, {}}, {std::nullopt, std::nullopt})};
+    BOOST_REQUIRE_MESSAGE(f.Apply(removed, &reason), reason);
+    BOOST_REQUIRE(amm::Abandoned(f.state.Pools().at(id)));
+    // GOLD dies: its control coin and every coin outside the pool burned.
+    BOOST_REQUIRE(f.Apply(MakeTx({gc, COutPoint{added.GetHash(), 0}, COutPoint{removed.GetHash(), 0}}, Burn{{Unit(Token::Kind::CONTROL, GOLD), Asset(GOLD, 9'000'000 + gold_out)}}, {}), &reason));
+    BOOST_REQUIRE(f.state.Releasable(GOLD));
+    // SILVER is alive: someone holds it, and its control coin exists.
+    BOOST_CHECK(!f.state.Releasable(SILVER));
+
+    const Pool dust{f.state.Pools().at(id)};
+    const uint64_t silver_dust{gold_first ? dust.reserve1 : dust.reserve0};
+    BOOST_REQUIRE(silver_dust > 0);
+    const AssetRecord silver_before{f.state.Assets().at(SILVER)};
+    const TState before{f.state};
+    f.undo = TUndo{};
+    CAmount released{-1};
+    BOOST_REQUIRE_MESSAGE(f.state.ApplyTx(MakeTx({}, ReleaseAsset{GOLD}, {}), f.height, f.undo, f.payouts, reason, &released), reason);
+    // No CHN in its pool: nothing for mainchain miners.
+    BOOST_CHECK_EQUAL(released, 0);
+    BOOST_CHECK(!f.state.Assets().contains(GOLD));
+    BOOST_CHECK(!f.state.Pools().contains(id));
+    const AssetRecord silver_after{f.state.Assets().at(SILVER)};
+    BOOST_CHECK_EQUAL(silver_after.supply, silver_before.supply - silver_dust);
+    BOOST_CHECK_EQUAL(silver_after.burned, silver_before.burned + silver_dust);
+    BOOST_CHECK_EQUAL(silver_after.minted, silver_before.minted);
+    BOOST_CHECK(f.state.View().PoolsOf(SILVER).empty());
+
+    f.state.Revert(f.undo);
+    BOOST_CHECK(f.state == before);
+    BOOST_CHECK(f.state.Assets().at(SILVER) == silver_before);
+    BOOST_CHECK_EQUAL(f.state.View().PoolsOf(SILVER).size(), 1u);
+}
+
+BOOST_AUTO_TEST_CASE(rpc_data_fields)
+{
+    // The data of an asset as the commands read and write it, every field.
+    const CKey key{GenerateRandomKey()};
+    const CPubKey pubkey{key.GetPubKey()};
+    const std::string encryption_hex{HexStr(pubkey)};
+    const XOnlyPubKey xonly{pubkey};
+    const std::string signing_hex{HexStr(std::span<const unsigned char>{xonly.data(), xonly.size()})};
+    const std::string commitment_hex{HashName("terms").GetHex()};
+    UniValue data;
+    BOOST_REQUIRE(data.read(strprintf(R"({"info": "Gold", "commitment": "%s", "ipv4": "203.0.113.7:8333", "ipv6": "[2001:db8::7]:8333", "encryptionkey": "%s", "signingkey": "%s"})",
+                                      commitment_hex, encryption_hex, signing_hex)));
+    const AssetData parsed{ParseData(data)};
+    BOOST_CHECK(parsed.info == "Gold");
+    BOOST_CHECK(parsed.commitment == HashName("terms"));
+    BOOST_CHECK(parsed.ipv4 == (SocketV4{{203, 0, 113, 7}, 8333}));
+    BOOST_CHECK(parsed.ipv6 == (SocketV6{{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7}, 8333}));
+    BOOST_CHECK(parsed.encryption_key.has_value() && HexStr(*parsed.encryption_key) == encryption_hex);
+    BOOST_CHECK(parsed.signing_key.has_value() && HexStr(*parsed.signing_key) == signing_hex);
+    // Written back as read.
+    const UniValue written{DataToJSON(parsed)};
+    BOOST_CHECK_EQUAL(written.write(), data.write());
+    // Without ports.
+    UniValue no_ports;
+    BOOST_REQUIRE(no_ports.read(R"({"ipv4": "203.0.113.7", "ipv6": "2001:db8::7"})"));
+    const UniValue plain{DataToJSON(ParseData(no_ports))};
+    BOOST_CHECK_EQUAL(plain["ipv4"].get_str(), "203.0.113.7");
+    BOOST_CHECK_EQUAL(plain["ipv6"].get_str(), "2001:db8::7");
+
+    // Updates: a field left out is kept, null deletes it.
+    UniValue changes;
+    BOOST_REQUIRE(changes.read(R"({"info": null, "ipv4": "198.51.100.1"})"));
+    const AssetUpdates updates{ParseUpdates(changes)};
+    BOOST_CHECK(updates.info.kind == UpdateKind::DELETE);
+    BOOST_CHECK(updates.ipv4.kind == UpdateKind::SET);
+    BOOST_CHECK(updates.commitment.kind == UpdateKind::RETAIN);
+    BOOST_CHECK(!updates.Empty());
+    BOOST_CHECK(ParseUpdates(UniValue{UniValue::VOBJ}).Empty());
+
+    // Each field refused as it should be.
+    const auto refused{[](const std::string& json) {
+        UniValue value;
+        BOOST_REQUIRE(value.read(json));
+        return RpcError([&] { ParseData(value); });
+    }};
+    BOOST_CHECK_EQUAL(refused(R"({"colour": "gold"})"), "Unknown field of asset data: colour");
+    BOOST_CHECK_EQUAL(refused(strprintf(R"({"info": "%s"})", std::string(MAX_INFO_SIZE + 1, 'x'))), strprintf("info: at most %u bytes", MAX_INFO_SIZE));
+    BOOST_CHECK_EQUAL(refused(R"({"commitment": "abcd"})"), "commitment: 32 bytes in hex");
+    BOOST_CHECK(refused(R"({"ipv4": "2001:db8::7"})").starts_with("ipv4: an IPv4 address"));
+    BOOST_CHECK(refused(R"({"ipv4": "not an address"})").starts_with("ipv4: an IPv4 address"));
+    BOOST_CHECK(refused(R"({"ipv6": "203.0.113.7"})").starts_with("ipv6: an IPv6 address"));
+    BOOST_CHECK_EQUAL(refused(R"({"encryptionkey": "02"})"), "encryptionkey: a compressed public key, 33 bytes in hex");
+    BOOST_CHECK_EQUAL(refused(strprintf(R"({"encryptionkey": "%s"})", std::string(66, '0'))), "encryptionkey: a compressed public key, 33 bytes in hex");
+    BOOST_CHECK_EQUAL(refused(R"({"signingkey": "00"})"), "signingkey: an x-only public key, 32 bytes in hex");
+    BOOST_CHECK_EQUAL(refused(strprintf(R"({"signingkey": "%s"})", std::string(64, 'f'))), "signingkey: an x-only public key, 32 bytes in hex");
+    BOOST_CHECK_EQUAL(RpcError([] { ParseData(UniValue{"info"}); }), "The data of an asset is an object");
+
+    // Assets as arguments, labels and amounts.
+    BOOST_CHECK(ParseAssetArg(UniValue{"0x" + GOLD.GetHex()}) == GOLD);
+    BOOST_CHECK(ParseAssetArg(UniValue{"CHN"}) == CHN);
+    BOOST_CHECK(ParseAssetArg(UniValue{"1739-0029"}) == HashName("1739-0029"));
+    BOOST_CHECK_EQUAL(RpcError([] { ParseAssetArg(UniValue{""}); }), "The asset is empty");
+    AssetRecord record;
+    BOOST_CHECK_EQUAL(AssetLabel(CHN, nullptr), "CHN");
+    BOOST_CHECK_EQUAL(AssetLabel(GOLD, &record), "0x" + GOLD.GetHex());
+    record.text = "GOLD";
+    BOOST_CHECK_EQUAL(AssetLabel(GOLD, &record), "GOLD");
+    BOOST_CHECK_EQUAL(FormatUnits(150, 2), "1.50");
+    BOOST_CHECK_EQUAL(FormatUnits(7, 0), "7");
+    BOOST_CHECK_EQUAL(ParseUnits(UniValue{"1.5"}, 2), 150u);
+    BOOST_CHECK_EQUAL(ParseUnits(UniValue{"0"}, 2, /*allow_zero=*/true), 0u);
+    BOOST_CHECK_EQUAL(RpcError([] { ParseUnits(UniValue{"0"}, 2); }), "The amount is zero");
+    BOOST_CHECK(RpcError([] { ParseUnits(UniValue{"1.001"}, 2); }).starts_with("Invalid amount 1.001"));
+    BOOST_CHECK(RpcError([] { ParseUnits(UniValue{"-1"}, 2); }).starts_with("Invalid amount -1"));
+    BOOST_CHECK_EQUAL(RpcError([] { ParseUnits(UniValue{UniValue::VOBJ}, 2); }), "An amount is a number or a string");
 }
 
 BOOST_AUTO_TEST_SUITE_END()
