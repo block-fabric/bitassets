@@ -12,6 +12,7 @@
 
 #include <QClipboard>
 
+#include <QAbstractSpinBox>
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
@@ -211,6 +212,19 @@ void SelectAsset(QComboBox* combo, const QString& arg)
 {
     const int index{combo->findData(arg)};
     if (index >= 0) combo->setCurrentIndex(index);
+}
+
+/**
+ * Whether something is being typed in, or picked, in the panel an area shows: the focus is in a field
+ * of it. A button of it with the focus, as a button has once clicked, is not: after its action, the
+ * panel is rebuilt with what changed (else the panel of Create, say, stayed, ready to reserve the
+ * same name again).
+ */
+bool TypingIn(const QScrollArea* area)
+{
+    QWidget* focus{QApplication::focusWidget()};
+    if (!area->widget() || !focus || !area->widget()->isAncestorOf(focus)) return false;
+    return qobject_cast<QLineEdit*>(focus) || qobject_cast<QAbstractSpinBox*>(focus) || qobject_cast<QComboBox*>(focus);
 }
 } // namespace
 
@@ -506,8 +520,7 @@ void BitAssetsPage::refreshMine()
         m_mine_shown_name = picked->data(Qt::UserRole + 1).toString();
         m_mine->setCurrentItem(picked);
         // What it shows changed: rebuilt, unless it is being typed in.
-        QWidget* focus{QApplication::focusWidget()};
-        if (!m_mine_detail->widget() || !focus || !m_mine_detail->widget()->isAncestorOf(focus)) showMineDetail();
+        if (!TypingIn(m_mine_detail)) showMineDetail();
     } else if (m_mine_shown != QLatin1String("create") && m_mine_shown != QLatin1String("transfer")) {
         // What was shown is gone (sent, collected, released).
         m_mine_shown = QStringLiteral("create");
@@ -1476,8 +1489,7 @@ void BitAssetsPage::refreshAuctions()
     if (picked >= 0) {
         m_auctions->selectRow(picked);
         // Its price moved: the panel is rebuilt unless it is being typed in.
-        QWidget* focus{QApplication::focusWidget()};
-        if (!m_auction_detail->widget() || !focus || !m_auction_detail->widget()->isAncestorOf(focus)) showAuctionDetail();
+        if (!TypingIn(m_auction_detail)) showAuctionDetail();
     }
 }
 
