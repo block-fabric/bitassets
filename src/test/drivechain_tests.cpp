@@ -19,16 +19,21 @@
 #include <script/script.h>
 #include <script/script_error.h>
 #include <streams.h>
+#include <test/util/logging.h>
 #include <test/util/setup_common.h>
 #include <uint256.h>
 #include <validation.h>
 #include <crypto/common.h>
 #include <tinyformat.h>
+#include <util/fs.h>
 #include <util/strencodings.h>
 
 #include <boost/test/unit_test.hpp>
 
+#include <functional>
+#include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -1741,6 +1746,469 @@ BOOST_FIXTURE_TEST_CASE(undo_erased_below_the_flushed_block, TestChain100Setup)
     }
     flush();
     BOOST_CHECK_EQUAL(check(), WITH_LOCK(::cs_main, return chainstate.m_chain.Height()));
+}
+
+BOOST_AUTO_TEST_CASE(every_reject_reason)
+{
+    // One invalid block per drivechain rule, each refused for exactly its reason, and each taken
+    // back by its undo data so far (TestChain::Connect checks that).
+    TestChain base;
+    base.Activate(MakeSidechain(1, "one"));
+    base.Activate(MakeSidechain(2, "two"));
+    BOOST_REQUIRE(base.Connect({}, {base.DepositTx(1, 10 * COIN), base.DepositTx(2, 10 * COIN)}));
+    const CMutableTransaction blind{TestChain::BlindBundle(2 * COIN, COIN / 10)};
+    const uint256 bundle{blind.GetHash().ToUint256()};
+    BOOST_REQUIRE(base.Connect({BundleScript(1, bundle)}));
+    // Slots 1 and 2 are active, with 10 coins in escrow each; slot 1 has one bundle pending, at score 1.
+    BOOST_REQUIRE_EQUAL(base.scdb.GetPendingBundles().size(), 2U);
+    BOOST_REQUIRE_EQUAL(base.scdb.GetSlot(1)->bundles.size(), 1U);
+
+    using Block = std::pair<std::vector<CScript>, std::vector<CMutableTransaction>>;
+    struct Case {
+        std::string reason;
+        std::function<Block(TestChain&)> make;
+    };
+    const uint256 side{0x5b};
+    const auto spend_escrow{[](TestChain& c, SidechainId slot) {
+        CMutableTransaction tx;
+        tx.vin.emplace_back(c.scdb.GetSlot(slot)->ctip.outpoint);
+        return tx;
+    }};
+    const auto bmm_request{[&](TestChain& c, SidechainId slot, const uint256& prev) {
+        CMutableTransaction tx{c.BaseTx()};
+        tx.vout.emplace_back(0, BmmRequestScript(BmmRequest{slot, side, prev}));
+        return tx;
+    }};
+    const auto payout{[](CMutableTransaction tx, CAmount escrow, CAmount paid) {
+        tx.vout.emplace_back(escrow, EscrowScript(1));
+        tx.vout.emplace_back(paid, CScript() << OP_TRUE);
+        return tx;
+    }};
+    const CScript abstain_two{Votes({VOTE_ABSTAIN, VOTE_ABSTAIN})};
+
+    const std::vector<Case> cases{
+        {"bad-dc-coinbase-escrow", [](TestChain&) { return Block{{EscrowScript(1)}, {}}; }},
+        {"bad-dc-duplicate-proposal", [](TestChain&) { return Block{{ProposalScript(MakeSidechain(3)), ProposalScript(MakeSidechain(3))}, {}}; }},
+        {"bad-dc-multiple-acks", [](TestChain&) { return Block{{AckScript(3, uint256{1}), AckScript(3, uint256{2})}, {}}; }},
+        {"bad-dc-multiple-bundles", [](TestChain&) { return Block{{BundleScript(2, uint256{1}), BundleScript(2, uint256{2})}, {}}; }},
+        {"bad-dc-multiple-votes", [&](TestChain&) { return Block{{abstain_two, abstain_two}, {}}; }},
+        {"bad-dc-bmm-inactive-sidechain", [&](TestChain&) { return Block{{BmmAcceptScript(3, side)}, {}}; }},
+        {"bad-dc-multiple-bmm-accepts", [&](TestChain&) { return Block{{BmmAcceptScript(1, side), BmmAcceptScript(1, uint256{1})}, {}}; }},
+        {"bad-dc-bmm-prev-block", [&](TestChain& c) { return Block{{BmmAcceptScript(1, side)}, {bmm_request(c, 1, uint256{0x77})}}; }},
+        {"bad-dc-bmm-not-accepted", [&](TestChain& c) { return Block{{}, {bmm_request(c, 1, c.tip)}}; }},
+        {"bad-dc-bmm-not-accepted", [&](TestChain& c) { return Block{{BmmAcceptScript(1, uint256{1})}, {bmm_request(c, 1, c.tip)}}; }},
+        {"bad-dc-multiple-bmm-requests", [&](TestChain& c) { return Block{{BmmAcceptScript(1, side)}, {bmm_request(c, 1, c.tip), bmm_request(c, 1, c.tip)}}; }},
+        {"bad-dc-multiple-escrow-outputs", [](TestChain& c) {
+             CMutableTransaction tx{c.BaseTx()};
+             tx.vout.emplace_back(COIN, EscrowScript(3));
+             tx.vout.emplace_back(COIN, EscrowScript(4));
+             return Block{{}, {tx}};
+         }},
+        {"bad-dc-multiple-escrow-inputs", [&](TestChain& c) {
+             CMutableTransaction tx{spend_escrow(c, 1)};
+             tx.vin.emplace_back(c.scdb.GetSlot(2)->ctip.outpoint);
+             tx.vout.emplace_back(21 * COIN, EscrowScript(1));
+             tx.vout.emplace_back(0, DestinationScript("dest"));
+             return Block{{}, {tx}};
+         }},
+        {"bad-dc-escrow-spend", [&](TestChain& c) {
+             CMutableTransaction tx{spend_escrow(c, 1)};
+             tx.vout.emplace_back(10 * COIN, CScript() << OP_TRUE);
+             return Block{{}, {tx}};
+         }},
+        {"bad-dc-inactive-sidechain", [](TestChain& c) { return Block{{}, {c.DepositTx(3, COIN)}}; }},
+        {"bad-dc-escrow-mismatch", [&](TestChain& c) {
+             CMutableTransaction tx{spend_escrow(c, 1)};
+             tx.vout.emplace_back(20 * COIN, EscrowScript(2));
+             tx.vout.emplace_back(0, DestinationScript("dest"));
+             return Block{{}, {tx}};
+         }},
+        {"bad-dc-escrow-unspent", [](TestChain& c) {
+             CMutableTransaction tx{c.BaseTx()};
+             tx.vout.emplace_back(20 * COIN, EscrowScript(1));
+             tx.vout.emplace_back(0, DestinationScript("dest"));
+             return Block{{}, {tx}};
+         }},
+        {"bad-dc-escrow-amount", [](TestChain& c) { return Block{{}, {c.DepositTx(1, MAX_MONEY + 1)}}; }},
+        {"bad-dc-escrow-amount", [](TestChain& c) { return Block{{}, {c.DepositTx(1, 10 * COIN)}}; }},
+        {"bad-dc-deposit-destination", [](TestChain& c) {
+             CMutableTransaction tx{c.DepositTx(1, 20 * COIN)};
+             tx.vout.pop_back();
+             return Block{{}, {tx}};
+         }},
+        {"bad-dc-deposit-destination", [](TestChain& c) { return Block{{}, {c.DepositTx(1, 20 * COIN, "")}}; }},
+        {"bad-dc-deposit-destination", [](TestChain& c) { return Block{{}, {c.DepositTx(1, 20 * COIN, std::string(MAX_DEPOSIT_DESTINATION_SIZE + 1, 'x'))}}; }},
+        {"bad-dc-deposit-destination", [](TestChain& c) { return Block{{}, {c.DepositTx(1, 20 * COIN, WITHDRAWAL_RETURN_DEST)}}; }},
+        {"bad-dc-deposit-destination", [](TestChain& c) {
+             CMutableTransaction tx{c.DepositTx(1, 20 * COIN)};
+             tx.vout.back().scriptPubKey = CScript() << OP_TRUE;
+             return Block{{}, {tx}};
+         }},
+        {"bad-dc-withdrawal-inputs", [&](TestChain& c) {
+             CMutableTransaction tx{spend_escrow(c, 1)};
+             tx.vin.push_back(c.BaseTx().vin[0]);
+             return Block{{}, {payout(tx, 7 * COIN, 2 * COIN)}};
+         }},
+        {"bad-dc-withdrawal-outputs", [&](TestChain& c) {
+             CMutableTransaction tx{spend_escrow(c, 1)};
+             tx.vout.emplace_back(9 * COIN, EscrowScript(1));
+             return Block{{}, {tx}};
+         }},
+        {"bad-dc-withdrawal-outputs", [&](TestChain& c) {
+             CMutableTransaction tx{spend_escrow(c, 1)};
+             tx.vout.emplace_back(2 * COIN, CScript() << OP_TRUE);
+             tx.vout.emplace_back(7 * COIN, EscrowScript(1));
+             return Block{{}, {tx}};
+         }},
+        {"bad-dc-withdrawal-amount", [&](TestChain& c) { return Block{{}, {payout(spend_escrow(c, 1), 9 * COIN, 3 * COIN)}}; }},
+        {"bad-dc-withdrawal-unknown", [&](TestChain& c) { return Block{{}, {c.WithdrawalTx(1, TestChain::BlindBundle(COIN, COIN / 10, 7), COIN, COIN / 10)}}; }},
+        {"bad-dc-withdrawal-score", [&](TestChain& c) { return Block{{}, {c.WithdrawalTx(1, blind, 2 * COIN, COIN / 10)}}; }},
+        {"bad-dc-votes-size", [](TestChain&) { return Block{{Votes({0})}, {}}; }},
+        {"bad-dc-votes-size", [](TestChain&) { return Block{{Votes({0, VOTE_ABSTAIN, VOTE_ABSTAIN})}, {}}; }},
+        {"bad-dc-votes-form", [](TestChain&) { return Block{{VoteScript(VoteMessage{VoteForm::TWO_BYTES, {0, 0}})}, {}}; }},
+        {"bad-dc-votes-index", [](TestChain&) { return Block{{Votes({1, VOTE_ABSTAIN})}, {}}; }},
+        {"bad-dc-votes-index", [](TestChain&) { return Block{{Votes({VOTE_ABSTAIN, 0})}, {}}; }},
+        {"bad-dc-votes-index", [](TestChain&) { return Block{{VoteScript(VoteMessage{VoteForm::TWO_BYTES, {VOTE_MAX_ONE_BYTE_INDEX + 1, VOTE_ABSTAIN}})}, {}}; }},
+        {"bad-dc-bundle-known", [&](TestChain&) { return Block{{BundleScript(1, bundle)}, {}}; }},
+        {"bad-dc-bundle-closed", [&](TestChain& c) {
+             // Downvoted to 0, it fails once it can no longer reach the score in the blocks it has left.
+             BOOST_REQUIRE(c.Connect({Votes({VOTE_DOWNVOTE, VOTE_ABSTAIN})}));
+             while (!c.scdb.IsClosed(1, bundle)) BOOST_REQUIRE(c.Connect());
+             return Block{{BundleScript(1, bundle)}, {}};
+         }},
+        {"bad-dc-too-many-bundles", [&](TestChain& c) {
+             c.params.max_pending_bundles = 1;
+             BOOST_REQUIRE(c.Connect({Votes({0, VOTE_ABSTAIN})}));
+             return Block{{BundleScript(1, uint256{0xbb})}, {}};
+         }},
+    };
+
+    std::set<std::string> covered;
+    for (const Case& test : cases) {
+        TestChain chain{base};
+        const auto [scripts, txs]{test.make(chain)};
+        BOOST_CHECK_MESSAGE(!chain.Connect(scripts, txs), test.reason);
+        BOOST_CHECK_EQUAL(chain.reject_reason, test.reason);
+        covered.insert(test.reason);
+    }
+
+    // A block whose first transaction is not a coinbase.
+    {
+        TestChain chain{base};
+        CBlock block{chain.MakeBlock({})};
+        block.vtx[0] = MakeTransactionRef(chain.DepositTx(1, 20 * COIN));
+        SidechainDB scdb{chain.scdb};
+        BlockUndo undo;
+        std::string reason;
+        BOOST_CHECK(!scdb.ConnectBlock(block, chain.height + 1, chain.params, undo, nullptr, reason));
+        BOOST_CHECK_EQUAL(reason, "bad-dc-no-coinbase");
+        scdb.DisconnectBlock(undo);
+        BOOST_CHECK(scdb == chain.scdb);
+        covered.insert(reason);
+    }
+
+    // Every reason SidechainDB gives is in the table.
+    const std::set<std::string> all{
+        "bad-dc-bmm-inactive-sidechain", "bad-dc-bmm-not-accepted", "bad-dc-bmm-prev-block", "bad-dc-bundle-closed",
+        "bad-dc-bundle-known", "bad-dc-coinbase-escrow", "bad-dc-deposit-destination", "bad-dc-duplicate-proposal",
+        "bad-dc-escrow-amount", "bad-dc-escrow-mismatch", "bad-dc-escrow-spend", "bad-dc-escrow-unspent",
+        "bad-dc-inactive-sidechain", "bad-dc-multiple-acks", "bad-dc-multiple-bmm-accepts", "bad-dc-multiple-bmm-requests",
+        "bad-dc-multiple-bundles", "bad-dc-multiple-escrow-inputs", "bad-dc-multiple-escrow-outputs", "bad-dc-multiple-votes",
+        "bad-dc-no-coinbase", "bad-dc-too-many-bundles", "bad-dc-votes-form", "bad-dc-votes-index", "bad-dc-votes-size",
+        "bad-dc-withdrawal-amount", "bad-dc-withdrawal-inputs", "bad-dc-withdrawal-outputs", "bad-dc-withdrawal-score",
+        "bad-dc-withdrawal-unknown",
+    };
+    BOOST_CHECK(covered == all);
+
+    // Messages for slots beyond max_sidechains, and escrow outputs of such slots, are no drivechain
+    // messages at all: the same block with them is valid.
+    {
+        TestChain chain{base};
+        chain.params.max_sidechains = 3;
+        CMutableTransaction tx{chain.BaseTx()};
+        tx.vout.emplace_back(COIN, EscrowScript(5));
+        tx.vout.emplace_back(COIN, EscrowScript(6));
+        BOOST_CHECK(chain.Connect({EscrowScript(7), AckScript(4, uint256{1}), AckScript(4, uint256{2}), BundleScript(5, uint256{1}),
+                                   BundleScript(5, uint256{2}), BmmAcceptScript(6, side), BmmAcceptScript(6, uint256{1}),
+                                   ProposalScript(MakeSidechain(5)), ProposalScript(MakeSidechain(5))},
+                                  {tx, bmm_request(chain, 7, uint256{0x77})}));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(proposal_expires_once_its_slot_is_taken)
+{
+    // A proposal for a free slot activates at activation_period; once another proposal took the slot,
+    // it activates at replacement_period instead. Where that is shorter (as -testdrivechainparam can
+    // have it) and the proposal already older, it is dropped.
+    TestChain chain;
+    chain.params.activation_period = 10;
+    chain.params.replacement_period = 5;
+    chain.params.activation_max_failures = 100;
+    const Sidechain a{MakeSidechain(1, "a")}, b{MakeSidechain(1, "b")};
+    BOOST_REQUIRE(chain.Connect({ProposalScript(a)}));
+    BOOST_REQUIRE(chain.Connect({ProposalScript(b)}));
+    while (chain.height < 10) BOOST_REQUIRE(chain.Connect());
+    BOOST_REQUIRE(chain.scdb.IsActive(1));
+    BOOST_CHECK(chain.scdb.GetSlot(1)->sidechain == a);
+    BOOST_CHECK(chain.scdb.GetProposal(b.GetHash()));
+    BOOST_CHECK_LT(SidechainDB::BlocksUntilActivation(*chain.scdb.GetProposal(b.GetHash()), true, chain.height + 1, chain.params), 0);
+    // Connect checks that the undo data puts it back.
+    BOOST_REQUIRE(chain.Connect());
+    BOOST_CHECK(!chain.scdb.GetProposal(b.GetHash()));
+    BOOST_CHECK(!chain.scdb.GetProposal(1, b.GetHash()));
+    BOOST_CHECK(chain.scdb.GetProposals().empty());
+    BOOST_CHECK(chain.scdb.GetSlot(1)->sidechain == a);
+}
+
+BOOST_AUTO_TEST_CASE(repeated_votes_of_closed_bundles)
+{
+    // REPEAT_PREVIOUS repeats the votes of the last block: an upvote of a bundle that failed in the
+    // block (expiry comes before the votes) casts no vote, the other bundles of the sidechain keep
+    // their score, and nothing is left to repeat after it.
+    TestChain chain;
+    chain.Activate(MakeSidechain(1));
+    chain.params.withdrawal_min_score = 2;
+    chain.params.withdrawal_period = 8;
+    const uint256 old_bundle{0xb1}, other{0xb2};
+    const int proposed{chain.height + 1};
+    BOOST_REQUIRE(chain.Connect({BundleScript(1, old_bundle)}));
+    for (int i{0}; i < 4; ++i) BOOST_REQUIRE(chain.Connect({Votes({0})}));
+    BOOST_REQUIRE(chain.Connect({BundleScript(1, other), Votes({0})}));
+    // Upvoting the old bundle takes the other one down to 0.
+    while (chain.height < proposed + 7) BOOST_REQUIRE(chain.Connect({Votes({0})}));
+    BOOST_REQUIRE_EQUAL(chain.scdb.GetSlot(1)->bundles.size(), 2U);
+    BOOST_REQUIRE_EQUAL(chain.scdb.GetSlot(1)->bundles[1].score, 0U);
+    BOOST_REQUIRE(chain.scdb.GetLastVotes().at(1).bundle == old_bundle);
+    // The next block is the end of the old bundle's withdrawal period.
+    BOOST_REQUIRE_LE(SidechainDB::BlocksLeft(chain.scdb.GetSlot(1)->bundles[0], chain.height + 1, chain.params) + 1, 0);
+    const CScript repeat{VoteScript(VoteMessage{VoteForm::REPEAT_PREVIOUS, {}})};
+    BOOST_REQUIRE(chain.Connect({repeat}));
+    BOOST_CHECK(chain.scdb.WasPaid(1, old_bundle) == std::optional<bool>{false});
+    BOOST_REQUIRE_EQUAL(chain.scdb.GetSlot(1)->bundles.size(), 1U);
+    BOOST_CHECK(chain.scdb.GetSlot(1)->bundles[0].hash == other);
+    BOOST_CHECK_EQUAL(chain.scdb.GetSlot(1)->bundles[0].score, 0U);
+    BOOST_CHECK(chain.scdb.GetLastVotes().empty());
+
+    // An abstention among the last votes (a state read back from disk can hold one) changes nothing.
+    Vote abstain;
+    abstain.type = Vote::Type::ABSTAIN;
+    std::map<SidechainId, Vote> last_votes{{1, abstain}};
+    DataStream stream{};
+    stream << chain.scdb.GetBlockHash() << chain.scdb.GetSlots() << chain.scdb.GetProposals()
+           << std::map<std::pair<SidechainId, uint256>, ClosedBundle>{} << last_votes;
+    SidechainDB read;
+    stream >> read;
+    BOOST_REQUIRE(read.GetLastVotes() == last_votes);
+    chain.scdb = read;
+    BOOST_REQUIRE(chain.Connect({repeat}));
+    BOOST_REQUIRE_EQUAL(chain.scdb.GetSlot(1)->bundles.size(), 1U);
+    BOOST_CHECK_EQUAL(chain.scdb.GetSlot(1)->bundles[0].score, 0U);
+    BOOST_CHECK(chain.scdb.GetLastVotes().empty());
+
+    // A vote of an unknown type reads as an abstention.
+    DataStream vote_stream{};
+    vote_stream << uint8_t{7} << uint256{1};
+    Vote unknown;
+    unknown.type = Vote::Type::UPVOTE;
+    vote_stream >> unknown;
+    BOOST_CHECK(unknown.type == Vote::Type::ABSTAIN);
+}
+
+BOOST_AUTO_TEST_CASE(vote_script_forms)
+{
+    const auto parse{[](const std::vector<unsigned char>& payload) {
+        std::vector<unsigned char> data(std::begin(VOTE_TAG), std::end(VOTE_TAG));
+        data.insert(data.end(), payload.begin(), payload.end());
+        return ParseVoteScript(CScript() << OP_RETURN << data);
+    }};
+    // An unknown form, a repeat or a leading-by-50 with more after it, two bytes cut short, no form at all.
+    BOOST_CHECK(!parse({0x04}));
+    BOOST_CHECK(!parse({0xff, 0x00}));
+    BOOST_CHECK(!parse({0x00, 0x00}));
+    BOOST_CHECK(!parse({0x03, 0x01}));
+    BOOST_CHECK(!parse({0x02, 0x01}));
+    BOOST_CHECK(!parse({}));
+    BOOST_CHECK(parse({0x00})->form == VoteForm::REPEAT_PREVIOUS);
+    BOOST_CHECK(parse({0x03})->form == VoteForm::LEADING_BY_50);
+    BOOST_CHECK(parse({0x01, 0xff, 0xfe, 0x02})->votes == (std::vector<uint16_t>{VOTE_ABSTAIN, VOTE_DOWNVOTE, 2}));
+    BOOST_CHECK(parse({0x02, 0x00, 0x01})->votes == std::vector<uint16_t>{0x100});
+    // Two bytes only where one does not do.
+    BOOST_CHECK(MakeVoteMessage({0, VOTE_ABSTAIN, VOTE_DOWNVOTE}).form == VoteForm::ONE_BYTE);
+    BOOST_CHECK(MakeVoteMessage({0, VOTE_MAX_ONE_BYTE_INDEX + 1}).form == VoteForm::TWO_BYTES);
+    // Messages in some other form: not the expected tag, more than one push, no push.
+    BOOST_CHECK(!ParseVoteScript(CScript() << OP_RETURN << std::vector<unsigned char>{0xd7, 0x7d, 0x17, 0x77, 0x00}));
+    BOOST_CHECK(!ParseVoteScript(CScript() << OP_RETURN << std::vector<unsigned char>(std::begin(VOTE_TAG), std::end(VOTE_TAG)) << OP_0));
+    BOOST_CHECK(!ParseVoteScript(CScript() << OP_RETURN << OP_NOP));
+    BOOST_CHECK(!ParseVoteScript(CScript() << OP_TRUE));
+}
+
+namespace {
+/** Write a file in the format of an older version of the miner state. */
+void WriteMinerState(const fs::path& path, uint32_t version, const std::vector<Sidechain>& proposals, const std::set<uint256>& old_acks,
+                     const std::set<std::pair<SidechainId, uint256>>& acks, const std::map<SidechainId, Vote>& votes, uint8_t default_vote,
+                     bool follow, const std::map<SidechainId, uint256>& latest, const std::vector<std::pair<SidechainId, CMutableTransaction>>& bundles)
+{
+    AutoFile file{fsbridge::fopen(path, "wb")};
+    BOOST_REQUIRE(!file.IsNull());
+    file << version << proposals;
+    if (version == 3) {
+        file << old_acks << votes << default_vote << follow;
+    } else {
+        file << acks << votes << default_vote << follow << latest;
+    }
+    file << uint64_t{bundles.size()};
+    for (const auto& [slot, tx] : bundles) file << slot << TX_NO_WITNESS(tx);
+    BOOST_REQUIRE_EQUAL(file.fclose(), 0);
+}
+} // namespace
+
+BOOST_AUTO_TEST_CASE(miner_state_formats)
+{
+    // The miner state of older versions is read; what cannot be read is reset, and said so.
+    const fs::path path{m_path_root / "miner_state.dat"};
+    const Sidechain a{MakeSidechain(1, "a")}, b{MakeSidechain(2, "b")};
+    const CMutableTransaction blind{TestChain::BlindBundle(COIN, 1000)};
+    const uint256 blind_hash{blind.GetHash().ToUint256()};
+    Vote down;
+    down.type = Vote::Type::DOWNVOTE;
+    {
+        // Version 3: acks by proposal hash alone, which are dropped; the node's own proposals are acked again, by slot.
+        WriteMinerState(path, 3, {a, b}, {uint256{0xac}}, {}, {{2, down}}, static_cast<uint8_t>(Vote::Type::ABSTAIN), true, {}, {{1, blind}});
+        MinerState miner;
+        {
+            ASSERT_DEBUG_LOG("Acks of sidechain proposals are now by slot: 1 acks were dropped");
+            BOOST_CHECK(miner.Load(path));
+        }
+        BOOST_CHECK_EQUAL(miner.GetProposals().size(), 2U);
+        BOOST_CHECK(miner.IsAcked(1, a.GetHash()));
+        BOOST_CHECK(miner.IsAcked(2, b.GetHash()));
+        BOOST_CHECK(!miner.IsAcked(1, uint256{0xac}));
+        BOOST_CHECK(miner.GetDefaultVote() == Vote::Type::ABSTAIN);
+        BOOST_CHECK(miner.GetFollow());
+        BOOST_CHECK(miner.ResolveVote(2, {}).type == Vote::Type::DOWNVOTE);
+        BOOST_CHECK(miner.GetBundle(1, blind_hash));
+        // (Version 3 knew of no vouching.)
+        BOOST_CHECK(!miner.Vouched(1));
+    }
+    {
+        // Version 3 without acks says nothing; version 4: the acks and the vouched bundle as they were.
+        WriteMinerState(path, 3, {a}, {}, {}, {}, static_cast<uint8_t>(Vote::Type::UPVOTE), false, {}, {});
+        MinerState miner;
+        {
+            DebugLogHelper unexpected{"Acks of sidechain proposals are now by slot", [](const std::string* line) {
+                BOOST_CHECK(!line);
+                return false;
+            }};
+            BOOST_CHECK(miner.Load(path));
+        }
+        BOOST_CHECK(miner.IsAcked(1, a.GetHash()));
+
+        WriteMinerState(path, 4, {a}, {}, {{2, b.GetHash()}}, {}, /*default_vote=*/9, false, {{1, blind_hash}}, {{1, blind}});
+        MinerState v4;
+        BOOST_CHECK(v4.Load(path));
+        BOOST_CHECK(v4.IsAcked(2, b.GetHash()));
+        BOOST_CHECK(!v4.IsAcked(1, a.GetHash()));
+        BOOST_CHECK(v4.Vouched(1) == blind_hash);
+        // An unknown default vote is to abstain.
+        BOOST_CHECK(v4.GetDefaultVote() == Vote::Type::ABSTAIN);
+        // Saved again, it is in the current format, which reads back the same.
+        v4.SetAck(1, a.GetHash(), true);
+        v4.SetAck(2, b.GetHash(), false);
+        MinerState current;
+        BOOST_CHECK(current.Load(path));
+        BOOST_CHECK(current.IsAcked(1, a.GetHash()));
+        BOOST_CHECK(!current.IsAcked(2, b.GetHash()));
+        BOOST_CHECK(current.Vouched(1) == blind_hash);
+        BOOST_CHECK(current.GetBundle(1, blind_hash));
+    }
+    for (const uint32_t version : {2U, 6U}) {
+        // An unknown version, and a file cut short: reset, with every setting at its default.
+        AutoFile file{fsbridge::fopen(path, "wb")};
+        file << version << std::vector<Sidechain>{a};
+        BOOST_REQUIRE_EQUAL(file.fclose(), 0);
+        MinerState miner;
+        miner.SetDefaultVote(Vote::Type::DOWNVOTE);
+        miner.SetFollow(true);
+        miner.AddProposal(b);
+        {
+            ASSERT_DEBUG_LOG("Failed to read the drivechain miner state");
+            BOOST_CHECK(!miner.Load(path));
+        }
+        BOOST_CHECK(miner.GetProposals().empty());
+        BOOST_CHECK(!miner.IsAcked(2, b.GetHash()));
+        BOOST_CHECK(miner.GetDefaultVote() == Vote::Type::ABSTAIN);
+        BOOST_CHECK(!miner.GetFollow());
+        BOOST_CHECK(miner.GetBundles().empty());
+    }
+    {
+        WriteMinerState(path, 4, {a}, {}, {}, {}, 0, false, {}, {{1, blind}});
+        // Cut in the middle of the bundles.
+        const auto size{fs::file_size(path)};
+        fs::resize_file(path, size - 5);
+        MinerState miner;
+        BOOST_CHECK(!miner.Load(path));
+        BOOST_CHECK(miner.GetBundles().empty());
+    }
+}
+
+BOOST_AUTO_TEST_CASE(miner_state_save_failures)
+{
+    // A miner state that cannot be saved is kept in memory, and the failure logged.
+    {
+        MinerState miner;
+        BOOST_CHECK(miner.Load(m_path_root / "no such directory" / "miner_state.dat"));
+        ASSERT_DEBUG_LOG("Failed to open");
+        miner.AddProposal(MakeSidechain(1));
+        BOOST_CHECK_EQUAL(miner.GetProposals().size(), 1U);
+    }
+    {
+        // The file is a directory: it cannot be read (and is reset), nor replaced.
+        const fs::path dir{m_path_root / "miner_state_dir"};
+        fs::create_directories(dir);
+        MinerState miner;
+        BOOST_CHECK(!miner.Load(dir));
+        ASSERT_DEBUG_LOG("Failed to save the drivechain miner state");
+        miner.AddProposal(MakeSidechain(1));
+        BOOST_CHECK_EQUAL(miner.GetProposals().size(), 1U);
+        BOOST_CHECK(fs::is_directory(dir));
+    }
+    {
+        // Without a file, nothing is saved, and nothing logged.
+        MinerState miner;
+        miner.AddProposal(MakeSidechain(1));
+        BOOST_CHECK(miner.RemoveProposal(MakeSidechain(1).GetHash()));
+        BOOST_CHECK(!miner.RemoveProposal(MakeSidechain(1).GetHash()));
+        miner.SetAck(1, uint256{1}, true);
+        miner.ClearAcks(uint256{1});
+        BOOST_CHECK(!miner.IsAcked(1, uint256{1}));
+        miner.ClearVote(1);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(database_wipe_in_batches)
+{
+    // A database too large for one batch is wiped in several, and nothing is left.
+    Database db{DBParams{.path = m_path_root / "drivechain_wipe", .cache_bytes = 1 << 20, .memory_only = true}, ParamsFingerprint(TestParams())};
+    const SidechainDB empty;
+    BlockUndo undo;
+    // Two records per block (the undo data and the events), each with a 33 byte key: more than a
+    // megabyte of keys to erase.
+    std::vector<uint256> hashes;
+    for (uint32_t i{0}; i < 20'000; ++i) {
+        uint256 hash;
+        WriteLE32(hash.begin(), i + 1);
+        db.WriteBlock(hash, static_cast<int>(i), undo, {}, empty);
+        hashes.push_back(hash);
+    }
+    BOOST_CHECK_EQUAL(db.ListUndoBlocks().size(), hashes.size());
+    db.Wipe();
+    BOOST_CHECK(db.ListUndoBlocks().empty());
+    BlockEvents events;
+    BOOST_CHECK(!db.ReadBlockEvents(hashes.front(), events));
+    BOOST_CHECK(!db.ReadBlockEvents(hashes.back(), events));
+    // Not even the format marker.
+    BOOST_CHECK(db.CheckFormat() == Database::Format::OTHER_VERSION);
+    BOOST_CHECK(!db.EraseBlockDeposits(hashes.front()));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
