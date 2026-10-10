@@ -166,6 +166,15 @@ class SidechainRecordTest(BitcoinTestFramework):
         main.no_proposed = False
         node.syncmainchain()
 
+        self.log.info("A deposit of more coins than can exist is no amount: the record does not take it (no block can have it to pay)")
+        with main.lock:
+            main.add_block(deposits=[self.deposit(21000001)])
+        self.sync_error("the mainchain node sent something that is not an amount (Amount out of range)")
+        assert_equal(node.getmainchaininfo()["height"], main.height() - 1)
+        with main.lock:
+            del main.blocks[-1]
+        node.syncmainchain()
+
         self.log.info("A mainchain without the sidechain in its slot: the node waits")
         with main.lock:
             main.sidechain = None
