@@ -295,6 +295,37 @@ BOOST_AUTO_TEST_CASE(connect_block_needs_the_matching_sidechain_database)
     }
 }
 
+BOOST_AUTO_TEST_CASE(disconnect_block_needs_the_matching_sidechain_database)
+{
+    // A block is taken back from the sidechain database of that block only: from the database of
+    // another block it is refused, and the database is left alone.
+    ActivateSidechain(0);
+    CreateAndProcessBlock({FirstDeposit(0, COIN, 1)}, coinbase_script);
+    LOCK(::cs_main);
+    Chainstate& chainstate{ActiveChainstate()};
+    const CBlockIndex* tip{chainstate.m_chain.Tip()};
+    CBlock block;
+    BOOST_REQUIRE(m_node.chainman->m_blockman.ReadBlock(block, *tip));
+
+    SidechainDB other{chainstate.m_scdb};
+    other.SetBlockHash(tip->pprev->GetBlockHash());
+    const SidechainDB before{other};
+    {
+        CCoinsViewCache view{&chainstate.CoinsTip()};
+        ASSERT_DEBUG_LOG("DisconnectBlock(): the sidechain database does not belong to the block");
+        BOOST_CHECK(chainstate.DisconnectBlock(block, tip, view, &other) == DISCONNECT_FAILED);
+    }
+    BOOST_CHECK(other == before);
+
+    // With the database of the block, the block is taken back, deposit and all.
+    SidechainDB own{chainstate.m_scdb};
+    CCoinsViewCache view{&chainstate.CoinsTip()};
+    BOOST_CHECK(chainstate.DisconnectBlock(block, tip, view, &own) == DISCONNECT_OK);
+    BOOST_CHECK(own.GetBlockHash() == tip->pprev->GetBlockHash());
+    BOOST_CHECK(!own.GetSlot(0)->has_ctip);
+    BOOST_CHECK(chainstate.m_scdb.GetSlot(0)->has_ctip);
+}
+
 BOOST_AUTO_TEST_CASE(loading_the_sidechain_database)
 {
     // At startup the snapshot of the sidechain database is brought to the chain tip: rewound by the
@@ -337,6 +368,23 @@ BOOST_AUTO_TEST_CASE(loading_the_sidechain_database)
         BOOST_CHECK(load(at_left));
     }
     BOOST_CHECK(chainstate.m_scdb == expected);
+
+    // A block it is derived from that is not there: the node cannot start, and is told how to recover.
+    // (A block that is there but cannot be read: drivechain_startup_tests.)
+    {
+        CBlockIndex* first{chainstate.m_chain[1]};
+        first->nStatus &= ~BLOCK_HAVE_DATA;
+        {
+            ASSERT_DEBUG_LOG("Deriving the sidechain database from the blocks");
+            BOOST_CHECK(!load(at_left));
+        }
+        first->nStatus |= BLOCK_HAVE_DATA;
+        BOOST_CHECK_EQUAL(error.original, "The sidechain state of this node is as of block 0, and the blocks it has to be brought forward with "
+                                          "are pruned (block 1 is missing). Restart with -reindex to download them again.");
+        BOOST_CHECK(!m_interrupt);
+        BOOST_CHECK(chainstate.m_scdb.GetBlockHash().IsNull());
+        error = {};
+    }
 
     // A snapshot of no block of the chain: derived from the blocks; a shutdown interrupts that.
     SidechainDB unknown;
@@ -679,6 +727,23 @@ BOOST_AUTO_TEST_CASE(deep_chain_without_old_undo_data)
         BOOST_CHECK(chainstate.m_chain.Tip() == deep);
         BOOST_CHECK(chainstate.m_scdb == at_deep);
 
+        // A block it is derived from that cannot be read: the block is not taken back, and nothing changes.
+        {
+            CBlockIndex* first{chainstate.m_chain[1]};
+            first->nStatus &= ~BLOCK_HAVE_DATA;
+            {
+                ASSERT_DEBUG_LOG("DisconnectBlock(): failure deriving the sidechain database: Failed to read block " + first->GetBlockHash().ToString());
+                BlockValidationState state;
+                BOOST_CHECK(!chainstate.DisconnectTip(state, nullptr));
+                BOOST_CHECK(!state.IsError());
+            }
+            first->nStatus |= BLOCK_HAVE_DATA;
+            BOOST_CHECK(!m_interrupt);
+            BOOST_CHECK(chainstate.m_chain.Tip() == deep);
+            BOOST_CHECK(chainstate.m_scdb == at_deep);
+            BOOST_CHECK(!DrivechainDB().HasBlockUndo(deep->pprev->GetBlockHash()));
+        }
+
         {
             ASSERT_DEBUG_LOG(strprintf("No drivechain undo data for block %s at height %d: deriving the sidechain database from the blocks", deep->GetBlockHash().ToString(), deep->nHeight));
             BlockValidationState state;
@@ -796,6 +861,19 @@ BOOST_AUTO_TEST_CASE(cpu_miner)
     BOOST_CHECK(WaitFor([&] { return finder.GetStats().blocks_found >= 1; }));
     finder.Stop();
     BOOST_CHECK_GT(WITH_LOCK(::cs_main, return ActiveChainstate().m_chain.Height()), height + 1);
+
+    // A block found that validation refuses is counted apart. Here the clock stands still, so the
+    // miner finds the block it found last once again after that block was marked invalid.
+    const uint64_t found{finder.GetStats().blocks_found};
+    BOOST_CHECK_EQUAL(finder.GetStats().blocks_rejected, 0U);
+    CBlockIndex* last{WITH_LOCK(::cs_main, return ActiveChainstate().m_chain.Tip())};
+    BlockValidationState state;
+    BOOST_REQUIRE(ActiveChainstate().InvalidateBlock(state, last));
+    BOOST_REQUIRE(finder.Start(1, coinbase_script, error));
+    BOOST_CHECK(WaitFor([&] { return finder.GetStats().blocks_rejected >= 1; }));
+    finder.Stop();
+    BOOST_CHECK_EQUAL(finder.GetStats().blocks_found, found);
+    BOOST_CHECK(WITH_LOCK(::cs_main, return ActiveChainstate().m_chain.Tip()) == last->pprev);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
