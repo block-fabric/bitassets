@@ -64,12 +64,6 @@ bitassets::AssetRecord Registered(const bitassets::State& state, const AssetId& 
     return *record;
 }
 
-/** An asset that pools and auctions trade: CHN, or a registered asset. */
-void CheckTradable(const bitassets::State& state, const AssetId& asset)
-{
-    if (!asset.IsNull()) Registered(state, asset);
-}
-
 /** Where a token is: the output that carries it, and its address. */
 UniValue OutputToJSON(Chainstate& chainstate, const COutPoint& outpoint) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
 {
