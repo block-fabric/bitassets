@@ -392,6 +392,47 @@ BOOST_AUTO_TEST_CASE(assembly_leaves_out_refund_of_paid_withdrawal)
     BOOST_CHECK_EQUAL(again.m_state.GetRejectReason(), "bad-sc-refund-unknown");
 }
 
+BOOST_AUTO_TEST_CASE(assembly_keeps_what_does_not_depend_on_a_dropped_transaction)
+{
+    // Leaving a transaction out (and what spends it) leaves the others in, with their fees in the
+    // coinbase: a refund the mainchain made unknown goes, an unrelated payment stays.
+    COutPoint coin, other_coin;
+    const CTxOut spent{Fund(10 * COIN, coin)};
+    const CTxOut other_spent{Fund(5 * COIN, other_coin)};
+    const CMutableTransaction withdrawal{Withdraw(coin, spent, 2 * COIN)};
+    BOOST_REQUIRE(Accept(withdrawal).m_result_type == MempoolAcceptResult::ResultType::VALID);
+    BOOST_REQUIRE(InBlock(Mine(), withdrawal));
+    const COutPoint outpoint{withdrawal.GetHash(), 0};
+    const CMutableTransaction refund{Refund(outpoint, withdrawal)};
+    const CMutableTransaction child{Child(refund)};
+    // A payment with a fee of its own, unlike the others' (so that the coinbase tells whose it took).
+    const CMutableTransaction payment{Spend(other_coin, other_spent, {CTxOut{other_spent.nValue - 3 * TX_FEE, script}})};
+    BOOST_REQUIRE(Accept(refund).m_result_type == MempoolAcceptResult::ResultType::VALID);
+    BOOST_REQUIRE(Accept(child).m_result_type == MempoolAcceptResult::ResultType::VALID);
+    BOOST_REQUIRE(Accept(payment).m_result_type == MempoolAcceptResult::ResultType::VALID);
+
+    Main([&](sidechain::MainBlock& b) {
+        sidechain::MainDeposit change;
+        change.destination = drivechain::WITHDRAWAL_RETURN_DEST;
+        change.bundle = uint256{0xb1};
+        change.payouts.emplace_back(2 * COIN - MAIN_FEE, script);
+        b.deposits.push_back(change);
+    });
+    const CBlock block{[&] {
+        ASSERT_DEBUG_LOG("which breaks the sidechain rules in this block (bad-sc-refund-unknown)");
+        return Mine();
+    }()};
+    BOOST_CHECK(!InBlock(block, refund));
+    BOOST_CHECK(!InBlock(block, child));
+    BOOST_CHECK(InBlock(block, payment));
+    BOOST_CHECK_EQUAL(block.vtx.size(), 2U);
+    // The fee of the payment alone.
+    BOOST_CHECK_EQUAL(block.vtx[0]->vout[0].nValue, 3 * TX_FEE);
+    BOOST_CHECK(!InMempool(payment));
+    BOOST_CHECK(!InMempool(refund));
+    BOOST_CHECK(!InMempool(child));
+}
+
 BOOST_AUTO_TEST_CASE(assembly_bundle_goes_before_overdue_refund)
 {
     // A bundle waits for refunds of its withdrawals in the mempool while they are recent. Once one has
