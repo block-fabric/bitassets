@@ -7,7 +7,7 @@
   import { walletDisplayName } from '../lib/wallet';
   import './ba/ba.css';
   import AssetBadge from './ba/AssetBadge.svelte';
-  import { filtersOf, ignoreName, loadHiding, setFilters, unignoreAsset, unignoreName } from './ba/hide.svelte';
+  import { DEFAULT_DEAD_AFTER, MAX_DEAD_AFTER, filtersOf, ignoreName, loadHiding, setFilters, unignoreAsset, unignoreName } from './ba/hide.svelte';
   import { labelOf, nameOf, startBitAssets } from './ba/store.svelte';
 
   let { tab }: { tab: string } = $props();
@@ -27,6 +27,11 @@
     if (!f.keywords.some((k) => k.toLowerCase() === w.toLowerCase())) setFilters({ keywords: [...f.keywords, w] });
     word = '';
   }
+  /** The blocks after which an asset is dead: a whole number, or empty for the node's volume window. */
+  function setDeadAfter(raw: string) {
+    const n = Number(raw.trim());
+    setFilters({ deadAfter: raw.trim() && Number.isInteger(n) && n >= 1 && n <= MAX_DEAD_AFTER ? n : 0 });
+  }
   function addName() {
     if (name.trim()) ignoreName(name);
     name = '';
@@ -40,7 +45,12 @@
     <p class="ba-help">What wallet <SafeText text={walletDisplayName(wallets.current)} /> hides of the assets: in Browse assets, Send, Trade, Auctions, My assets, the home, the transactions and the notices. Each list can show what it hides. The coins stay in the wallet; CHN is never hidden.</p>
 
     <h3>Filters</h3>
-    <label class="check"><input type="checkbox" checked={f.hideDead} onchange={(e) => setFilters({ hideDead: e.currentTarget.checked })} /> Hide dead assets (no supply, no pool, no auction)</label>
+    <label class="check"><input type="checkbox" checked={f.hideDead} onchange={(e) => setFilters({ hideDead: e.currentTarget.checked })} /> Hide dead assets (nothing done with them for a while: no move, trade, mint or burn)</label>
+    <label class="row dead-after">
+      <span>Dead after</span>
+      <input type="number" aria-label="Dead after this many blocks" min="1" max={MAX_DEAD_AFTER} step="1" placeholder={String(DEFAULT_DEAD_AFTER)} value={f.deadAfter > 0 ? f.deadAfter : ''} disabled={!f.hideDead} onchange={(e) => setDeadAfter(e.currentTarget.value)} />
+      <span>blocks without activity{f.deadAfter > 0 ? '' : ' (empty: about a day, the node\'s volume window)'}</span>
+    </label>
     <label class="check"><input type="checkbox" checked={f.hideBurned} onchange={(e) => setFilters({ hideBurned: e.currentTarget.checked })} /> Hide assets burned to nothing</label>
     <label class="check"><input type="checkbox" checked={f.hideNoPool} onchange={(e) => setFilters({ hideNoPool: e.currentTarget.checked })} /> Hide assets without a pool</label>
 
@@ -101,6 +111,14 @@
   .row {
     display: flex;
     gap: 0.5rem;
+  }
+  .dead-after {
+    align-items: center;
+    flex-wrap: wrap;
+    margin-left: 1.6rem;
+  }
+  .dead-after input {
+    width: 7rem;
   }
   .chips,
   .ignored {

@@ -12,7 +12,8 @@ export type AssetSort = 'relevance' | 'name' | 'newest' | 'oldest' | 'supply' | 
 
 /** The filters the node applies (its own words). */
 export interface SearchFilters {
-  exclude_dead?: boolean;
+  /** Leave out those not touched in the last this many blocks; true: the node's volume window (about a day). */
+  exclude_dead?: boolean | number;
   exclude_burned?: boolean;
   exclude_retired?: boolean;
   exclude_keywords?: string[];
@@ -92,6 +93,7 @@ const words = (f: SearchFilters) => (f.exclude_keywords ?? []).map((w) => w.toLo
 export function filterAssets(list: readonly Asset[], f: SearchFilters, pooled: (id: string) => boolean): Asset[] {
   const ws = words(f);
   return list.filter((a) => {
+    // The list methods tell no activity: those anyone may retire (no supply, no pool, no auction) stand for the dead.
     if (f.exclude_dead && a.releasable) return false;
     if (f.exclude_burned && approx(a.supply) === 0 && approx(a.burned) > 0) return false;
     if (f.has_pool && !pooled(a.asset)) return false;
@@ -123,6 +125,21 @@ export async function searchAssets(q: SearchQuery, pooled: (id: string) => boole
     const have = new Set(found.map((a) => a.asset));
     const local = t ? ba.assets.filter((a) => !have.has(a.asset) && ((a.data?.info ?? '').toLowerCase().includes(t) || a.seq === text || a.asset.startsWith(t.replace(/^0x/, '')))) : [];
     return sortAssets(filterAssets([...found, ...local], q.filters, pooled), q.sort);
+  });
+  noteKnownAssets(page.items);
+  return page;
+}
+
+/**
+ * A page of the assets the wallet holds or controls matching what is typed, the filters and the sort: the wallet's
+ * searchmyassets (the same arguments as searchassets; `mine` is not a filter of searchassets). A node without it: the
+ * wallet's own list (`own`), filtered and sorted here, the first page only.
+ */
+export async function searchMyAssets(q: SearchQuery, wallet: string, own: () => Asset[], pooled: (id: string) => boolean = () => true): Promise<SearchPage<Asset>> {
+  const page = await search<Asset>('searchmyassets', (p) => rpc.raw<unknown>('searchmyassets', p, { wallet }), ['assets', 'results', 'items'], q, async () => {
+    const t = q.query.trim().toLowerCase();
+    const list = own().filter((a) => !t || a.label.toLowerCase().includes(t) || a.seq === q.query.trim());
+    return sortAssets(filterAssets(list, q.filters, pooled), q.sort);
   });
   noteKnownAssets(page.items);
   return page;

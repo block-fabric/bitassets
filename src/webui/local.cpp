@@ -225,6 +225,8 @@ std::map<std::string, Bridge::Thread> RpcMethods()
         {"searchauctions", Bridge::Thread::WORKER},
         // What the wallet holds and did: they need the keys too (a reservation is told by a signature of the wallet).
         {"listmyassets", Bridge::Thread::WORKER},
+        // Browse assets' "Held or controlled": searchassets among the wallet's assets (the same arguments; no key).
+        {"searchmyassets", Bridge::Thread::WORKER},
         {"listassetactivity", Bridge::Thread::WORKER},
         // The asset moves of the wallet with the other side: it reads only (no key).
         {"listassettransactions", Bridge::Thread::WORKER},

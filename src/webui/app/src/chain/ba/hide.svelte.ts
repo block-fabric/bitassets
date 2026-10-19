@@ -1,5 +1,5 @@
 // The assets a wallet hides (user feedback 2026-10-19, item 19): assets it ignores (spam sent to it, many assets of one
-// name), names and words it ignores, and filters (dead assets, assets burned to nothing, assets without a pool). Per
+// name), names and words it ignores, and filters (dead assets: no activity for a while, assets burned to nothing, assets without a pool). Per
 // wallet, kept with the app's preferences (per network, as asset ids are), so that they survive a restart. Hiding is
 // display-only: the coins stay in the wallet, and an asset comes back when unignored. CHN is never hidden.
 //
@@ -15,15 +15,17 @@ export interface AssetFilters {
   names: string[];
   /** Words ignored (any case, anywhere in the name). */
   keywords: string[];
-  /** Hide dead assets (no supply, no pool, no auction: those anyone may retire). */
+  /** Hide dead assets: nothing done with them (no move, trade, mint or burn) in the last `deadAfter` blocks. */
   hideDead: boolean;
+  /** Dead after this many blocks without activity; 0: the node's volume window (about a day). */
+  deadAfter: number;
   /** Hide assets burned to nothing (no supply left). */
   hideBurned: boolean;
   /** Hide assets without a pool (no market). */
   hideNoPool: boolean;
 }
 
-export const NO_FILTERS: AssetFilters = { ignored: [], names: [], keywords: [], hideDead: false, hideBurned: false, hideNoPool: false };
+export const NO_FILTERS: AssetFilters = { ignored: [], names: [], keywords: [], hideDead: false, deadAfter: 0, hideBurned: false, hideNoPool: false };
 
 export const hiding = $state({ byWallet: {} as Record<string, AssetFilters>, loaded: false, version: 0 });
 
@@ -31,8 +33,10 @@ export const hiding = $state({ byWallet: {} as Record<string, AssetFilters>, loa
 export interface AssetFacts {
   id: string;
   label?: string;
-  /** Anyone may retire it: no supply, no pool, no auction (listassets "releasable"). */
-  releasable?: boolean;
+  /** The height of the last block that touched it (searchassets "last_activity"), when known. */
+  lastActivity?: number;
+  /** The height of the tip, when known. */
+  tip?: number;
   supply?: number | string;
   burned?: number | string;
   /** It has a pool. */
@@ -40,6 +44,20 @@ export interface AssetFacts {
 }
 
 const isChn = (id: string) => /^0+$/.test(id);
+
+/** The node's volume window (Consensus asset_volume_window: 1440 blocks, about a day): dead by default after it. */
+export const DEFAULT_DEAD_AFTER = 1440;
+export const MAX_DEAD_AFTER = 10_000_000;
+
+/**
+ * Whether an asset is dead for these filters: no activity in the last `deadAfter` blocks (the node's searchassets
+ * exclude_dead: touched at a height below tip - blocks + 1). Unknown (no activity or tip told) is not dead here: the
+ * node's search leaves those out on its side.
+ */
+export function assetDead(a: Pick<AssetFacts, 'lastActivity' | 'tip'>, f: Pick<AssetFilters, 'deadAfter'>): boolean {
+  if (a.lastActivity === undefined || a.tip === undefined) return false;
+  return a.tip - a.lastActivity >= (f.deadAfter > 0 ? f.deadAfter : DEFAULT_DEAD_AFTER);
+}
 
 function clean(raw: unknown): AssetFilters {
   const o = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
@@ -49,6 +67,7 @@ function clean(raw: unknown): AssetFilters {
     names: strings(o.names, 500),
     keywords: strings(o.keywords, 500),
     hideDead: o.hideDead === true,
+    deadAfter: typeof o.deadAfter === 'number' && Number.isInteger(o.deadAfter) && o.deadAfter >= 1 && o.deadAfter <= MAX_DEAD_AFTER ? o.deadAfter : 0,
     hideBurned: o.hideBurned === true,
     hideNoPool: o.hideNoPool === true,
   };
@@ -127,7 +146,7 @@ export function assetHidden(a: AssetFacts, wallet: string | null = wallets.curre
   if (isChn(a.id)) return false;
   if (assetIgnored(a.id, a.label ?? '', wallet)) return true;
   const f = filtersOf(wallet);
-  if (f.hideDead && a.releasable) return true;
+  if (f.hideDead && assetDead(a, f)) return true;
   if (f.hideBurned && a.supply !== undefined && Number(a.supply) === 0 && Number(a.burned ?? 0) > 0) return true;
   if (f.hideNoPool && a.pool === false) return true;
   return false;
@@ -137,7 +156,8 @@ export function assetHidden(a: AssetFacts, wallet: string | null = wallets.curre
 export function searchFiltersOf(wallet: string | null = wallets.current): Record<string, unknown> {
   const f = filtersOf(wallet);
   const out: Record<string, unknown> = {};
-  if (f.hideDead) out.exclude_dead = true;
+  // exclude_dead: a number of blocks, or true for the node's volume window (about a day).
+  if (f.hideDead) out.exclude_dead = f.deadAfter > 0 ? f.deadAfter : true;
   if (f.hideBurned) out.exclude_burned = true;
   if (f.hideNoPool) out.has_pool = true;
   const words = [...f.keywords, ...f.names];

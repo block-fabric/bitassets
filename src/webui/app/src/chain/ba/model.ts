@@ -85,6 +85,8 @@ export interface Asset {
   registration: string;
   data?: AssetData;
   releasable: boolean;
+  /** The height of the last block that touched it (searchassets; absent from the list methods). */
+  last_activity?: number;
   release_fee?: Amount;
   control?: { txid: string; vout: number; address?: string };
   /** Its logo now (getassetlogo has its bytes; the pages ask the host for it: logos.svelte.ts). */

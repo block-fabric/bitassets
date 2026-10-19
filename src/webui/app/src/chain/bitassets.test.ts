@@ -177,12 +177,17 @@ async function fakeNode(r: BridgeRequest): Promise<unknown> {
       const all = [...assets, ...hidden].filter((a) => p[2] === undefined || a.label.toLowerCase().includes(String(p[2]).toLowerCase()));
       return p[2] === undefined ? assets.slice(Number(p[1] ?? 0), Number(p[1] ?? 0) + Number(p[0] ?? 100)) : all.slice(0, Number(p[0]));
     }
+    case 'searchmyassets':
     case 'searchassets': {
       // [query, filters, sort, cursor, limit], as the node of the other work will take them; an older node has none.
+      // searchmyassets: the wallet's (the same arguments); `mine` is no filter of searchassets.
       if (!searchSupported) fail('Method not found', -32601);
       const [q, f, sort, cursor, limit] = p as [string, Record<string, unknown>, string, string | null, number];
-      let list = [...assets, ...hidden].filter((a) => !q || a.label.toLowerCase().includes(q.toLowerCase()) || a.seq === q);
-      if (f.exclude_dead) list = list.filter((a) => !a.releasable);
+      if (f.mine !== undefined) fail('mine is the wallet\'s: searchmyassets (a wallet command, with the same arguments)');
+      const held = new Set(mine.assets.map((h) => h.asset));
+      let list = [...assets, ...hidden].filter((a) => (r.method !== 'searchmyassets' || held.has(a.asset)) && (!q || a.label.toLowerCase().includes(q.toLowerCase()) || a.seq === q));
+      // exclude_dead: not touched in the last this many blocks (true: the volume window, 1440); the tip is 20.
+      if (f.exclude_dead) list = list.filter((a) => 20 - (a.last_activity ?? 20) < (f.exclude_dead === true ? 1440 : Number(f.exclude_dead)));
       const words = ((f.exclude_keywords as string[] | undefined) ?? []).map((w) => w.toLowerCase());
       list = list.filter((a) => !words.some((w) => a.label.toLowerCase().includes(w)));
       list.sort(sort === 'name' ? (x, y) => x.label.localeCompare(y.label) : sort === 'oldest' ? (x, y) => x.registered - y.registered : (x, y) => y.registered - x.registered);
@@ -884,6 +889,25 @@ describe.runIf(CHAIN.name === 'BitAssets')('the pages of BitAssets', () => {
     expect(within(screen.getByRole('list', { name: 'Assets' })).getByText('ZINC')).toBeTruthy();
   }, 30000);
 
+  it('Browse assets, Held or controlled: the wallet\'s searchmyassets with the same arguments, never mine to searchassets', async () => {
+    searchSupported = true;
+    resetSearchSupport();
+    render(Assets);
+    await loaded();
+    const tiles = () => within(screen.getByRole('list', { name: 'Assets' })).queryAllByRole('listitem');
+    await waitFor(() => expect(called('searchassets').length).toBeGreaterThan(0));
+    calls.length = 0;
+    await fireEvent.click(screen.getByRole('button', { name: /Held or controlled/ }));
+    await waitFor(() => expect(called('searchmyassets').length).toBe(1));
+    const c = called('searchmyassets')[0];
+    expect(c.wallet).toBe('w');
+    expect((c.params as unknown[]).length).toBe(5);
+    expect(called('searchassets').length).toBe(0);
+    const held = new Set(mine.assets.map((h) => h.asset));
+    await waitFor(() => expect(tiles().length).toBe(held.size));
+    expect(calls.every((x) => !JSON.stringify(x.params ?? []).includes('"mine"'))).toBe(true);
+  });
+
   it('My assets: older activity read on asking; tables are cards when narrow; no faint text under 4.5:1 (audit port-2 #13)', async () => {
     activityCount = 450;
     render(MyAssets);
@@ -1115,8 +1139,15 @@ describe('the assets a wallet hides (user feedback 2026-10-19, item 19)', () => 
     setFilters({ keywords: ['ebbl'] });
     expect(assetHidden({ id: PEBBLES, label: 'PEBBLES' })).toBe(true);
     setFilters({ keywords: [], hideDead: true });
-    expect(assetHidden({ id: PEBBLES, label: 'PEBBLES', releasable: true })).toBe(true);
+    // Dead: no activity in the node's volume window (1440 blocks) by default, or in the blocks the user set.
+    expect(assetHidden({ id: PEBBLES, label: 'PEBBLES', lastActivity: 100, tip: 1600 })).toBe(true);
+    expect(assetHidden({ id: PEBBLES, label: 'PEBBLES', lastActivity: 200, tip: 1600 })).toBe(false);
+    expect(assetHidden({ id: PEBBLES, label: 'PEBBLES' })).toBe(false);
     expect(searchFiltersOf()).toEqual({ exclude_dead: true });
+    setFilters({ deadAfter: 500 });
+    expect(assetHidden({ id: PEBBLES, label: 'PEBBLES', lastActivity: 1000, tip: 1600 })).toBe(true);
+    expect(searchFiltersOf()).toEqual({ exclude_dead: 500 });
+    setFilters({ deadAfter: 0 });
     // Read back after a restart.
     resetHiding();
     await loadHiding();
@@ -1225,8 +1256,15 @@ describe('the assets a wallet hides (user feedback 2026-10-19, item 19)', () => 
     render(LocalSettings, { props: { tab: 'asset-filters' } });
     await loaded();
     await waitFor(() => expect(screen.getByRole('list', { name: 'Ignored assets' }).textContent).toContain('SILVER'));
+    expect((screen.getByRole('spinbutton', { name: 'Dead after this many blocks' }) as HTMLInputElement).disabled).toBe(true);
     await fireEvent.click(screen.getByRole('checkbox', { name: /Hide dead assets/ }));
     expect(filtersOf().hideDead).toBe(true);
+    expect(searchFiltersOf()).toEqual({ exclude_dead: true });
+    await fireEvent.change(screen.getByRole('spinbutton', { name: 'Dead after this many blocks' }), { target: { value: '720' } });
+    expect(filtersOf().deadAfter).toBe(720);
+    expect(searchFiltersOf()).toEqual({ exclude_dead: 720 });
+    await fireEvent.change(screen.getByRole('spinbutton', { name: 'Dead after this many blocks' }), { target: { value: '' } });
+    expect(searchFiltersOf()).toEqual({ exclude_dead: true });
     await fireEvent.input(screen.getByRole('textbox', { name: 'A word to ignore' }), { target: { value: 'airdrop' } });
     await fireEvent.click(screen.getAllByRole('button', { name: 'Add' })[0]);
     expect(filtersOf().keywords).toEqual(['airdrop']);

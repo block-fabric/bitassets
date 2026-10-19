@@ -6,7 +6,7 @@ import { assetById, ba, hasPool } from './store.svelte';
 export function hiddenAsset(id: string, label?: string): boolean {
   void hiding.version;
   const a = assetById(id);
-  return assetHidden({ id, label: label ?? a?.label, releasable: a?.releasable, supply: a?.supply, burned: a?.burned, pool: ba.pools.length || ba.loaded ? hasPool(id) : undefined });
+  return assetHidden({ id, label: label ?? a?.label, lastActivity: a?.last_activity, tip: ba.info ? ba.info.height - 1 : undefined, supply: a?.supply, burned: a?.burned, pool: ba.pools.length || ba.loaded ? hasPool(id) : undefined });
 }
 
 /** Whether the wallet shown ignores the asset (the filters aside). */

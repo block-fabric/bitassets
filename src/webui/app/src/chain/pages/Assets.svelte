@@ -16,7 +16,7 @@
   import { untrack } from 'svelte';
   import { assetArg, formatAmount, formatPrice, isSeq, type Asset } from '../ba/model';
   import { assetById, ba, chnPrice, hasPool, noteKnownAssets, startBitAssets } from '../ba/store.svelte';
-  import { PAGE, searchAssets, sortAssets, type AssetSort } from '../ba/search';
+  import { PAGE, searchAssets, searchMyAssets, type AssetSort } from '../ba/search';
   import { hiding, searchFiltersOf } from '../ba/hide.svelte';
   import { hiddenAsset } from '../ba/visible.svelte';
   import HiddenToggle from '../ba/HiddenToggle.svelte';
@@ -55,9 +55,8 @@
   const mineIds = $derived(new Set((ba.mine?.assets ?? []).map((a) => a.asset)));
   const controlled = $derived(new Set((ba.mine?.assets ?? []).filter((a) => a.control).map((a) => a.asset)));
 
-  /** What the filter keeps that the node's search does not tell (held, mintable, fixed, dead), and what the wallet ignores. */
+  /** What the filter keeps that the node's search does not tell (mintable, fixed, retirable), and what the wallet ignores. */
   function keep(a: Asset): boolean {
-    if (filter === 'mine' && !mineIds.has(a.asset)) return false;
     if (filter === 'mintable' && a.fixed) return false;
     if (filter === 'fixed' && !a.fixed) return false;
     if (filter === 'dead' && !a.releasable) return false;
@@ -81,18 +80,16 @@
     loading = true;
     searchError = '';
     try {
-      // The assets of the wallet: its own list, no search.
-      if (filter === 'mine') {
-        const own = (ba.mine?.assets ?? []).map((h) => assetById(h.asset) ?? ({ asset: h.asset, label: h.label, seq: '', decimals: h.decimals, supply: h.supply, minted: h.supply, burned: 0, fixed: h.fixed, registered: 0, registration: '', releasable: false } as Asset));
-        const q = query.trim().toLowerCase();
-        results = sortAssets(own.filter((a) => !q || a.label.toLowerCase().includes(q) || a.seq === q), SERVER_SORT[sort]);
+      // The assets of the wallet: the wallet's searchmyassets (its own list on a node without it).
+      const wallet = wallets.current;
+      if (filter === 'mine' && wallet === null) {
+        results = [];
         return;
       }
+      const own = () => (ba.mine?.assets ?? []).map((h) => assetById(h.asset) ?? ({ asset: h.asset, label: h.label, seq: '', decimals: h.decimals, supply: h.supply, minted: h.supply, burned: 0, fixed: h.fixed, registered: 0, registration: '', releasable: false } as Asset));
       for (let i = 0; i < 5; i++) {
-        const page = await searchAssets(
-          { query: query.trim(), filters: { ...(showHidden ? {} : searchFiltersOf()), ...(filter === 'market' ? { has_pool: true } : {}) }, sort: SERVER_SORT[sort], cursor, limit: PAGE },
-          hasPool,
-        );
+        const q = { query: query.trim(), filters: { ...(showHidden ? {} : searchFiltersOf()), ...(filter === 'market' ? { has_pool: true } : {}) }, sort: SERVER_SORT[sort], cursor, limit: PAGE };
+        const page = filter === 'mine' && wallet !== null ? await searchMyAssets(q, wallet, own, hasPool) : await searchAssets(q, hasPool);
         if (mine !== run) return;
         const have = new Set(results.map((a) => a.asset));
         results = [...results, ...page.items.filter((a) => !have.has(a.asset))];
