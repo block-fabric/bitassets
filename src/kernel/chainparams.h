@@ -142,6 +142,8 @@ public:
         std::unordered_map<Consensus::BuriedDeployment, int> activation_heights{};
         //! BitAssets: Consensus::SidechainParams::logo_height (-testactivationheight=logo@<height>; regtest only).
         std::optional<int> logo_height{};
+        //! BitAssets: Consensus::SidechainParams::ticker_height (-testactivationheight=ticker@<height>; regtest only).
+        std::optional<int> ticker_height{};
     };
 
     /**

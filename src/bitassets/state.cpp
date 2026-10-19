@@ -6,6 +6,7 @@
 
 #include <bitassets/state.h>
 
+#include <bitassets/displayname_table.h>
 #include <bitassets/logo.h>
 
 #include <arith_uint256.h>
@@ -30,10 +31,15 @@ void WriteOperation(DataStream& s, const T& op)
     s << T::KIND << op;
 }
 
-/** A registration with a logo is a marker of its own kind: the registration, then the logo. */
+/**
+ * A registration with a logo is a marker of its own kind: the registration, then the logo; one with a
+ * display name another: the registration, the logo (empty if none), then the display name.
+ */
 void WriteOperation(DataStream& s, const Register& op)
 {
-    if (op.logo.empty()) {
+    if (!op.display_name.empty()) {
+        s << REGISTER_WITH_DISPLAY_NAME_KIND << op << op.logo << op.display_name;
+    } else if (op.logo.empty()) {
         s << Register::KIND << op;
     } else {
         s << REGISTER_WITH_LOGO_KIND << op << op.logo;
@@ -212,6 +218,14 @@ std::optional<Marker> ParseMarkerScript(const CScript& script)
         case Collect::KIND: ReadOperation<Collect>(s, marker.operation); break;
         case ReleaseAsset::KIND: ReadOperation<ReleaseAsset>(s, marker.operation); break;
         case SetLogo::KIND: ReadOperation<SetLogo>(s, marker.operation); break;
+        case SetDisplayName::KIND: ReadOperation<SetDisplayName>(s, marker.operation); break;
+        case REGISTER_WITH_DISPLAY_NAME_KIND: {
+            Register reg;
+            s >> reg >> reg.logo >> reg.display_name;
+            // One without a display name is written as another kind (the check below).
+            marker.operation = std::move(reg);
+            break;
+        }
         case REGISTER_WITH_LOGO_KIND: {
             Register reg;
             s >> reg >> reg.logo;
@@ -278,6 +292,73 @@ bool IsAssetName(const std::string& name)
     if (name.empty() || name.size() > MAX_NAME_TEXT_SIZE || name.front() == ' ' || name.back() == ' ') return false;
     return std::all_of(name.begin(), name.end(), [](char c) { return c >= 0x20 && c <= 0x7E; });
 }
+
+bool IsTicker(const std::string& name)
+{
+    if (name.size() < MIN_TICKER_SIZE || name.size() > MAX_TICKER_SIZE) return false;
+    return std::all_of(name.begin(), name.end(), [](char c) { return (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'); });
+}
+
+namespace {
+/** The next code point of well-formed UTF-8 at `i` (moved past it); nullopt if not well formed there. */
+std::optional<uint32_t> NextCodePoint(const std::string& text, size_t& i)
+{
+    const auto byte{[&](size_t k) { return static_cast<uint8_t>(text[k]); }};
+    const uint8_t b0{byte(i)};
+    size_t len;
+    uint32_t cp;
+    if (b0 < 0x80) {
+        ++i;
+        return b0;
+    } else if (b0 >= 0xC2 && b0 <= 0xDF) {
+        len = 2;
+        cp = b0 & 0x1F;
+    } else if (b0 >= 0xE0 && b0 <= 0xEF) {
+        len = 3;
+        cp = b0 & 0x0F;
+    } else if (b0 >= 0xF0 && b0 <= 0xF4) {
+        len = 4;
+        cp = b0 & 0x07;
+    } else {
+        return std::nullopt;
+    }
+    if (i + len > text.size()) return std::nullopt;
+    for (size_t k{1}; k < len; ++k) {
+        const uint8_t b{byte(i + k)};
+        if ((b & 0xC0) != 0x80) return std::nullopt;
+        cp = (cp << 6) | (b & 0x3F);
+    }
+    // Shortest forms only, no surrogates, nothing past U+10FFFF.
+    if ((len == 3 && cp < 0x800) || (len == 4 && (cp < 0x10000 || cp > 0x10FFFF)) || (cp >= 0xD800 && cp <= 0xDFFF)) return std::nullopt;
+    i += len;
+    return cp;
+}
+
+bool DisplayNameCodePoint(uint32_t cp)
+{
+    const auto* begin{std::begin(detail::DISPLAY_NAME_RANGES)};
+    const auto* end{std::end(detail::DISPLAY_NAME_RANGES)};
+    // The first range that ends at or after it.
+    const auto* it{std::lower_bound(begin, end, cp, [](const uint32_t (&range)[2], uint32_t c) { return range[1] < c; })};
+    return it != end && (*it)[0] <= cp;
+}
+} // namespace
+
+std::optional<std::string> WhyNotDisplayName(const std::string& text)
+{
+    if (text.empty()) return "it is empty";
+    if (text.size() > MAX_DISPLAY_NAME_SIZE) return strprintf("it is longer than %u bytes of UTF-8", MAX_DISPLAY_NAME_SIZE);
+    if (text.front() == ' ' || text.back() == ' ') return "it starts or ends with a space";
+    for (size_t i{0}; i < text.size();) {
+        const size_t at{i};
+        const auto cp{NextCodePoint(text, i)};
+        if (!cp) return strprintf("it is not well-formed UTF-8 (at byte %u)", at);
+        if (!DisplayNameCodePoint(*cp)) return strprintf("it holds U+%04X, which a display name may not: a control or format character (such as a bidirectional override or a zero-width one), a space other than U+0020, a combining mark, a character NFC changes, or one not assigned in Unicode 15.0", *cp);
+    }
+    return std::nullopt;
+}
+
+bool IsDisplayName(const std::string& text) { return !WhyNotDisplayName(text).has_value(); }
 
 bool ReadsAsAnotherAsset(const std::string& name)
 {
@@ -562,6 +643,11 @@ bool CheckMarker(const CTransaction& tx, std::string& reject_reason)
         if (reg->text && (!IsAssetName(*reg->text) || HashName(*reg->text) != reg->name)) return invalid("bad-ba-name-text");
         if (reg->name.IsNull()) return invalid("bad-ba-name");
         if (!reg->logo.empty() && !CheckLogo(reg->logo, reject_reason)) return false;
+        if (!reg->display_name.empty() && !IsDisplayName(reg->display_name)) return invalid("bad-ba-display-name");
+    } else if (const auto* named{std::get_if<SetDisplayName>(&op)}) {
+        if (named->asset.IsNull()) return invalid("bad-ba-display-name-asset");
+        // Empty: the display name is removed.
+        if (!named->display_name.empty() && !IsDisplayName(named->display_name)) return invalid("bad-ba-display-name");
     } else if (const auto* set{std::get_if<SetLogo>(&op)}) {
         if (set->asset.IsNull()) return invalid("bad-ba-logo-asset");
         // Empty: the logo is removed.
@@ -619,6 +705,38 @@ bool CheckLogoActivation(const CTransaction& tx, bool active, std::string& rejec
     return true;
 }
 
+bool IsDisplayNameOperation(const Operation& op)
+{
+    if (std::holds_alternative<SetDisplayName>(op)) return true;
+    const auto* reg{std::get_if<Register>(&op)};
+    return reg && !reg->display_name.empty();
+}
+
+bool CheckTickerActivation(const CTransaction& tx, bool active, std::string& reject_reason)
+{
+    const auto marker{GetMarker(tx)};
+    if (!marker || !marker->operation) return true;
+    if (!active) {
+        if (IsDisplayNameOperation(*marker->operation)) {
+            reject_reason = "bad-ba-display-name-inactive";
+            return false;
+        }
+        return true;
+    }
+    if (const auto* reg{std::get_if<Register>(&*marker->operation)}) {
+        // The ticker is the name: public, so that everyone sees what was taken.
+        if (!reg->text) {
+            reject_reason = "bad-ba-ticker-private";
+            return false;
+        }
+        if (!IsTicker(*reg->text)) {
+            reject_reason = "bad-ba-ticker";
+            return false;
+        }
+    }
+    return true;
+}
+
 bool CheckDependsOnHeight(const CTransaction& tx)
 {
     const auto marker{GetMarker(tx)};
@@ -668,6 +786,8 @@ struct State::Plan {
         LogoFormat format{LogoFormat::PNG};
     };
     std::optional<Logo> logo;
+    //! The display name an asset gets (empty: none any more).
+    std::optional<std::pair<AssetId, std::string>> display_name;
 };
 
 namespace {
@@ -685,6 +805,7 @@ const sidechain::Table<uint256, ReservationOrigin> ORIGINS{0x3d};
 constexpr uint8_t HISTORY{0x3e};
 const sidechain::Table<uint256, LogoRecord> LOGOS{0x90};
 const sidechain::Table<uint256, std::vector<unsigned char>> LOGO_BYTES{0x91};
+const sidechain::Table<uint256, DisplayNameRecord> DISPLAY_NAMES{0x92};
 //! Missing: the layout before it was written down (1).
 const sidechain::Cell<uint32_t> LAYOUT{0x3f, 1};
 
@@ -736,6 +857,7 @@ std::optional<AssetRecord> State::GetAsset(const AssetId& asset) const { return 
 bool State::HasAsset(const AssetId& asset) const { return ASSETS.Contains(*m_view, asset); }
 std::optional<LogoRecord> State::GetLogo(const AssetId& asset) const { return LOGOS.Get(*m_view, asset); }
 std::optional<std::vector<unsigned char>> State::GetLogoBytes(const AssetId& asset) const { return LOGO_BYTES.Get(*m_view, asset); }
+std::optional<DisplayNameRecord> State::GetDisplayName(const AssetId& asset) const { return DISPLAY_NAMES.Get(*m_view, asset); }
 
 AssetHistory State::GetHistory(const AssetId& asset) const
 {
@@ -1082,6 +1204,7 @@ std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, s
             std::string why;
             plan.logo = Plan::Logo{reg->name, reg->logo, *Assert(CheckLogo(reg->logo, why))};
         }
+        if (!reg->display_name.empty()) plan.display_name = std::make_pair(reg->name, reg->display_name);
     } else if (const auto* mint{op ? std::get_if<Mint>(op) : nullptr}) {
         const auto found{GetAsset(mint->asset)};
         if (!found) return invalid("bad-ba-asset-unknown");
@@ -1125,6 +1248,12 @@ std::optional<State::Plan> State::MakePlan(const CTransaction& tx, int height, s
             logo.format = *Assert(CheckLogo(set->logo, why));
         }
         plan.logo = std::move(logo);
+    } else if (const auto* named{op ? std::get_if<SetDisplayName>(op) : nullptr}) {
+        if (!HasAsset(named->asset)) return invalid("bad-ba-asset-unknown");
+        // The control coin of this asset, as for its logo.
+        if (!spends(Token::Kind::CONTROL, named->asset)) return invalid("bad-ba-no-control");
+        if (named->display_name.empty() && !GetDisplayName(named->asset)) return invalid("bad-ba-display-name-none");
+        plan.display_name = std::make_pair(named->asset, named->display_name);
     } else if (const auto* burn{op ? std::get_if<Burn>(op) : nullptr}) {
         std::map<AssetId, AssetRecord> changed;
         for (const Token& token : burn->tokens) {
@@ -1470,6 +1599,7 @@ bool State::ApplyTx(const CTransaction& tx, int height, std::vector<CTxOut>& pay
         // And its logo: an asset registered again under the name starts without one.
         LOGOS.Erase(out, *plan->asset_gone);
         LOGO_BYTES.Erase(out, *plan->asset_gone);
+        DISPLAY_NAMES.Erase(out, *plan->asset_gone);
     }
     if (plan->logo) {
         if (plan->logo->bytes.empty()) {
@@ -1484,6 +1614,14 @@ bool State::ApplyTx(const CTransaction& tx, int height, std::vector<CTxOut>& pay
             record.txid = tx.GetHash();
             LOGOS.Put(out, plan->logo->asset, record);
             LOGO_BYTES.Put(out, plan->logo->asset, plan->logo->bytes);
+        }
+    }
+    if (plan->display_name) {
+        const auto& [asset, text] = *plan->display_name;
+        if (text.empty()) {
+            DISPLAY_NAMES.Erase(out, asset);
+        } else {
+            DISPLAY_NAMES.Put(out, asset, DisplayNameRecord{text, height, tx.GetHash()});
         }
     }
     if (released) *released = plan->released;

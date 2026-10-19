@@ -222,7 +222,7 @@ uint64_t ParseUnits(const UniValue& value, uint8_t decimals, bool allow_zero)
 std::vector<RPCArg> SearchAssetsArgs()
 {
     return {
-        {"query", RPCArg::Type::STR, RPCArg::Default{""}, "Text, \"#\" and a number, a number, or a hash"},
+        {"query", RPCArg::Type::STR, RPCArg::Default{""}, "Text (matched against the names, then the display names), \"#\" and a number, a number, or a hash"},
         {"filters", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "",
         {
             {"min_supply", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED, "At least this supply, in whole units"},
@@ -251,7 +251,8 @@ RPCResult SearchAssetsResult()
     {
         {RPCResult::Type::ARR, "assets", "", {{RPCResult::Type::OBJ, "", "These and, unless retired, the other fields of getasset (registration, data, releasable, control, logo)", {
             {RPCResult::Type::STR_HEX, "asset", "The hash of its name"},
-            {RPCResult::Type::STR, "name", /*optional=*/true, "Its name, if public"},
+            {RPCResult::Type::STR, "name", /*optional=*/true, "Its name (its ticker), if public"},
+            {RPCResult::Type::STR, "display_name", /*optional=*/true, "Its display name, if it has one"},
             {RPCResult::Type::STR, "label", "Its name, or \"0x\" and its hash"},
             {RPCResult::Type::STR, "seq", "Its number"},
             {RPCResult::Type::NUM, "decimals", ""},
@@ -268,7 +269,7 @@ RPCResult SearchAssetsResult()
             {RPCResult::Type::NUM, "created", "The height of the block that registered it"},
             {RPCResult::Type::NUM, "registered", "The same"},
             {RPCResult::Type::NUM, "last_activity", "The height of the last block that touched it"},
-            {RPCResult::Type::STR, "match", /*optional=*/true, "How the text matched: \"exact\", \"prefix\" or \"word\""},
+            {RPCResult::Type::STR, "match", /*optional=*/true, "How the text matched: the name \"exact\", its \"prefix\" or a \"word\" of it; else the display name: its start (\"display_name\") or a word of it (\"display_word\")"},
         }, RPCResultOptions{.skip_type_check = true}}}},
         {RPCResult::Type::ANY, "next_cursor", "The cursor of the next page (a string); null when there is no more (a full page always has one: the next may be empty)"},
         {RPCResult::Type::BOOL, "partial", "The search stopped at its budget before the page was full: go on with next_cursor"},

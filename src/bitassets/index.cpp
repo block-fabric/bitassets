@@ -27,6 +27,7 @@ constexpr uint8_t ST_AUCTIONS{0x35};
 constexpr uint8_t ST_TOKENS_BY_ID{0x39};
 constexpr uint8_t ST_HISTORY{0x3e};
 constexpr uint8_t ST_LOGOS{0x90};
+constexpr uint8_t ST_DISPLAY_NAMES{0x92};
 
 constexpr uint8_t CURSOR_VERSION{1};
 
@@ -91,6 +92,16 @@ std::optional<Bytes> OrderKey(Sort sort, const AssetRow& row, const std::string&
     return key;
 }
 
+/** A word of a text in an order of words ('t', 'u'): the word, 0, the number. */
+Bytes WordKey(char sub, const std::string& word, uint32_t seq)
+{
+    Bytes key{K(sub)};
+    key.insert(key.end(), word.begin(), word.end());
+    key.push_back(0);
+    Put32(key, seq);
+    return key;
+}
+
 /** Every entry of a row in the orders (the row itself apart), with its value. */
 std::map<Bytes, Bytes> OrderEntries(const AssetRow& row)
 {
@@ -102,13 +113,13 @@ std::map<Bytes, Bytes> OrderEntries(const AssetRow& row)
     }
     if (row.flags & NAMED) {
         // The word the name starts with is found by the name's own entry, unless it is also further on.
-        for (const std::string& word : LaterWords(norm)) {
-            Bytes key{K('t')};
-            key.insert(key.end(), word.begin(), word.end());
-            key.push_back(0);
-            Put32(key, row.seq);
-            entries.emplace(std::move(key), summary);
-        }
+        for (const std::string& word : LaterWords(norm)) entries.emplace(WordKey('t', word, row.seq), summary);
+    }
+    if (!row.display.empty()) {
+        // The display name by its start, and by each later word, as the name is.
+        const std::string display{Normalize(row.display)};
+        entries.emplace(WordKey('m', display, row.seq), summary);
+        for (const std::string& word : LaterWords(display)) entries.emplace(WordKey('u', word, row.seq), summary);
     }
     return entries;
 }
@@ -233,7 +244,8 @@ std::string Normalize(std::string_view text)
 }
 
 namespace {
-bool IsWordChar(char c) { return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z'); }
+/** Letters and digits of ASCII, and every byte of a character beyond it (display names): no character beyond ASCII ends a word. */
+bool IsWordChar(char c) { return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || static_cast<unsigned char>(c) >= 0x80; }
 } // namespace
 
 std::vector<std::string> Words(std::string_view norm)
@@ -278,6 +290,17 @@ std::optional<int> MatchTier(std::string_view name, std::string_view text)
     return std::nullopt;
 }
 
+std::optional<int> RowMatch(const AssetRow& row, std::string_view text)
+{
+    if (row.flags & NAMED) {
+        if (const auto tier{MatchTier(Normalize(row.text), text)}) return tier;
+    }
+    if (row.display.empty()) return std::nullopt;
+    const auto tier{MatchTier(Normalize(row.display), text)};
+    if (!tier) return std::nullopt;
+    return *tier < 2 ? 3 : 4;
+}
+
 std::optional<AssetRow> GetAssetRow(const sidechain::StoreView& view, uint32_t seq)
 {
     const auto bytes{view.Get(RowKey(seq))};
@@ -290,6 +313,15 @@ std::optional<PoolRow> GetPoolRow(const sidechain::StoreView& view, const uint25
     const auto bytes{view.Get(PoolKey(id))};
     if (!bytes) return std::nullopt;
     return sidechain::DecodeValue<PoolRow>(*bytes);
+}
+
+bool UpgradeLayout(sidechain::StoreOverlay& store)
+{
+    if (store.Get(LAYOUT_KEY) != sidechain::EncodeValue(uint32_t{1})) return false;
+    const Bytes display_names{ST_DISPLAY_NAMES};
+    if (store.Next(display_names, display_names)) return false;
+    store.Put(LAYOUT_KEY, sidechain::EncodeValue(INDEX_LAYOUT));
+    return true;
 }
 
 bool LayoutCurrent(const sidechain::StoreView& view)
@@ -358,6 +390,7 @@ void ConnectBlock(sidechain::StoreOverlay& store, int height, int volume_window)
             break;
         case ST_HISTORY:
         case ST_LOGOS:
+        case ST_DISPLAY_NAMES:
             assets.insert(id);
             break;
         }
@@ -433,7 +466,8 @@ void ConnectBlock(sidechain::StoreOverlay& store, int height, int volume_window)
         if (before && (!record || record->seq != before->seq)) {
             // Retired (and maybe registered again, under another number).
             if (auto& row{rows.Get(before->seq)}; row && !(row->flags & RETIRED)) {
-                row->flags = (row->flags | RETIRED) & ~HAS_POOL & ~HAS_LOGO;
+                row->flags = (row->flags | RETIRED) & ~HAS_POOL & ~HAS_LOGO & ~HAS_DISPLAY;
+                row->display.clear();
                 row->depth = 0;
                 row->pools = 0;
                 row->last = height;
@@ -460,6 +494,12 @@ void ConnectBlock(sidechain::StoreOverlay& store, int height, int volume_window)
         if (!record->text.empty()) flags |= NAMED;
         if (record->provided_pools > 0) flags |= HAS_POOL;
         if (state.GetLogo(id)) flags |= HAS_LOGO;
+        if (const auto display{state.GetDisplayName(id)}) {
+            flags |= HAS_DISPLAY;
+            row->display = display->text;
+        } else {
+            row->display.clear();
+        }
         row->flags = flags;
         const std::optional<Pool> chn_pool{state.FindPool(id, CHN)};
         row->depth = chn_pool && !amm::Abandoned(*chn_pool) ? chn_pool->reserve0 : 0;
@@ -633,6 +673,16 @@ bool PassKeywords(const std::string& norm, const Filters& f)
     return true;
 }
 
+/** The first of the later words of normalised text that starts with `word` (in byte order), "" if none. */
+std::string FirstLaterWord(const std::string& norm, const std::string& word)
+{
+    std::string first;
+    for (const std::string& w : LaterWords(norm)) {
+        if (w.starts_with(word) && (first.empty() || w < first)) first = w;
+    }
+    return first;
+}
+
 /** The first word of normalised text, if it starts with one. */
 std::string FirstWord(const std::string& text)
 {
@@ -689,29 +739,33 @@ Page Search(const sidechain::StoreView& view, const Request& request)
     } else if (f.only && f.only->size() <= CANDIDATE_CAP) {
         candidates = *f.only;
     } else if (!text.empty() && sort != Sort::RELEVANCE && !(cursor && cursor->mode == MODE_SCAN)) {
-        // The matches of the text, if not too many: by the name's start, then by a word's.
+        // The matches of the text, if not too many: by the name's start, a word's, then the display name's.
         std::set<uint32_t> found;
         bool too_many{false};
+        const std::string word{FirstWord(text)};
+        const auto collect{[&](Bytes prefix) {
+            Bytes at{prefix};
+            while (!too_many) {
+                const auto entry{view.Next(at, prefix)};
+                if (!entry) break;
+                ++page.scanned;
+                found.insert(SeqOfKey(entry->first));
+                if (found.size() > CANDIDATE_CAP) too_many = true;
+                at = After(entry->first);
+            }
+        }};
         Bytes prefix{K('n')};
         prefix.push_back(0);
         prefix.insert(prefix.end(), text.begin(), text.end());
-        Bytes at{prefix};
-        while (const auto entry{view.Next(at, prefix)}) {
-            ++page.scanned;
-            found.insert(SeqOfKey(entry->first));
-            if (found.size() > CANDIDATE_CAP) { too_many = true; break; }
-            at = After(entry->first);
-        }
-        const std::string word{FirstWord(text)};
-        if (!too_many && !word.empty()) {
-            prefix = K('t');
-            prefix.insert(prefix.end(), word.begin(), word.end());
-            at = prefix;
-            while (const auto entry{view.Next(at, prefix)}) {
-                ++page.scanned;
-                found.insert(SeqOfKey(entry->first));
-                if (found.size() > CANDIDATE_CAP) { too_many = true; break; }
-                at = After(entry->first);
+        collect(prefix);
+        prefix = K('m');
+        prefix.insert(prefix.end(), text.begin(), text.end());
+        collect(prefix);
+        if (!word.empty()) {
+            for (const char sub : {'t', 'u'}) {
+                prefix = K(sub);
+                prefix.insert(prefix.end(), word.begin(), word.end());
+                collect(prefix);
             }
         }
         if (!too_many) candidates = std::move(found);
@@ -724,27 +778,29 @@ Page Search(const sidechain::StoreView& view, const Request& request)
             auto row{GetAssetRow(view, seq)};
             if (!row || !PassSummary(row->Summarize(), f, seq)) continue;
             const std::string norm{Normalize(row->text)};
+            const std::string display{Normalize(row->display)};
             Hit hit{*row, -1};
             if (!text.empty()) {
-                if (!(row->flags & NAMED)) continue;
-                const auto tier{MatchTier(norm, text)};
+                const auto tier{RowMatch(*row, text)};
                 if (!tier) continue;
                 hit.match = *tier;
             }
-            if (!PassKeywords(norm, f)) continue;
+            if (!PassKeywords(norm, f) || !PassKeywords(display, f)) continue;
             std::optional<Bytes> key;
             if (sort == Sort::RELEVANCE) {
                 // As the index orders them: the names that start with the text, by name; then those
-                // with a word that does, by the first such word.
-                std::string by{norm};
-                if (hit.match == 2) {
-                    const std::string first_word{FirstWord(text)};
-                    by.clear();
-                    for (const std::string& w : LaterWords(norm)) {
-                        if (w.starts_with(first_word) && (by.empty() || w < by)) by = w;
-                    }
+                // with a word that does, by the first such word; then the display names the same way.
+                std::string by;
+                const std::string first_word{FirstWord(text)};
+                uint8_t group{0};
+                switch (hit.match) {
+                case 0: case 1: by = norm; group = 0; break;
+                case 2: by = FirstLaterWord(norm, first_word); group = 1; break;
+                case 3: by = display; group = 2; break;
+                case 4: by = FirstLaterWord(display, first_word); group = 3; break;
+                default: by = norm; break;
                 }
-                key = Bytes{static_cast<unsigned char>(hit.match == 2 ? 1 : 0)};
+                key = Bytes{group};
                 key->insert(key->end(), by.begin(), by.end());
                 key->push_back(0);
                 Put32(*key, seq);
@@ -761,29 +817,38 @@ Page Search(const sidechain::StoreView& view, const Request& request)
     }
 
     // Along an index, in its order, with the filters: by relevance, the names that start with the text,
-    // then those with a word that does; otherwise the order's own index.
+    // then those with a word that does, then the display names that start with it, then those with a
+    // word that does; otherwise the order's own index.
+    enum class Along { ORDER, NAMES, NAME_WORDS, DISPLAY, DISPLAY_WORDS };
     struct Phase {
         Bytes prefix;
-        //! The text is matched by a word of the name (its row read).
-        bool words{false};
+        Along along;
     };
+    const std::string word{FirstWord(text)};
     std::vector<Phase> phases;
     if (sort == Sort::RELEVANCE) {
         Bytes prefix{K('n')};
         prefix.push_back(0);
         prefix.insert(prefix.end(), text.begin(), text.end());
-        phases.push_back({prefix, false});
-        if (const std::string word{FirstWord(text)}; !word.empty()) {
+        phases.push_back({prefix, Along::NAMES});
+        if (!word.empty()) {
             prefix = K('t');
             prefix.insert(prefix.end(), word.begin(), word.end());
-            phases.push_back({prefix, true});
+            phases.push_back({prefix, Along::NAME_WORDS});
+        }
+        prefix = K('m');
+        prefix.insert(prefix.end(), text.begin(), text.end());
+        phases.push_back({prefix, Along::DISPLAY});
+        if (!word.empty()) {
+            prefix = K('u');
+            prefix.insert(prefix.end(), word.begin(), word.end());
+            phases.push_back({prefix, Along::DISPLAY_WORDS});
         }
     } else {
-        phases.push_back({OrderPrefix(sort), false});
+        phases.push_back({OrderPrefix(sort), Along::ORDER});
     }
     size_t phase{cursor ? static_cast<size_t>(cursor->phase & ~AT_KEY) : 0};
     Bytes at{cursor ? (cursor->phase & AT_KEY ? cursor->key : After(cursor->key)) : Bytes{}};
-    const std::string word{FirstWord(text)};
     for (; phase < phases.size(); ++phase, at.clear()) {
         const Phase& ph{phases[phase]};
         if (at.empty()) at = ph.prefix;
@@ -810,41 +875,72 @@ Page Search(const sidechain::StoreView& view, const Request& request)
             if (sort == Sort::ACTIVITY && f.min_last && summary.last < *f.min_last) return page;
             if (sort == Sort::NEWEST && f.created_after && summary.created <= *f.created_after) return page;
             if (!PassSummary(summary, f, seq)) continue;
-            // The name: from the key of the order of names, else from the row.
-            std::optional<std::string> norm;
-            if (key[1] == 'n' && key[2] == 0) norm = std::string(key.begin() + 3, key.end() - 5);
-            const bool need_name{!text.empty() || !f.exclude_keywords.empty()};
-            if (need_name && !norm) {
+            const bool has_display{(summary.flags & HAS_DISPLAY) != 0};
+            const auto read_row{[&]() -> bool {
                 if (!row) {
                     ++rows_read;
                     row = GetAssetRow(view, seq);
                 }
-                if (!row) continue;
-                norm = Normalize(row->text);
+                return row.has_value();
+            }};
+            // The name: from the key of the order of names, else from the row.
+            std::optional<std::string> norm;
+            if (key[1] == 'n' && key[2] == 0) norm = std::string(key.begin() + 3, key.end() - 5);
+            // The row is read for the display name: where it may match, or hold a word left out.
+            const bool display_phase{ph.along == Along::DISPLAY || ph.along == Along::DISPLAY_WORDS};
+            const bool need_display{has_display && (display_phase || (ph.along == Along::ORDER && !text.empty()) || !f.exclude_keywords.empty())};
+            const bool need_name{!text.empty() || !f.exclude_keywords.empty()};
+            if ((need_name && !norm) || need_display) {
+                if (!read_row()) continue;
+                if (!norm) norm = Normalize(row->text);
             }
             int match{-1};
             if (!text.empty()) {
-                if (!(summary.flags & NAMED)) continue;
-                const auto tier{MatchTier(*norm, text)};
-                if (!tier) continue;
-                if (ph.words) {
+                const auto name_tier{summary.flags & NAMED ? MatchTier(*norm, text) : std::nullopt};
+                switch (ph.along) {
+                case Along::NAMES:
+                    if (!name_tier) continue;
+                    match = *name_tier;
+                    break;
+                case Along::NAME_WORDS:
                     // Found by a word: not one the names' phase found, and once (at the first of its words that does).
-                    if (*tier < 2) continue;
-                    const std::string this_word(key.begin() + 2, key.end() - 5);
-                    std::string first;
-                    for (const std::string& w : LaterWords(*norm)) {
-                        if (w.starts_with(word) && (first.empty() || w < first)) first = w;
+                    if (!name_tier || *name_tier < 2) continue;
+                    if (std::string(key.begin() + 2, key.end() - 5) != FirstLaterWord(*norm, word)) continue;
+                    match = *name_tier;
+                    break;
+                case Along::DISPLAY:
+                case Along::DISPLAY_WORDS: {
+                    // Not one a phase of the names found.
+                    if (name_tier) continue;
+                    const std::string display{Normalize(row->display)};
+                    const auto tier{MatchTier(display, text)};
+                    if (!tier) continue;
+                    if (ph.along == Along::DISPLAY) {
+                        if (*tier >= 2) continue;
+                    } else {
+                        if (*tier < 2) continue;
+                        if (std::string(key.begin() + 2, key.end() - 5) != FirstLaterWord(display, word)) continue;
                     }
-                    if (this_word != first) continue;
+                    match = *tier < 2 ? 3 : 4;
+                    break;
                 }
-                match = *tier;
+                case Along::ORDER: {
+                    if (name_tier) {
+                        match = *name_tier;
+                    } else if (has_display) {
+                        const auto tier{MatchTier(Normalize(row->display), text)};
+                        if (!tier) continue;
+                        match = *tier < 2 ? 3 : 4;
+                    } else {
+                        continue;
+                    }
+                    break;
+                }
+                }
             }
             if (norm && !PassKeywords(*norm, f)) continue;
-            if (!row) {
-                ++rows_read;
-                row = GetAssetRow(view, seq);
-                if (!row) continue;
-            }
+            if (has_display && row && !PassKeywords(Normalize(row->display), f)) continue;
+            if (!read_row()) continue;
             page.hits.push_back({std::move(*row), match});
             if (page.hits.size() >= limit) {
                 page.next = EncodeCursor({'A', MODE_SCAN, static_cast<uint8_t>(request.sort), static_cast<uint8_t>(phase), key});

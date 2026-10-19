@@ -62,6 +62,11 @@ inline constexpr uint8_t MARKER_VERSION{0};
 inline constexpr size_t MAX_MARKER_OUTPUTS{64};
 /** Longest name of an asset that a registration publishes. */
 inline constexpr size_t MAX_NAME_TEXT_SIZE{64};
+/** Longest display name of an asset, in bytes of UTF-8 (IsDisplayName). */
+inline constexpr size_t MAX_DISPLAY_NAME_SIZE{64};
+/** Shortest and longest ticker: the name a registration publishes from SidechainParams::ticker_height (IsTicker). */
+inline constexpr size_t MIN_TICKER_SIZE{2};
+inline constexpr size_t MAX_TICKER_SIZE{12};
 /** Longest description of an asset. */
 inline constexpr size_t MAX_INFO_SIZE{512};
 /** Most decimals an asset is shown with. */
@@ -275,11 +280,16 @@ struct Register {
     //! Its logo (bitassets/logo.h), if any: from SidechainParams::logo_height, a registration with one
     //! is a marker of the kind REGISTER_WITH_LOGO_KIND (these fields, then the logo).
     std::vector<unsigned char> logo;
+    //! Its display name (IsDisplayName), if any: from SidechainParams::ticker_height, a registration with
+    //! one is a marker of the kind REGISTER_WITH_DISPLAY_NAME_KIND (these fields, the logo, empty or not, then it).
+    std::string display_name;
     SERIALIZE_METHODS(Register, obj) { READWRITE(obj.name, obj.nonce, VARINT(obj.supply), obj.decimals, obj.data, BA_OPT(obj.text)); }
     friend bool operator==(const Register&, const Register&) = default;
 };
 /** The kind of the marker of a Register that carries a logo. */
 inline constexpr uint8_t REGISTER_WITH_LOGO_KIND{33};
+/** The kind of the marker of a Register that carries a display name (and a logo, or an empty one). */
+inline constexpr uint8_t REGISTER_WITH_DISPLAY_NAME_KIND{35};
 
 /** More of an asset, by whoever spends its control coin. */
 struct Mint {
@@ -428,7 +438,20 @@ struct SetLogo {
     friend bool operator==(const SetLogo&, const SetLogo&) = default;
 };
 
-using Operation = std::variant<Reserve, Register, Mint, UpdateAsset, Burn, Swap, AddLiquidity, RemoveLiquidity, CreateAuction, Bid, Collect, ReleaseAsset, SetLogo>;
+/**
+ * Set the display name of an asset (IsDisplayName), or remove it (an empty one), by whoever spends its
+ * control coin; it replaces the one before. Display names are not unique: the name of an asset (its
+ * ticker) is. Valid from SidechainParams::ticker_height.
+ */
+struct SetDisplayName {
+    static constexpr uint8_t KIND{34};
+    AssetId asset;
+    std::string display_name;
+    SERIALIZE_METHODS(SetDisplayName, obj) { READWRITE(obj.asset, obj.display_name); }
+    friend bool operator==(const SetDisplayName&, const SetDisplayName&) = default;
+};
+
+using Operation = std::variant<Reserve, Register, Mint, UpdateAsset, Burn, Swap, AddLiquidity, RemoveLiquidity, CreateAuction, Bid, Collect, ReleaseAsset, SetLogo, SetDisplayName>;
 
 /** Whether an operation sets a logo (SetLogo, or a Register with one): valid from SidechainParams::logo_height only. */
 bool IsLogoOperation(const Operation& op);
@@ -437,6 +460,16 @@ bool IsLogoOperation(const Operation& op);
  * marker sets a logo is not valid before (bad-ba-logo-inactive), as no such marker was.
  */
 [[nodiscard]] bool CheckLogoActivation(const CTransaction& tx, bool active, std::string& reject_reason);
+
+/** Whether an operation sets a display name (SetDisplayName, or a Register with one): valid from SidechainParams::ticker_height only. */
+bool IsDisplayNameOperation(const Operation& op);
+/**
+ * The rules of tickers and display names, at a height where they are `active` or not. Before: a marker
+ * that sets a display name is not valid (bad-ba-display-name-inactive), as no such marker was. From:
+ * a registration publishes its name (bad-ba-ticker-private), and the name is a ticker (IsTicker;
+ * bad-ba-ticker). Assets registered before keep their names, whatever they are.
+ */
+[[nodiscard]] bool CheckTickerActivation(const CTransaction& tx, bool active, std::string& reject_reason);
 
 /** The marker output of a transaction. */
 struct Marker {
@@ -466,6 +499,27 @@ uint256 ReservationCommitment(const AssetId& name, const uint256& nonce, const C
 uint256 PoolId(const AssetId& a, const AssetId& b);
 /** Whether a name can be published: 1 to MAX_NAME_TEXT_SIZE printable ASCII characters, no space at either end. */
 bool IsAssetName(const std::string& name);
+/**
+ * Whether a name is a ticker: MIN_TICKER_SIZE to MAX_TICKER_SIZE characters, each an uppercase letter
+ * A to Z or a digit 0 to 9. From SidechainParams::ticker_height, the name of every new asset is one
+ * (the look-alike rules below apply too: no ticker is "CHN", "0X..." or holds what reads as a number).
+ */
+bool IsTicker(const std::string& name);
+/**
+ * Whether text can be the display name of an asset: 1 to MAX_DISPLAY_NAME_SIZE bytes of well-formed
+ * UTF-8 (shortest forms, no surrogates), no space at either end, each code point one of those of
+ * DISPLAY_NAME_RANGES (bitassets/displayname_table.h, generated from Unicode 15.0): assigned, graphic
+ * (letters, digits, punctuation, symbols) or the space U+0020, and nothing that changes how the others
+ * read: no control or format character (bidirectional overrides and isolates, zero-width spaces and
+ * joiners, soft hyphen...), no other space, no default-ignorable or blank character (Hangul fillers,
+ * braille blank), no combining mark, variation selector, conjoining jamo or character that composes
+ * with the one before, and none that NFC changes. Text of these is in NFC, and is shown as it is. The
+ * set is frozen: a later version of Unicode adds nothing to it (a soft fork could).
+ */
+bool IsDisplayName(const std::string& text);
+/** Why text cannot be a display name (for those who tell the user); nullopt if it can. */
+std::optional<std::string> WhyNotDisplayName(const std::string& text);
+
 /**
  * Whether a name reads as another asset where assets are named (rpcutil's ParseAssetArg): CHN in any
  * case, a number ("1739-0029", "0001-1739-0029") or "0x" and anything. No asset is registered under
@@ -563,6 +617,15 @@ struct LogoRecord {
     Txid txid;
     SERIALIZE_METHODS(LogoRecord, obj) { READWRITE(obj.hash, obj.format, obj.size, obj.height, obj.txid); }
     friend bool operator==(const LogoRecord&, const LogoRecord&) = default;
+};
+
+/** The display name of an asset as the state records it, with where it was set. */
+struct DisplayNameRecord {
+    std::string text;
+    int32_t height{0};
+    Txid txid;
+    SERIALIZE_METHODS(DisplayNameRecord, obj) { READWRITE(obj.text, obj.height, obj.txid); }
+    friend bool operator==(const DisplayNameRecord&, const DisplayNameRecord&) = default;
 };
 
 /** Every value each field of the data of an asset has had, oldest first, with where it was set. */
@@ -738,6 +801,9 @@ struct Result {
  * its bytes. No rule reads the bytes: they are kept for those who show them (getassetlogo), with the
  * state, so that a pruned node has them too; only the current logo of each asset is kept, and a
  * reorganization puts the one before back through the journal.
+ *
+ * Display names (from SidechainParams::ticker_height): 0x92 the display name of each asset that has one
+ * (DisplayNameRecord). A table of its own, so that the layout of the others (STORE_LAYOUT) is the same.
  */
 class State
 {
@@ -789,6 +855,8 @@ public:
     std::optional<LogoRecord> GetLogo(const AssetId& asset) const;
     /** The bytes of the logo of an asset, if it has one. */
     std::optional<std::vector<unsigned char>> GetLogoBytes(const AssetId& asset) const;
+    /** The display name of an asset, if it has one. */
+    std::optional<DisplayNameRecord> GetDisplayName(const AssetId& asset) const;
     /** The first output, by outpoint, that carries a token of this kind and id. */
     std::optional<COutPoint> FirstTokenOf(const uint256& id, Token::Kind kind) const;
     /** The pools of an asset, by id. */

@@ -188,6 +188,81 @@ cannot be told apart, and a deflate stream may be unusual (a decoder stops at 25
 crops and scales any picture to 256 x 256, encodes it as PNG (a palette when that is smaller) and
 as JPEG (quality about 80), keeps the smaller, and strips every metadata segment.
 
+## Tickers and display names
+
+From `SidechainParams::ticker_height`, an asset has two names:
+
+- Its **ticker** is its name, as before: unique, registered first come first served by a reservation
+  then a registration (commit, then reveal), the hash of it the asset's id. From the height, the name
+  of every **new** asset is a ticker: **2 to 12 characters, each an uppercase letter A–Z or a digit
+  0–9** (`bitassets::IsTicker`), and **published** (a registration without its text is refused:
+  `bad-ba-ticker-private`; one whose text is no ticker: `bad-ba-ticker`). The look-alike rules hold
+  tickers too (no `CHN`, no `0X...`; `#`, `(`, `)` and `dddd-dddd` cannot be in one). The wallet
+  uppercases what it is given (`reserveasset gold` reserves `GOLD`) and refuses anything else before
+  paying for a reservation. **Assets registered before keep their names**, whatever they are
+  ("gold bar", "my gold coin"), and are shown as they are; everything else about them works as before
+  (mint, transfer, data, logo, display name). A reservation made before the height of a name that is
+  no ticker can no longer be registered (release it: `releaseassetreservation`).
+- Its **display name** is optional and **not unique**: any number of assets may have the same one.
+  The app shows the ticker first and the display name after it, muted ("GOLD · Gold Bar Token, 1 g ·
+  #1739-0029"), never the display name instead of the ticker.
+
+**What a display name may be** (`bitassets::IsDisplayName`, consensus; `WhyNotDisplayName` says why
+not): 1 to 64 bytes of well-formed UTF-8 (shortest forms, no surrogates, nothing past U+10FFFF), no
+space at either end, and each code point one of `DISPLAY_NAME_RANGES` (`src/bitassets/displayname_table.h`,
+written by `contrib/devtools/gen-display-name-table.py` from Unicode 15.0): assigned and graphic
+(letters, digits, punctuation, symbols, emoji of one code point) or the space U+0020. Refused, so that
+nothing changes how the rest of a name reads (spoofing): controls (C0, DEL, C1); format characters,
+among them the bidirectional overrides, embeddings, isolates and marks (U+202A–202E, U+2066–2069,
+U+200E/200F, U+061C), the zero-width space, non-joiner and joiner (U+200B–200D), the word joiner,
+the byte order mark, the soft hyphen and the tags; every space but U+0020 (no-break, ideographic,
+line and paragraph separators); default-ignorable and blank characters (Hangul fillers, braille
+blank); combining marks and variation selectors; conjoining Hangul jamo and every character that
+composes with the one before it; every character that NFC changes (the angstrom and ohm signs, CJK
+compatibility ideographs...); unassigned code points, private use and noncharacters. A text of these
+characters only is in NFC, so no normalization is needed to compare two: the app normalizes what is
+typed to NFC before it sends it. The set is frozen at Unicode 15.0 (a later version adds nothing; a
+soft fork could). Scripts that need combining marks beyond their precomposed letters cannot be
+written in full. Display names are not unique: they are not a defence against an asset that takes
+another's display name — the ticker is.
+
+**Operations.** A registration may carry one (marker kind 35: the registration, its logo or an empty
+one, then the display name); `SetDisplayName` (kind 34: asset, text; an empty text removes it), by
+whoever spends the asset's control coin, as `updateasset` and `setassetlogo` are (a fixed asset cannot
+change it). Reasons: `bad-ba-display-name` (not one), `bad-ba-display-name-asset` (CHN),
+`bad-ba-display-name-none` (removing one there is not), `bad-ba-no-control`, `bad-ba-asset-unknown`.
+
+**Activation.** Before `SidechainParams::ticker_height`, a marker that sets a display name is not
+valid (`bad-ba-display-name-inactive`), and names are as before. Main network and signet: 0 (not
+launched). Test network: `TESTNET_TICKER_HEIGHT` in `src/kernel/testnet_activation.h`, a placeholder
+(never) until the deploy sets it a few blocks above the tip: every node has to be upgraded before the
+chain reaches it (an older node refuses a block that sets a display name, and takes registrations
+that are not tickers: a split). Regtest: never, or `-testactivationheight=ticker@<height>` (the
+tests of before register names that are not tickers). `getbitassetsinfo` says `ticker_height` (-1:
+never), `tickers_active` (the next block), `min_ticker_length`, `max_ticker_length` and
+`max_display_name_bytes`. Like `logo_height`, the height counts in the fingerprint of the parameters
+of the sidechain database once it is set: the node derives its sidechain state again from the blocks
+once when it first starts with a height set (as it did for the logos), not while it is never.
+
+**State and index.** The state keeps each asset's display name in a table of its own (0x92:
+`DisplayNameRecord` text, height, transaction), so the layout of the others (`STORE_LAYOUT` 5) is
+unchanged; the journal of each block puts the one before back on a reorganization; retiring an asset
+drops it. The search index (layout **2**) has it in each row (`display`, written last: a row of layout
+1 reads as a row without one), a flag `HAS_DISPLAY`, and two orders: `m` (the normalised display name)
+and `u` (each later word of it). A search for text matches the names first (whole, start, a later
+word), then the display names (their start, then a later word); `match` says `display_name` or
+`display_word`; `exclude_keywords` looks at both. **Upgrading** from index layout 1: nothing is
+derived again — a store written by a version without display names holds none, so its index is that
+of layout 2 already, and the node writes the new layout at startup (`index::UpgradeLayout`, logged
+"brought to layout 2 in place"). An index of any other layout (or a layout-1 store that somehow holds
+display names) is derived again from the blocks, as before.
+
+**Commands.** `getasset`, `listassets`, `searchassets` and `searchmyassets` say `display_name` when
+there is one. `registerasset name supply (decimals data public logo display_name)` (from the height:
+the name uppercased and checked as a ticker, `public` true; the result says the `name` registered);
+`setassetdisplayname <asset> <text> ({"fee_rate": sat/vB})` (`""` removes it);
+`listassettransactions` category `display_name`.
+
 ## CHN in pools and auctions
 
 CHN that goes into a pool or an auction leaves circulation: the marker burns it (its value is the

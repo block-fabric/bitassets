@@ -39,7 +39,7 @@ uint256 ParamsFingerprint(const Consensus::DrivechainParams& params, const Conse
     if (!sidechain.enabled) return ParamsFingerprint(params);
     // Every field: a parameter added later has to be added here as well.
     // BitAssets' own rules (the reveal depth) count as well.
-    static_assert(sizeof(Consensus::SidechainParams) == 48, "a new sidechain parameter goes into the fingerprint");
+    static_assert(sizeof(Consensus::SidechainParams) == 56, "a new sidechain parameter goes into the fingerprint");
     HashWriter hasher{};
     hasher << std::string{"Sidechain parameters"} << ParamsFingerprint(params) << sidechain.slot << sidechain.min_withdrawal
            << sidechain.max_bundle_withdrawals << sidechain.bundle_retry_delay << sidechain.main_activation_height
@@ -47,6 +47,8 @@ uint256 ParamsFingerprint(const Consensus::DrivechainParams& params, const Conse
     // The logos of assets: their height once set (a database of a chain connected without their rules
     // is made again), nothing while it is never (as before they existed: a database of before is kept).
     if (sidechain.logo_height != std::numeric_limits<int>::max()) hasher << std::string{"logo"} << sidechain.logo_height;
+    // Tickers and display names, the same way.
+    if (sidechain.ticker_height != std::numeric_limits<int>::max()) hasher << std::string{"ticker"} << sidechain.ticker_height;
     return hasher.GetHash();
 }
 

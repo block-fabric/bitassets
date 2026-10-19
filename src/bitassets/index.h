@@ -35,6 +35,8 @@
  *   'r' seq              -> AssetRow, one per asset ever registered (retired ones are kept, flagged)
  *   'n' 0|1 name 0 seq   -> Summary: by normalised name (1: no public name, after the named ones)
  *   't' word 0 seq       -> Summary: by each word that starts after the start of the name
+ *   'm' display 0 seq    -> Summary: by normalised display name (those with one)
+ *   'u' word 0 seq       -> Summary: by each word that starts after the start of the display name
  *   'o' ~seq             -> Summary: newest first
  *   's' ~supply seq      -> Summary
  *   'a' ~last seq        -> Summary: the height of the last block that touched it
@@ -51,11 +53,22 @@ namespace bitassets::index {
 /**
  * The layout of the index. A store with assets and an index of another layout, or none (one written by
  * a version without it), is not read: the node derives the sidechain state again from the blocks at
- * startup (LayoutCurrent), so that the index covers every block.
+ * startup (LayoutCurrent), so that the index covers every block; but see UpgradeLayout.
+ *  1: the first.
+ *  2: display names: in each row (AssetRow::display, written after the rest: a row of 1 reads as one
+ *     without), the flag HAS_DISPLAY, the orders 'm' and 'u'.
  */
-inline constexpr uint32_t INDEX_LAYOUT{1};
+inline constexpr uint32_t INDEX_LAYOUT{2};
 /** Whether the index in a store is of this layout, or there are no assets to index yet. */
 bool LayoutCurrent(const sidechain::StoreView& view);
+/**
+ * Bring an index of layout 1 to this layout in place, if it can be: a store written by a version without
+ * display names has none (no rule let a block set one), so its index is that of layout 2 already, its
+ * rows read as rows without a display name. Nothing is derived again then: the layout is written, and
+ * that is all. Returns whether it did; not if the store holds display names (it was not written by such
+ * a version: the index is derived again, as for any other layout).
+ */
+bool UpgradeLayout(sidechain::StoreOverlay& store);
 
 /** The most a page holds. */
 inline constexpr size_t MAX_PAGE{200};
@@ -75,6 +88,7 @@ enum Flag : uint8_t {
     HAS_LOGO = 4,
     HAS_POOL = 8, //!< a pool someone provides liquidity to
     NAMED = 16,   //!< its registration published its name
+    HAS_DISPLAY = 32, //!< it has a display name
 };
 
 /** What the filters read, kept with each entry of an order so that filtering reads no row. */
@@ -109,11 +123,24 @@ struct AssetRow {
     uint64_t volume{0};
     //! Its pools (any pair) that someone provides liquidity to.
     uint32_t pools{0};
+    //! Its display name, if any (layout 2).
+    std::string display;
 
-    SERIALIZE_METHODS(AssetRow, obj)
+    template <typename Stream>
+    void Serialize(Stream& s) const
     {
-        READWRITE(obj.seq, obj.id, obj.text, obj.decimals, obj.flags, VARINT_MODE(obj.created, VarIntMode::NONNEGATIVE_SIGNED), VARINT_MODE(obj.last, VarIntMode::NONNEGATIVE_SIGNED), VARINT(obj.supply),
-                  VARINT(obj.minted), VARINT(obj.burned), VARINT(obj.depth), VARINT(obj.volume), VARINT(obj.pools));
+        s << seq << id << text << decimals << flags << VARINT_MODE(created, VarIntMode::NONNEGATIVE_SIGNED) << VARINT_MODE(last, VarIntMode::NONNEGATIVE_SIGNED) << VARINT(supply)
+          << VARINT(minted) << VARINT(burned) << VARINT(depth) << VARINT(volume) << VARINT(pools);
+        // Last, and only if there is one: a row without is written as in layout 1.
+        if (!display.empty()) s << display;
+    }
+    template <typename Stream>
+    void Unserialize(Stream& s)
+    {
+        s >> seq >> id >> text >> decimals >> flags >> VARINT_MODE(created, VarIntMode::NONNEGATIVE_SIGNED) >> VARINT_MODE(last, VarIntMode::NONNEGATIVE_SIGNED) >> VARINT(supply)
+          >> VARINT(minted) >> VARINT(burned) >> VARINT(depth) >> VARINT(volume) >> VARINT(pools);
+        display.clear();
+        if (!s.empty()) s >> display;
     }
     friend bool operator==(const AssetRow&, const AssetRow&) = default;
     Summary Summarize() const { return {flags, decimals, created, last, supply, depth}; }
@@ -191,14 +218,14 @@ struct Filters {
     std::optional<int> min_last;
     //! Registered after this height.
     std::optional<int> created_after;
-    //! Normalised words: an asset with any of them among the words of its name is left out.
+    //! Normalised words: an asset with any of them among the words of its name or display name is left out.
     std::vector<std::string> exclude_keywords;
     //! Only these (the wallet's, say).
     std::optional<std::set<uint32_t>> only;
 };
 
 struct Request {
-    //! Text matched against the names: the whole name, its start, the start of any of its words.
+    //! Text matched against the names (the whole name, its start, the start of any of its words), then the display names (their start, the start of any of their words).
     std::string text;
     //! These assets only, by number (a search for a number or a hash): no text then.
     std::optional<std::vector<uint32_t>> exact;
@@ -210,7 +237,7 @@ struct Request {
 
 struct Hit {
     AssetRow row;
-    //! How the text matched: 0 the whole name, 1 its start, 2 the start of a word; -1 no text.
+    //! How the text matched (RowMatch): 0 the whole name, 1 its start, 2 the start of a word, 3 the start of the display name, 4 of a word of it; -1 no text.
     int match{-1};
 };
 
@@ -226,6 +253,11 @@ struct Page {
 
 /** How a name matches normalised text: 0 equal, 1 starts with it, 2 a word of it (not the first) starts with it; nullopt if not. */
 std::optional<int> MatchTier(std::string_view norm_name, std::string_view text);
+/**
+ * How an asset matches normalised text: by its name (MatchTier: 0, 1, 2), else by its display name
+ * (3: equal or its start, 4: a later word of it); nullopt if neither.
+ */
+std::optional<int> RowMatch(const AssetRow& row, std::string_view text);
 
 /** A page of the assets that match; throws std::invalid_argument for a cursor that is not one of this search. */
 Page Search(const sidechain::StoreView& view, const Request& request);

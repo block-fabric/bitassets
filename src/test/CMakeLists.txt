@@ -20,6 +20,7 @@ add_executable(test_bitcoin
   bip32_tests.cpp
   bitassets_index_tests.cpp
   bitassets_logo_tests.cpp
+  bitassets_ticker_tests.cpp
   bitassets_tests.cpp
   bip324_tests.cpp
   blockchain_tests.cpp

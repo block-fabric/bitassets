@@ -363,6 +363,43 @@ void NeedLogos(CWallet& wallet)
     if (!wallet.chain().bitAssetsLogosActive()) throw JSONRPCError(RPC_WALLET_ERROR, "The logos of assets are not in the rules of the chain yet (logo_height in getbitassetsinfo)");
 }
 
+/**
+ * The name of a new asset as the wallet reserves and registers it: from ticker_height a ticker, the
+ * letters of what is given uppercased ("gold" is GOLD); before it, as given.
+ */
+std::string NewAssetName(CWallet& wallet, const std::string& given)
+{
+    if (!wallet.chain().bitAssetsTickersActive()) return given;
+    const std::string name{ToUpper(given)};
+    if (!bitassets::IsTicker(name)) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("The name of a new asset is a ticker (from ticker_height in getbitassetsinfo): %u to %u characters, "
+                                                            "letters A to Z and digits 0 to 9 only (\"%s\" is not one). A longer name goes in the display name",
+                                                            bitassets::MIN_TICKER_SIZE, bitassets::MAX_TICKER_SIZE, name));
+    }
+    return name;
+}
+
+/** Tickers and display names are in the rules from the next block, or a display name is refused here. */
+void NeedTickers(CWallet& wallet)
+{
+    if (!wallet.chain().bitAssetsTickersActive()) throw JSONRPCError(RPC_WALLET_ERROR, "Display names of assets are not in the rules of the chain yet (ticker_height in getbitassetsinfo)");
+}
+
+/** A display name given to an RPC, checked as the rules check it; "" if `allow_empty` (none). */
+std::string ParseDisplayName(const UniValue& value, bool allow_empty)
+{
+    const std::string& text{value.get_str()};
+    if (text.empty()) {
+        if (!allow_empty) throw JSONRPCError(RPC_INVALID_PARAMETER, "The display name is empty");
+        return text;
+    }
+    if (const auto why{bitassets::WhyNotDisplayName(text)}) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("The rules refuse this display name (bad-ba-display-name): %s. A display name is 1 to %u bytes of UTF-8 in NFC, "
+                                                            "printable, without a space at either end", *why, bitassets::MAX_DISPLAY_NAME_SIZE));
+    }
+    return text;
+}
+
 UniValue TxResult(const CTransactionRef& tx)
 {
     UniValue result(UniValue::VOBJ);
@@ -399,7 +436,8 @@ RPCMethod reserveasset()
         "without showing it, so that nobody can see it coming and take it first; registerasset registers it once\n"
         "the reservation is in a block." + HELP_REQUIRING_PASSPHRASE,
         {
-            {"name", RPCArg::Type::STR, RPCArg::Optional::NO, strprintf("The name: 1 to %u printable characters", bitassets::MAX_NAME_TEXT_SIZE)},
+            {"name", RPCArg::Type::STR, RPCArg::Optional::NO, strprintf("The name: 1 to %u printable characters; from ticker_height (getbitassetsinfo) a ticker, %u to %u letters A-Z and digits 0-9 (letters are uppercased)",
+                                                                          bitassets::MAX_NAME_TEXT_SIZE, bitassets::MIN_TICKER_SIZE, bitassets::MAX_TICKER_SIZE)},
         },
         RPCResult{RPCResult::Type::OBJ, "", "",
         {
@@ -411,7 +449,7 @@ RPCMethod reserveasset()
 {
     const auto pwallet{ReadyWallet(request)};
     if (!pwallet) return UniValue::VNULL;
-    const std::string name{request.params[0].get_str()};
+    const std::string name{NewAssetName(*pwallet, request.params[0].get_str())};
     if (!bitassets::IsAssetName(name)) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("A name is 1 to %u printable characters, without a space at either end", bitassets::MAX_NAME_TEXT_SIZE));
     if (bitassets::ReadsAsAnotherAsset(name)) throw JSONRPCError(RPC_INVALID_PARAMETER, "The name reads as another asset (CHN, a number such as 1739-0029, or \"0x\" and a hash)");
     if (bitassets::NameMimicsNumber(name)) throw JSONRPCError(RPC_INVALID_PARAMETER, NAME_MIMICS_NUMBER);
@@ -447,20 +485,25 @@ RPCMethod registerasset()
             {"data", RPCArg::Type::OBJ_NAMED_PARAMS, RPCArg::Optional::OMITTED, "Its data", bitassets::DataArgs()},
             {"public", RPCArg::Type::BOOL, RPCArg::Default{true}, "Publish the name, so that it is listed and found by name. Otherwise only its hash is on the chain"},
             {"logo", RPCArg::Type::STR, RPCArg::Optional::OMITTED, strprintf("Its logo, in base64: a PNG or JPEG of exactly %ux%u pixels, at most %u bytes, without metadata (see setassetlogo)", bitassets::LOGO_SIZE, bitassets::LOGO_SIZE, bitassets::MAX_LOGO_BYTES)},
+            {"display_name", RPCArg::Type::STR, RPCArg::Optional::OMITTED, strprintf("From ticker_height: its display name, shown with the ticker; not unique (see setassetdisplayname). 1 to %u bytes of UTF-8", bitassets::MAX_DISPLAY_NAME_SIZE)},
         },
         RPCResult{RPCResult::Type::OBJ, "", "",
         {
             {RPCResult::Type::STR_HEX, "txid", "The transaction"},
             {RPCResult::Type::STR_HEX, "asset", "The hash of the name"},
+            {RPCResult::Type::STR, "name", "The name (the ticker) registered"},
         }},
-        RPCExamples{HelpExampleCli("registerasset", "\"GOLD\" 1000000 2 '{\"info\": \"One gram of gold\"}'")},
+        RPCExamples{HelpExampleCli("registerasset", "\"GOLD\" 1000000 2 '{\"info\": \"One gram of gold\"}'") +
+                    HelpExampleCli("-named registerasset", "name=GOLD supply=1000 display_name=\"Gold Bar Token, 1 g\"")},
         [&](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
 {
     const auto pwallet{ReadyWallet(request)};
     if (!pwallet) return UniValue::VNULL;
-    const std::string name{request.params[0].get_str()};
+    const bool tickers{pwallet->chain().bitAssetsTickersActive()};
+    const std::string name{NewAssetName(*pwallet, request.params[0].get_str())};
     const AssetId asset{bitassets::HashName(name)};
     if (pwallet->chain().getBitAsset(asset)) throw JSONRPCError(RPC_INVALID_PARAMETER, "An asset of this name is registered");
+    if (tickers && !request.params[4].isNull() && !request.params[4].get_bool()) throw JSONRPCError(RPC_INVALID_PARAMETER, "From ticker_height the name of a new asset (its ticker) is published: public cannot be false");
     if (bitassets::ReadsAsAnotherAsset(name)) throw JSONRPCError(RPC_INVALID_PARAMETER, "The name reads as another asset (CHN, a number such as 1739-0029, or \"0x\" and a hash)");
     const int decimals{request.params[2].isNull() ? 0 : request.params[2].getInt<int>()};
     if (decimals < 0 || decimals > bitassets::MAX_DECIMALS) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("The decimals are from 0 to %u", bitassets::MAX_DECIMALS));
@@ -488,6 +531,10 @@ RPCMethod registerasset()
         NeedLogos(*pwallet);
         reg.logo = ParseLogo(request.params[5], /*allow_empty=*/false);
     }
+    if (!request.params[6].isNull() && !request.params[6].get_str().empty()) {
+        NeedTickers(*pwallet);
+        reg.display_name = ParseDisplayName(request.params[6], /*allow_empty=*/false);
+    }
     if (request.params[4].isNull() || request.params[4].get_bool()) {
         // Published, it would read as another asset's number where names are shown with theirs.
         if (bitassets::NameMimicsNumber(name)) throw JSONRPCError(RPC_INVALID_PARAMETER, std::string{NAME_MIMICS_NUMBER} + " (register it unpublished: public false)");
@@ -499,6 +546,7 @@ RPCMethod registerasset()
     UniValue result(UniValue::VOBJ);
     result.pushKV("txid", tx->GetHash().GetHex());
     result.pushKV("asset", asset.GetHex());
+    result.pushKV("name", name);
     return result;
 },
     };
@@ -888,6 +936,65 @@ RPCMethod setassetlogo()
         result.pushKV("hash", HexStr(hash));
     }
     result.pushKV("size", static_cast<uint64_t>(logo.size()));
+    CAmount fee{0};
+    {
+        LOCK(pwallet->cs_wallet);
+        CAmount in{0}, out{tx->GetValueOut()};
+        for (const CTxIn& txin : tx->vin) {
+            if (const CWalletTx* prev{pwallet->GetWalletTx(txin.prevout.hash)}) in += prev->GetTx()->vout[txin.prevout.n].nValue;
+        }
+        fee = in - out;
+    }
+    result.pushKV("fee", ValueFromAmount(fee));
+    return result;
+},
+    };
+}
+
+RPCMethod setassetdisplayname()
+{
+    return RPCMethod{
+        "setassetdisplayname",
+        strprintf("Set the display name of an asset this wallet controls, or remove it (an empty one). The display name is shown with\n"
+                  "the asset's ticker (its name, which stays as it is) and found by searchassets; it is not unique: other assets may have\n"
+                  "the same. 1 to %u bytes of UTF-8 in NFC, printable, no space at either end, no control, format (bidirectional,\n"
+                  "zero-width) or combining character. It replaces the one before. From ticker_height (getbitassetsinfo).", bitassets::MAX_DISPLAY_NAME_SIZE) +
+            HELP_REQUIRING_PASSPHRASE,
+        {
+            {"asset", RPCArg::Type::STR, RPCArg::Optional::NO, bitassets::ASSET_ARG_HELP},
+            {"display_name", RPCArg::Type::STR, RPCArg::Optional::NO, "The display name; \"\" removes it"},
+            {"options", RPCArg::Type::OBJ_NAMED_PARAMS, RPCArg::Optional::OMITTED, "",
+            {
+                {"fee_rate", RPCArg::Type::AMOUNT, RPCArg::DefaultHint{"the wallet's fee rate"}, "The fee rate, in " + CURRENCY_ATOM + "/vB"},
+            }},
+        },
+        RPCResult{RPCResult::Type::OBJ, "", "",
+        {
+            {RPCResult::Type::STR_HEX, "txid", "The transaction"},
+            {RPCResult::Type::STR, "display_name", /*optional=*/true, "The display name set (none when removed)"},
+            {RPCResult::Type::STR_AMOUNT, "fee", "The network fee paid"},
+        }},
+        RPCExamples{HelpExampleCli("setassetdisplayname", "\"GOLD\" \"Gold Bar Token, 1 g\"") + HelpExampleCli("setassetdisplayname", "\"GOLD\" \"\"")},
+        [&](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
+{
+    const auto pwallet{ReadyWallet(request)};
+    if (!pwallet) return UniValue::VNULL;
+    const AssetInfo asset{ParseAsset(*pwallet, request.params[0])};
+    if (asset.id.IsNull()) throw JSONRPCError(RPC_INVALID_PARAMETER, "CHN has no display name here");
+    if (asset.record->fixed) throw JSONRPCError(RPC_INVALID_PARAMETER, "The data of this asset is fixed: its control coin was burned");
+    NeedTickers(*pwallet);
+    const std::string display_name{ParseDisplayName(request.params[1], /*allow_empty=*/true)};
+    if (display_name.empty() && !pwallet->chain().getBitAssetDisplayName(asset.id)) throw JSONRPCError(RPC_INVALID_PARAMETER, "This asset has no display name to remove");
+    std::optional<CFeeRate> fee_rate;
+    if (!request.params[2].isNull()) {
+        const UniValue& rate{request.params[2].find_value("fee_rate")};
+        if (!rate.isNull()) fee_rate = CFeeRate{AmountFromValue(rate, /*decimals=*/3)};
+    }
+    const auto [inputs, total]{Select(*pwallet, Token::Kind::CONTROL, asset.id, 1, "the control coin of " + asset.label)};
+    const CTransactionRef tx{Send(*pwallet, bitassets::SetDisplayName{asset.id, display_name}, {{ChangeDestination(*pwallet), UnitToken(Token::Kind::CONTROL, asset.id)}}, inputs, 0, fee_rate)};
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("txid", tx->GetHash().GetHex());
+    if (!display_name.empty()) result.pushKV("display_name", display_name);
     CAmount fee{0};
     {
         LOCK(pwallet->cs_wallet);
@@ -1458,7 +1565,7 @@ RPCMethod listassettransactions()
             {RPCResult::Type::NUM, "confirmations", ""},
             {RPCResult::Type::STR_HEX, "blockhash", /*optional=*/true, ""},
             {RPCResult::Type::NUM, "blockheight", /*optional=*/true, ""},
-            {RPCResult::Type::STR, "category", "send, receive, register, mint, burn, swap, pool_add, pool_remove, auction, bid, collect, logo, update, control, reserve, release"},
+            {RPCResult::Type::STR, "category", "send, receive, register, mint, burn, swap, pool_add, pool_remove, auction, bid, collect, logo, display_name, update, control, reserve, release"},
             {RPCResult::Type::STR_HEX, "asset", /*optional=*/true, "The asset (none for a reservation)"},
             {RPCResult::Type::STR, "label", /*optional=*/true, "Its label"},
             {RPCResult::Type::STR, "seq", /*optional=*/true, "Its number"},
@@ -1624,6 +1731,8 @@ RPCMethod listassettransactions()
                     add("update", op.asset, std::nullopt, 0);
                 } else if constexpr (std::is_same_v<T, bitassets::SetLogo>) {
                     add("logo", op.asset, std::nullopt, 0);
+                } else if constexpr (std::is_same_v<T, bitassets::SetDisplayName>) {
+                    add("display_name", op.asset, std::nullopt, 0);
                 } else if constexpr (std::is_same_v<T, bitassets::ReleaseAsset>) {
                     add("release", op.asset, std::nullopt, 0);
                 } else if constexpr (std::is_same_v<T, bitassets::Burn>) {
@@ -1841,6 +1950,10 @@ RPCMethod listassetactivity()
                     operation = "logo";
                     summary = op.logo.empty() ? "Removed the logo of " + LabelOfAsset(*pwallet, op.asset)
                                               : strprintf("Set the logo of %s (%u bytes)", LabelOfAsset(*pwallet, op.asset), op.logo.size());
+                } else if constexpr (std::is_same_v<T, bitassets::SetDisplayName>) {
+                    operation = "display name";
+                    summary = op.display_name.empty() ? "Removed the display name of " + LabelOfAsset(*pwallet, op.asset)
+                                                      : strprintf("Set the display name of %s to \"%s\"", LabelOfAsset(*pwallet, op.asset), op.display_name);
                 }
             }, *e.marker.operation);
         } else {

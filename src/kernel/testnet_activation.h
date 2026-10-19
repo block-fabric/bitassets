@@ -29,4 +29,14 @@ inline constexpr int TESTNET_MAIN_ACTIVATION_HEIGHT{67};
  */
 inline constexpr int TESTNET_LOGO_HEIGHT{439};
 
+/**
+ * Tickers and display names on the test network (Consensus::SidechainParams::ticker_height;
+ * bitassets::CheckTickerActivation, doc/bitassets.md "Tickers and display names"): from this BitAssets
+ * block on, the name of a new asset is a ticker and a marker may set a display name. A placeholder
+ * (never) until the deploy: set it a few blocks above the tip then, rebuild, and upgrade every node of
+ * the test network before the chain reaches it (a node of before would refuse the blocks that set a
+ * display name, and take registrations that are not tickers).
+ */
+inline constexpr int TESTNET_TICKER_HEIGHT{std::numeric_limits<int>::max()};
+
 #endif // BITCOIN_KERNEL_TESTNET_ACTIVATION_H

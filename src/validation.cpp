@@ -827,6 +827,7 @@ bool MemPoolAccept::DrivechainChecks(Workspace& ws)
         const int height{m_active_chainstate.m_chain.Height() + 1};
         size_t payouts{0};
         if (!bitassets::CheckLogoActivation(tx, side_params.LogoActive(height), reject_reason) ||
+            !bitassets::CheckTickerActivation(tx, side_params.TickerActive(height), reject_reason) ||
             !side.BitAssets().CheckTx(tx, height, reject_reason, nullptr, side_params.bitassets_reveal_depth, &payouts)) {
             return ws.m_state.Invalid(TxValidationResult::TX_CONSENSUS, reject_reason);
         }
@@ -5937,6 +5938,7 @@ void Chainstate::RemoveStaleDrivechainTxs()
             if (!tx) continue;
             const bitassets::RecordingView reads{side.View()};
             if (!bitassets::CheckLogoActivation(*tx, m_chainman.GetConsensus().sidechain.LogoActive(tip->nHeight + 1), reject_reason) ||
+                !bitassets::CheckTickerActivation(*tx, m_chainman.GetConsensus().sidechain.TickerActive(tip->nHeight + 1), reject_reason) ||
                 !bitassets::State{reads}.CheckTx(*tx, tip->nHeight + 1, reject_reason, nullptr, m_chainman.GetConsensus().sidechain.bitassets_reveal_depth)) {
                 stale.push_back(tx);
                 continue;
@@ -6299,6 +6301,8 @@ util::Result<void> Chainstate::LoadDrivechainState()
     // BitAssets: a store whose assets are in the layout of an earlier version is derived again from
     // the blocks (bitassets::STORE_LAYOUT), as a snapshot of an earlier format is.
     // So is one without the search index of the assets of this version (derived data: bitassets/index.h).
+    // An index of the layout before display names is of this one already (bitassets::index::UpgradeLayout): nothing is derived again for it.
+    if (bitassets::StoreLayoutCurrent(cache) && bitassets::index::UpgradeLayout(cache)) LogInfo("The search index of the assets is brought to layout %u in place (display names)", bitassets::index::INDEX_LAYOUT);
     const bool layout_current{bitassets::StoreLayoutCurrent(cache) && bitassets::index::LayoutCurrent(cache)};
     if (!layout_current) LogInfo("The assets in the sidechain database are in an earlier layout, or without their search index: deriving it again from the blocks");
     if (have_state && layout_current && scdb.GetBlockHash() == tip->GetBlockHash()) {

@@ -804,6 +804,16 @@ public:
         LOCK(::cs_main);
         return chainman().GetConsensus().sidechain.LogoActive(chainman().ActiveChain().Height() + 1);
     }
+    std::optional<bitassets::DisplayNameRecord> getBitAssetDisplayName(const bitassets::AssetId& asset) override
+    {
+        LOCK(::cs_main);
+        return chainman().ActiveChainstate().SideState().BitAssets().GetDisplayName(asset);
+    }
+    bool bitAssetsTickersActive() override
+    {
+        LOCK(::cs_main);
+        return chainman().GetConsensus().sidechain.TickerActive(chainman().ActiveChain().Height() + 1);
+    }
     std::optional<int> getBitAssetsReservationHeight(const Txid& txid) override
     {
         LOCK(::cs_main);

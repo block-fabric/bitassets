@@ -172,6 +172,7 @@ BASE_SCRIPTS = [
     'feature_bitassets.py',
     'feature_bitassets_invalid.py',
     'feature_bitassets_logo.py',
+    'feature_bitassets_ticker.py',
     'feature_bitassets_transactions.py',
     'feature_bitassets_search.py',
     'feature_sidechain_network.py',

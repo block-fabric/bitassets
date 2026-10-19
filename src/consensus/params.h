@@ -140,6 +140,15 @@ struct SidechainParams {
     int logo_height{std::numeric_limits<int>::max()};
     bool LogoActive(int height) const { return height >= logo_height; }
     /**
+     * BitAssets: the first block of tickers and display names (bitassets::CheckTickerActivation): from it
+     * the name of a new asset is a ticker (2 to 12 of A-Z and 0-9, published), and a marker may set a
+     * display name (SetDisplayName, a registration with one). Assets registered before keep their names.
+     * Before it, a display name is not valid, as it never was: nodes have to be upgraded before it.
+     * Never (the largest int) until set.
+     */
+    int ticker_height{std::numeric_limits<int>::max()};
+    bool TickerActive(int height) const { return height >= ticker_height; }
+    /**
      * BitAssets, not a rule: the blocks over which the search index of the assets (bitassets/index.h)
      * sums the volume traded, about a day of blocks (1440 one-minute blocks). 0: no volume kept.
      */

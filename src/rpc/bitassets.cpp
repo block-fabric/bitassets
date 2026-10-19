@@ -112,7 +112,8 @@ std::vector<RPCResult> AssetResults()
 {
     return {
         {RPCResult::Type::STR_HEX, "asset", "The hash of its name, by which the chain knows it"},
-        {RPCResult::Type::STR, "name", /*optional=*/true, "Its name, if its registration published it"},
+        {RPCResult::Type::STR, "name", /*optional=*/true, "Its name, if its registration published it: its ticker (from ticker_height a ticker; the names of before as they are)"},
+        {RPCResult::Type::STR, "display_name", /*optional=*/true, "Its display name, if it has one (not unique: shown with the ticker, never instead of it)"},
         {RPCResult::Type::STR, "label", "How it is shown: its name, or \"0x\" and its hash"},
         {RPCResult::Type::STR, "seq", "Its number, in the order of registration"},
         {RPCResult::Type::NUM, "decimals", "The decimals it is shown with"},
@@ -140,6 +141,7 @@ UniValue AssetToJSON(Chainstate& chainstate, const bitassets::State& state, cons
     UniValue obj(UniValue::VOBJ);
     obj.pushKV("asset", asset.GetHex());
     if (!record.text.empty()) obj.pushKV("name", record.text);
+    if (const auto display{state.GetDisplayName(asset)}) obj.pushKV("display_name", display->text);
     obj.pushKV("label", AssetLabel(asset, &record));
     obj.pushKV("seq", bitassets::FormatSeq(record.seq));
     obj.pushKV("decimals", record.decimals);
@@ -547,6 +549,11 @@ RPCMethod getbitassetsinfo()
             {RPCResult::Type::NUM, "reveal_depth", "How many blocks after the block that made a reservation a block may take its registration"},
             {RPCResult::Type::NUM, "logo_height", "The first block of the logos of assets (-1: never on this network)"},
             {RPCResult::Type::NUM, "max_logo_bytes", "The most bytes a logo may have"},
+            {RPCResult::Type::NUM, "ticker_height", "The first block of tickers and display names (-1: never on this network): from it the name of a new asset is a ticker"},
+            {RPCResult::Type::BOOL, "tickers_active", "Whether the next block has the rules of tickers and display names"},
+            {RPCResult::Type::NUM, "min_ticker_length", "The fewest characters of a ticker"},
+            {RPCResult::Type::NUM, "max_ticker_length", "The most characters of a ticker (A-Z, 0-9)"},
+            {RPCResult::Type::NUM, "max_display_name_bytes", "The most bytes (UTF-8) of a display name"},
         }},
         RPCExamples{HelpExampleCli("getbitassetsinfo", "")},
         [&](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
@@ -566,6 +573,12 @@ RPCMethod getbitassetsinfo()
     const int logo_height{chainman.GetConsensus().sidechain.logo_height};
     result.pushKV("logo_height", logo_height == std::numeric_limits<int>::max() ? -1 : logo_height);
     result.pushKV("max_logo_bytes", static_cast<uint64_t>(bitassets::MAX_LOGO_BYTES));
+    const int ticker_height{chainman.GetConsensus().sidechain.ticker_height};
+    result.pushKV("ticker_height", ticker_height == std::numeric_limits<int>::max() ? -1 : ticker_height);
+    result.pushKV("tickers_active", chainman.GetConsensus().sidechain.TickerActive(chainman.ActiveChain().Height() + 1));
+    result.pushKV("min_ticker_length", static_cast<uint64_t>(bitassets::MIN_TICKER_SIZE));
+    result.pushKV("max_ticker_length", static_cast<uint64_t>(bitassets::MAX_TICKER_SIZE));
+    result.pushKV("max_display_name_bytes", static_cast<uint64_t>(bitassets::MAX_DISPLAY_NAME_SIZE));
     return result;
 },
     };
@@ -880,13 +893,14 @@ UniValue HitToJSON(const bitassets::index::Hit& hit)
     UniValue obj(UniValue::VOBJ);
     obj.pushKV("asset", row.id.GetHex());
     if (row.flags & NAMED) obj.pushKV("name", row.text);
+    if (!row.display.empty()) obj.pushKV("display_name", row.display);
     obj.pushKV("label", row.flags & NAMED ? row.text : "0x" + row.id.GetHex());
     obj.pushKV("seq", bitassets::FormatSeq(row.seq));
     obj.pushKV("decimals", row.decimals);
     obj.pushKV("supply", AmountToJSON(row.supply, row.decimals));
     obj.pushKV("minted", AmountToJSON(row.minted, row.decimals));
     obj.pushKV("burned", AmountToJSON(row.burned, row.decimals));
-    obj.pushKV("fixed", (row.flags & FIXED) != 0);
+    obj.pushKV("fixed", (row.flags & bitassets::index::FIXED) != 0);
     obj.pushKV("retired", (row.flags & RETIRED) != 0);
     obj.pushKV("has_logo", (row.flags & HAS_LOGO) != 0);
     obj.pushKV("has_pool", (row.flags & HAS_POOL) != 0);
@@ -896,7 +910,8 @@ UniValue HitToJSON(const bitassets::index::Hit& hit)
     obj.pushKV("created", row.created);
     obj.pushKV("registered", row.created);
     obj.pushKV("last_activity", row.last);
-    if (hit.match >= 0) obj.pushKV("match", hit.match == 0 ? "exact" : hit.match == 1 ? "prefix" : "word");
+    static constexpr const char* MATCHES[]{"exact", "prefix", "word", "display_name", "display_word"};
+    if (hit.match >= 0 && hit.match < 5) obj.pushKV("match", MATCHES[hit.match]);
     return obj;
 }
 

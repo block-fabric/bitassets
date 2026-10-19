@@ -216,6 +216,10 @@ public:
     virtual std::optional<bitassets::LogoRecord> getBitAssetLogo(const bitassets::AssetId& asset) = 0;
     //! BitAssets: whether the next block has the rules of the logos (SidechainParams::logo_height).
     virtual bool bitAssetsLogosActive() = 0;
+    //! BitAssets: the display name of an asset, if it has one.
+    virtual std::optional<bitassets::DisplayNameRecord> getBitAssetDisplayName(const bitassets::AssetId& asset) = 0;
+    //! BitAssets: whether the next block has the rules of tickers and display names (SidechainParams::ticker_height).
+    virtual bool bitAssetsTickersActive() = 0;
     //! BitAssets: how deep a reservation is before a registration reveals it (bitassets_reveal_depth).
     virtual int getBitAssetsRevealDepth() = 0;
     //! BitAssets: the height of the block that made a reservation not revealed yet, if it is in one.
