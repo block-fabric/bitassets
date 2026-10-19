@@ -212,7 +212,10 @@ class BitAssetsSearchTest(BitAssetsTest):
                 t.start()
             for t in threads:
                 t.join()
+            # Until all are in blocks (a chain of smaller blocks, Layers', takes several).
             self.mine_txs()
+            while side.getmempoolinfo()["size"] or other.getmempoolinfo()["size"]:
+                self.mine_txs()
 
         for start in range(0, COUNT // 2 + 4, 400):
             both("reserveasset", start)
