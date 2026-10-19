@@ -699,6 +699,32 @@ RPCMethod listmyassets()
     };
 }
 
+RPCMethod searchmyassets()
+{
+    return RPCMethod{
+        "searchmyassets",
+        "searchassets among the assets this wallet holds or controls, in blocks: the same arguments, filters, sorts, cursor and result,\n"
+        "by the node's search index. Bounded by the wallet's own transactions.",
+        bitassets::SearchAssetsArgs(),
+        bitassets::SearchAssetsResult(),
+        RPCExamples{HelpExampleCli("searchmyassets", "") + HelpExampleCli("-rpcwallet=w searchmyassets", "\"gold\" '{}' supply")},
+        [&](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
+{
+    const std::shared_ptr<const CWallet> pwallet{GetWalletForJSONRPCRequest(request)};
+    if (!pwallet) return UniValue::VNULL;
+    pwallet->BlockUntilSyncedToCurrentChain();
+    // Its asset coins and control coins, as the chain has them now.
+    std::set<AssetId> mine;
+    for (const OwnedToken& t : OwnedTokens(const_cast<CWallet&>(*pwallet))) {
+        if (t.token.kind == Token::Kind::ASSET || t.token.kind == Token::Kind::CONTROL) mine.insert(t.token.id);
+    }
+    UniValue params(UniValue::VARR);
+    for (size_t i{0}; i < 5; ++i) params.push_back(i < request.params.size() ? request.params[i] : UniValue{});
+    return pwallet->chain().searchBitAssets(params, std::vector<AssetId>(mine.begin(), mine.end()));
+},
+    };
+}
+
 RPCMethod sendasset()
 {
     return RPCMethod{

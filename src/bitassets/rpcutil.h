@@ -42,6 +42,11 @@ UniValue AmountToJSON(uint64_t units, uint8_t decimals);
 std::string FormatUnits(uint64_t units, uint8_t decimals);
 /** Units from a JSON number or string in whole assets, with at most `decimals` decimals. */
 uint64_t ParseUnits(const UniValue& value, uint8_t decimals, bool allow_zero = false);
+/** The arguments of searchassets and of the wallet's searchmyassets: query, filters, sort, cursor, limit. */
+std::vector<RPCArg> SearchAssetsArgs();
+/** What they return. */
+RPCResult SearchAssetsResult();
+
 /** The decimals of CHN. */
 inline constexpr uint8_t CHN_DECIMALS{8};
 

@@ -181,6 +181,7 @@ uint256 StoreHash(const StoreView& view, std::span<const unsigned char> prefix,
 {
     HashWriter hasher{};
     view.ForEach(prefix, [&](const StoreBytes& key, const StoreBytes& value) {
+        if (IsDerivedKey(key)) return true;
         hasher << key << value;
         if (each) each(key, value);
         return true;

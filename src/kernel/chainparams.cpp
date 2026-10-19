@@ -561,6 +561,8 @@ public:
             consensus.sidechain.bitassets_reveal_depth = 2;
             // The logos of assets from the first block, unless a test asks (-testactivationheight=logo@<height>).
             consensus.sidechain.logo_height = opts.dep_opts.logo_height.value_or(0);
+            // A short window of volume for the search index, that tests can see expire.
+            consensus.sidechain.asset_volume_window = 10;
             // A tenth of the regtest mainchain's withdrawal_min_score (30).
             consensus.sidechain.pending_min_score = 3;
             consensus.sidechain.unproposed_expiry_blocks = 20;

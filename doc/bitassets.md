@@ -216,13 +216,134 @@ them, and the rules before them are gone. (The logos of assets, added after, hav
   withdrawal of 1 satoshi, without fee).
 
 A node stores the assets in a layout of its version (`bitassets::STORE_LAYOUT`, 4 since the audits'
-rules apply from genesis); one that finds them in an earlier layout derives the sidechain state again
+rules apply from genesis, and the search index in its own, `bitassets::index::INDEX_LAYOUT`); one that finds them in an earlier layout derives the sidechain state again
 from its blocks at startup (a pruned node cannot, and has to be resynced).
+
+## The search index
+
+Wallet pages search, filter, sort and page through the assets, pools and auctions on the node, a page
+at a time: no page reads the assets whole, however many there are (millions, in time).
+
+**What it is.** Derived data, not state: no rule reads it. It is kept in the store of the sidechain
+state, under a key byte of its own (`sidechain::DERIVED_TABLE`, 0xA0), and written at the end of each
+block (`bitassets::index::ConnectBlock`, after the block's own rules) from what the block changed: the
+journal of the block's overlay lists every key of the assets, tokens, pools, auctions and logos the
+block touched, with its earlier value. So it is flushed with the state and the coins, undone with the
+block by a reorganisation (its keys are in the block's undo data like any other), always at the tip,
+and identical on every node: there is nothing to enable, sync or rebuild apart, and no index can lag
+or drift from the chain. The hash of the state (`getsidechainstate`) leaves it out. It is always on:
+it costs a few store writes per asset a block touches, and the disk below, small next to the state it
+indexes; an option would only make some nodes unable to answer the wallets. Upgrading to the version
+that has it (index layout 1) derives the sidechain state once from the blocks at startup (a pruned node
+that no longer has them all has to be resynced); the state itself, and its hash, are unchanged.
+
+Per asset ever registered, a row (number, id, name, decimals, supply, minted, burned, flags: fixed,
+retired, has a logo, has a pool; registration height, last activity height, CHN depth of its pool with
+CHN, volume over the window, pools) and an entry in each order, each entry carrying the summary the
+filters read (flags, decimals, heights, supply, depth), so that filtering never reads a row:
+
+| Order | Key | Holds |
+|---|---|---|
+| name | normalised name, then number | every asset (private ones after the named) |
+| words | each word of the name that starts after its start | named assets |
+| newest | inverted number | every asset |
+| supply | inverted supply | every asset |
+| activity | inverted last activity height | every asset |
+| volume | inverted volume | assets traded within the window |
+| pool depth | inverted CHN depth | assets with a pool with CHN someone provides for |
+
+*Activity* is any block that touches the asset: a transfer of its coins or control coin, a mint, a
+burn, a change of its data or logo, a trade or deposit in one of its pools, its auctions, its
+retirement. *Volume* is the CHN traded over the last `SidechainParams::asset_volume_window` blocks
+(1440 on BitAssets, about a day of one-minute blocks; 5760 on Layers, a day of 15-second slots;
+10 on regtest): what went into a pool with CHN, the CHN side as is and the asset side at the pool's
+price after the block, and bids paid in CHN (or CHN sold) by its auctions. Each block's volumes are
+kept apart until they leave the window, when they are taken off. Pools have rows of their own
+(reserves, depth, volume, the reserves at the start of the window for the price change) with orders
+by depth, volume, price change and age; auctions not closed are ordered by their last block, all of
+them by age. Retired assets keep their rows, flagged (their names may belong to another asset now).
+
+**Disk and memory.** 247 bytes per asset on disk in LevelDB (measured over a million synthetic assets
+with two- and three-word names: about 250 MB per million assets), plus a few dozen bytes per pool and
+auction and per asset and pool traded in each block of the window. Nothing is held in memory but the
+page being read: a search reads the database through a snapshot, without the chain lock.
+
+**How a search reads it.** A search walks one order from its cursor, with the filters, until the page
+is full: a page costs about the entries it skips, not the assets there are. A text matches the whole
+name, its start, or the start of any of its words (any case): by relevance it reads the names that
+start with the text, then the words that do; in another order it collects the matches (at most 5000)
+and sorts them, or, if there are more, walks that order with the text as a filter. The wallet's
+assets (`searchmyassets`), a list of assets, a number or a hash are a set sorted the same way. Each call looks at 50 000 entries
+and reads 10 000 rows at most: a page cut short by that says `partial`, with a cursor to go on.
+Cursors are the key of the last entry returned: stable while the chain moves (an asset that moves in
+the order meanwhile may show twice or not at all, as in any paged list of live data).
+
+Measured with a million assets in LevelDB on the development PC (`BITASSETS_INDEX_BENCH=1 test_bitcoin
+--run_test=bitassets_index_tests/million`), pages of 50, averaged over 10 pages:
+
+| Search | ms per page |
+|---|---|
+| every order (activity, newest, name, supply, volume, pool depth) | 0.1 to 0.3 |
+| a text by relevance ("gold", "coin") | 0.1 |
+| a text matched by nothing ("moon 12345": every name with "moon" as a later word read) | 19 |
+| a text by supply, more matches than 5000 | 2 |
+| a text by supply, fewer (sorted in memory) | 22 |
+| supply, has_logo, exclude_burned | 0.7 |
+| name, has_pool, min_supply (few pass) | 3 |
+| a filter nothing passes (the whole budget of 50 000 entries) | 12 |
+
+### Commands
+
+`searchassets (query filters sort cursor limit)`: `query` is text, `"#"` and a number, a number
+(`1739-0029`), or a hash (`0x` optional); `filters` is an object of `min_supply` (whole units),
+`has_pool`, `has_logo`, `active_within_blocks` / `exclude_dead` (blocks: only those touched within),
+`created_after` (height), `exclude_burned` (supply 0), `exclude_retired` (default true),
+`exclude_keywords` (whole words of the names, any case), `assets` (only these: names, numbers or hashes, at
+most 5000); `exclude_dead: true` means not touched within the volume window (about a day); `sort` is `relevance` (default; no
+text: as activity), `name`, `newest`, `oldest`, `supply`, `activity`, `volume`, `pool_depth`; `limit`
+1 to 200 (default 50). It returns `assets` (number, id, name, supply, minted, burned, flags, pools,
+`pool_depth` and `volume` in CHN, `created`, `last_activity`, and how a text matched: `exact`,
+`prefix` or `word`, and, unless retired, the other fields of `getasset`: registration, data, releasable,
+control, logo), `next_cursor` (the cursor of the next page, null at the end), `partial`, `scanned`, `height`.
+Arguments are positional in this order (`null` for no cursor) or named.
+
+`searchmyassets (query filters sort cursor limit)` (wallet): the same among the assets the wallet holds or
+controls, in blocks (its own token outputs, bounded by the wallet's transactions), the wallet chosen as for any
+wallet command (`-rpcwallet`, `/wallet/<name>`). The node's `searchassets` never reads a wallet: `mine` there is
+refused with a pointer to `searchmyassets`.
+
+```
+bitassets-cli searchassets gold
+bitassets-cli -named searchassets query=gold sort=volume limit=20 filters='{"has_pool":true}'
+bitassets-cli searchassets "" '{"exclude_dead":1440,"exclude_burned":true,"exclude_keywords":["test"]}' newest
+bitassets-cli -rpcwallet=w searchmyassets "" '{}' name
+bitassets-cli searchassets "" '{}' newest <next_cursor of the page before>
+bitassets-cli searchassets "#1739-0029"
+```
+
+`searchpools (query filters sort cursor limit)`: pools whose assets match the text (of the first 1000
+assets it matches, found within one search budget: a text that few names match among millions stops there and
+says `partial`); filters `exclude_keywords` (either asset's name), `exclude_abandoned` (default true), `chn_only`, `min_depth` (CHN); sorts
+`depth` (default; pools with CHN), `volume` (traded within the window), `price_change` (of the second
+asset in the first, CHN for a pool with CHN, over the window, largest rise first), `newest`. Each pool
+as `listpools` shows it, with `depth`, `volume_window`, `price_change` (percent), `last_activity`. The sorts and
+filters of `searchassets` are taken too (an app sends the same object): `relevance`, `pool_depth`, `name`,
+`supply`, `oldest` sort by depth, `activity` by volume; the filters of assets are left aside.
+
+`searchauctions (query filters sort cursor limit)`: auctions not closed that sell or sell for an asset
+the text matches; filter `status` (`open`, `upcoming`, `active` = open or upcoming (default), `ended`
+= not collected yet, `any`), `include_closed` (sort newest, no text) and `exclude_keywords`; sorts
+`ending_soon` (default; any sort of `searchassets` but `newest`) and `newest`. All three return `next_cursor`
+and `partial`. Each auction as `listauctions` shows it.
+
+`getassetindexinfo`: `synced` (always: it is at the tip), `height`, `bestblock`, `count` (assets
+indexed, retired ones included), `retired`, `pools`, `volume_window`, `max_page`.
 
 ## Commands
 
 Node: `getasset`, `listassets`, `getassethistory`, `getassetlogo`, `getbitassetsinfo`, `listpools`, `getpool`,
-`quoteswap`, `listauctions`, `getauction`, `quotebid`.
+`quoteswap`, `listauctions`, `getauction`, `quotebid`, and the search (above): `searchassets`, `searchpools`,
+`searchauctions`, `getassetindexinfo`.
 `listassets`, `listpools` and `listauctions` return a page at a time (`count`, at most 1000 for
 pools and auctions, and `skip`; `listauctions` also by asset). The pools and auctions are ordered,
 and `getbitassetsinfo` counted, once per block from a snapshot of the state read without the chain

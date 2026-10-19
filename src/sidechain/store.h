@@ -188,6 +188,9 @@ public:
 
     /** The earlier values of what changed since the journal was started or taken. */
     StoreUndo TakeUndo();
+    /** Whether this overlay notes the earlier values of what it changes, and what it noted so far (TakeUndo). */
+    bool Journaling() const { return m_journal; }
+    const StoreUndo& Journal() const { return m_undo; }
     const std::map<StoreBytes, std::optional<StoreBytes>>& Changes() const { return m_changes; }
     /** Apply the changes to `parent` (which must be this overlay's base) and forget them. */
     void MergeInto(StoreOverlay& parent);
@@ -223,7 +226,17 @@ private:
 };
 
 /**
- * A hash over every entry under `prefix`, in key order: the same for the same state, whatever stores it.
+ * The first byte of the keys of what the state keeps for those who look and no rule reads: data
+ * derived from the state, block by block (bitassets/index.h, the search index of the assets). It
+ * changes with the blocks and is undone with them, as the state is, but it is not state: StoreHash
+ * leaves it out, so that nodes whose versions derive more or less of it still agree on the state.
+ */
+inline constexpr uint8_t DERIVED_TABLE{0xA0};
+inline bool IsDerivedKey(std::span<const unsigned char> key) { return !key.empty() && key[0] == DERIVED_TABLE; }
+
+/**
+ * A hash over every entry under `prefix`, in key order, derived data (DERIVED_TABLE) left out: the
+ * same for the same state, whatever stores it.
  * @param[in] each  if given, called with every entry on the way
  */
 uint256 StoreHash(const StoreView& view, std::span<const unsigned char> prefix = {},

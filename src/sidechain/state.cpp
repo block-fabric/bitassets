@@ -5,6 +5,7 @@
 #include <sidechain/state.h>
 
 #include <addresstype.h>
+#include <bitassets/index.h>
 #include <common/signmessage.h>
 #include <crypto/common.h>
 #include <drivechain/sidechain.h>
@@ -545,7 +546,10 @@ bool State::ConnectBlock(const CBlock& block, int height, const Consensus::Sidec
             return false;
         }
     }
-    return Hooks().AfterBlock(*this, block, height, step, minted, params, reject_reason);
+    if (!Hooks().AfterBlock(*this, block, height, step, minted, params, reject_reason)) return false;
+    // The search index of the assets (derived data, no rule reads it), from what the block changed.
+    if (m_overlay) bitassets::index::ConnectBlock(*m_overlay, height, params.asset_volume_window);
+    return true;
 }
 
 bool State::ApplyPegStep(const CBlock& block, int height, const PegStep& step, const Consensus::SidechainParams& params, const Mainchain& mainchain,

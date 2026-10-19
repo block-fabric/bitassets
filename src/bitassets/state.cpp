@@ -897,6 +897,19 @@ std::vector<std::pair<uint256, Pool>> State::PoolsOf(const AssetId& asset) const
     return pools;
 }
 
+std::vector<Txid> State::AuctionsOf(const AssetId& asset, size_t limit) const
+{
+    std::vector<Txid> auctions;
+    m_view->ForEach(Prefix(AUCTIONS_BY_ASSET, asset), [&](const sidechain::StoreBytes& key, const sidechain::StoreBytes&) {
+        if (auctions.size() >= limit) return false;
+        std::span<const unsigned char> in{key};
+        in = in.subspan(33);
+        auctions.push_back(Txid::FromUint256(sidechain::KeyCodec<uint256>::Decode(in)));
+        return true;
+    });
+    return auctions;
+}
+
 size_t State::PoolCount() const
 {
     size_t n{0};

@@ -1077,6 +1077,7 @@ RPCMethod reserveasset();
 RPCMethod registerasset();
 RPCMethod releaseassetreservation();
 RPCMethod listmyassets();
+RPCMethod searchmyassets();
 RPCMethod sendasset();
 RPCMethod mintasset();
 RPCMethod burnasset();
@@ -1164,6 +1165,7 @@ std::span<const CRPCCommand> GetWalletRPCCommands()
         {"wallet", &registerasset},
         {"wallet", &releaseassetreservation},
         {"wallet", &listmyassets},
+        {"wallet", &searchmyassets},
         {"wallet", &sendasset},
         {"wallet", &mintasset},
         {"wallet", &burnasset},

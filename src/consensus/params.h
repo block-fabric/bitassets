@@ -139,6 +139,11 @@ struct SidechainParams {
      */
     int logo_height{std::numeric_limits<int>::max()};
     bool LogoActive(int height) const { return height >= logo_height; }
+    /**
+     * BitAssets, not a rule: the blocks over which the search index of the assets (bitassets/index.h)
+     * sums the volume traded, about a day of blocks (1440 one-minute blocks). 0: no volume kept.
+     */
+    int asset_volume_window{1440};
 };
 
 /**

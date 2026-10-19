@@ -4,6 +4,7 @@
 //
 // Inspired by BitAssets by LayerTwo Labs (plain-bitassets).
 
+#include <bitassets/index.h>
 #include <bitassets/logo.h>
 #include <bitassets/rpcutil.h>
 #include <bitassets/state.h>
@@ -11,6 +12,7 @@
 #include <core_io.h>
 #include <key_io.h>
 #include <node/context.h>
+#include <rpc/bitassets.h>
 #include <rpc/server.h>
 #include <rpc/server_util.h>
 #include <rpc/util.h>
@@ -23,6 +25,8 @@
 #include <univalue.h>
 
 #include <cmath>
+#include <locale>
+#include <sstream>
 #include <memory>
 
 using bitassets::AssetId;
@@ -804,7 +808,554 @@ RPCMethod quotebid()
     };
 }
 
+//
+// Search: the search index of the assets (bitassets/index.h), a page at a time.
+//
+
+/** Run `fn` on the state at the tip and its height: a snapshot read without cs_main if one can be made. */
+template <typename F>
+UniValue WithIndexView(ChainstateManager& chainman, F&& fn) EXCLUSIVE_LOCKS_REQUIRED(!::cs_main)
+{
+    std::shared_ptr<const sidechain::StoreView> view;
+    int height;
+    {
+        LOCK(::cs_main);
+        Chainstate& chainstate{chainman.ActiveChainstate()};
+        height = chainstate.m_chain.Height();
+        view = chainstate.SideCache().SharedSnapshot();
+        if (!view) return fn(static_cast<const sidechain::StoreView&>(chainstate.SideCache()), height);
+    }
+    return fn(*view, height);
+}
+
+std::vector<unsigned char> ParseCursor(const UniValue& value)
+{
+    if (value.isNull() || value.get_str().empty()) return {};
+    const auto bytes{TryParseHex<unsigned char>(value.get_str())};
+    if (!bytes) throw JSONRPCError(RPC_INVALID_PARAMETER, "The cursor is not one a search returned");
+    return *bytes;
+}
+
+UniValue CursorToJSON(const std::vector<unsigned char>& next)
+{
+    return next.empty() ? UniValue{} : UniValue{HexStr(next)};
+}
+
+size_t ParseLimit(const UniValue& value)
+{
+    if (value.isNull()) return 50;
+    const int limit{value.getInt<int>()};
+    if (limit < 1 || static_cast<size_t>(limit) > bitassets::index::MAX_PAGE) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("limit is from 1 to %u", bitassets::index::MAX_PAGE));
+    }
+    return static_cast<size_t>(limit);
+}
+
+/** An asset named exactly (its number, "#" and its number, its hash): the numbers of what it names (none if nothing). */
+std::optional<std::vector<uint32_t>> ExactQuery(const std::string& query, const bitassets::State& state)
+{
+    std::string text{util::TrimString(query)};
+    if (text.starts_with('#')) text = text.substr(1);
+    if (bitassets::ShapedAsNumber(text)) {
+        const auto seq{bitassets::ParseSeq(text)};
+        if (!seq) return std::vector<uint32_t>{};
+        return std::vector<uint32_t>{*seq};
+    }
+    std::string hex{text};
+    if (hex.starts_with("0x") || hex.starts_with("0X")) hex = hex.substr(2);
+    if (hex.size() == 64 && IsHex(hex)) {
+        const auto id{uint256::FromHex(hex)};
+        const auto record{id ? state.GetAsset(*id) : std::nullopt};
+        if (!record) return std::vector<uint32_t>{};
+        return std::vector<uint32_t>{record->seq};
+    }
+    if (text != util::TrimString(query) || text.starts_with("0x")) return std::vector<uint32_t>{};
+    return std::nullopt;
+}
+
+UniValue HitToJSON(const bitassets::index::Hit& hit)
+{
+    using namespace bitassets::index;
+    const AssetRow& row{hit.row};
+    UniValue obj(UniValue::VOBJ);
+    obj.pushKV("asset", row.id.GetHex());
+    if (row.flags & NAMED) obj.pushKV("name", row.text);
+    obj.pushKV("label", row.flags & NAMED ? row.text : "0x" + row.id.GetHex());
+    obj.pushKV("seq", bitassets::FormatSeq(row.seq));
+    obj.pushKV("decimals", row.decimals);
+    obj.pushKV("supply", AmountToJSON(row.supply, row.decimals));
+    obj.pushKV("minted", AmountToJSON(row.minted, row.decimals));
+    obj.pushKV("burned", AmountToJSON(row.burned, row.decimals));
+    obj.pushKV("fixed", (row.flags & FIXED) != 0);
+    obj.pushKV("retired", (row.flags & RETIRED) != 0);
+    obj.pushKV("has_logo", (row.flags & HAS_LOGO) != 0);
+    obj.pushKV("has_pool", (row.flags & HAS_POOL) != 0);
+    obj.pushKV("pools", row.pools);
+    obj.pushKV("pool_depth", ValueFromAmount(static_cast<CAmount>(std::min<uint64_t>(row.depth, MAX_MONEY))));
+    obj.pushKV("volume", ValueFromAmount(static_cast<CAmount>(std::min<uint64_t>(row.volume, MAX_MONEY))));
+    obj.pushKV("created", row.created);
+    obj.pushKV("registered", row.created);
+    obj.pushKV("last_activity", row.last);
+    if (hit.match >= 0) obj.pushKV("match", hit.match == 0 ? "exact" : hit.match == 1 ? "prefix" : "word");
+    return obj;
+}
+
+/** The filters common to the three searches, read by none of the pools and auctions (an app sends the same object to all). */
+bool AssetOnlyFilter(const std::string& key)
+{
+    static const std::set<std::string> keys{"min_supply", "has_pool", "has_logo", "active_within_blocks", "exclude_dead", "created_after",
+                                            "exclude_burned", "exclude_retired", "assets", "mine"};
+    return keys.contains(key);
+}
+
+std::vector<std::string> ParseKeywords(const UniValue& v)
+{
+    std::vector<std::string> out;
+    for (const UniValue& word : v.get_array().getValues()) {
+        for (std::string w : bitassets::index::Words(bitassets::index::Normalize(word.get_str()))) out.push_back(std::move(w));
+    }
+    if (out.size() > 100) throw JSONRPCError(RPC_INVALID_PARAMETER, "At most 100 keywords");
+    return out;
+}
+
+/** Whether a label has any of the words (whole words, any case). */
+bool HasKeyword(const std::string& label, const std::vector<std::string>& words)
+{
+    for (const std::string& w : bitassets::index::Words(bitassets::index::Normalize(label))) {
+        if (std::find(words.begin(), words.end(), w) != words.end()) return true;
+    }
+    return false;
+}
+
+UniValue SearchAssetsImpl(ChainstateManager& chainman, const UniValue& params, const std::vector<AssetId>* only) EXCLUSIVE_LOCKS_REQUIRED(!::cs_main)
+{
+    using namespace bitassets::index;
+    const auto param{[&](size_t i) { return i < params.size() ? params[i] : UniValue{}; }};
+    Request search;
+    const std::string query{param(0).isNull() ? "" : param(0).get_str()};
+    const std::string sort_name{param(2).isNull() ? "relevance" : param(2).get_str()};
+    const auto sort{ParseSort(sort_name)};
+    if (!sort) throw JSONRPCError(RPC_INVALID_PARAMETER, "Unknown sort: " + sort_name);
+    search.sort = *sort;
+    search.cursor = ParseCursor(param(3));
+    search.limit = ParseLimit(param(4));
+    const UniValue filters{param(1)};
+    std::optional<int> within;
+    bool dead_default{false};
+    std::vector<std::string> named;
+    if (!filters.isNull()) {
+        for (const std::string& key : filters.getKeys()) {
+            const UniValue& v{filters[key]};
+            if (v.isNull()) continue;
+            if (key == "min_supply") {
+                double min{0};
+                if (v.isNum()) {
+                    min = v.get_real();
+                } else {
+                    std::istringstream in{v.get_str()};
+                    in.imbue(std::locale::classic());
+                    if (!(in >> min) || !in.eof()) throw JSONRPCError(RPC_INVALID_PARAMETER, "min_supply is a number of whole units");
+                }
+                search.filters.min_supply = min;
+            } else if (key == "has_pool") {
+                search.filters.has_pool = v.get_bool();
+            } else if (key == "has_logo") {
+                search.filters.has_logo = v.get_bool();
+            } else if (key == "exclude_dead" && v.isBool()) {
+                dead_default = v.get_bool();
+            } else if (key == "active_within_blocks" || key == "exclude_dead") {
+                const int n{v.getInt<int>()};
+                if (n < 1) throw JSONRPCError(RPC_INVALID_PARAMETER, key + " is a number of blocks, at least 1");
+                within = within ? std::min(*within, n) : n;
+            } else if (key == "created_after") {
+                search.filters.created_after = v.getInt<int>();
+            } else if (key == "exclude_burned") {
+                search.filters.exclude_burned = v.get_bool();
+            } else if (key == "exclude_retired") {
+                search.filters.exclude_retired = v.get_bool();
+            } else if (key == "exclude_keywords") {
+                search.filters.exclude_keywords = ParseKeywords(v);
+            } else if (key == "assets") {
+                if (v.size() > CANDIDATE_CAP) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("At most %u assets", CANDIDATE_CAP));
+                for (const UniValue& a : v.getValues()) named.push_back(a.get_str());
+            } else if (key == "mine") {
+                if (v.get_bool() && !only) throw JSONRPCError(RPC_INVALID_PARAMETER, "mine is the wallet's: searchmyassets (a wallet command, with the same arguments)");
+            } else {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Unknown filter: " + key);
+            }
+        }
+    }
+    if (dead_default && !within) {
+        // As dead: nothing for about a day (the volume window).
+        const int window{chainman.GetConsensus().sidechain.asset_volume_window};
+        within = window > 0 ? window : 1440;
+    }
+    std::vector<Hit> hits;
+    UniValue result(UniValue::VOBJ);
+    int height{0};
+    WithIndexView(chainman, [&](const sidechain::StoreView& view, int tip) {
+        height = tip;
+        const bitassets::State state{view};
+        if (within) search.filters.min_last = tip - *within + 1;
+        if (only || !named.empty()) {
+            std::set<uint32_t> seqs;
+            const auto add{[&](const AssetId& id) {
+                if (const auto record{state.GetAsset(id)}) seqs.insert(record->seq);
+            }};
+            if (only) for (const AssetId& id : *only) add(id);
+            std::set<uint32_t> listed;
+            for (const std::string& name : named) {
+                const AssetId id{ParseAsset(UniValue{name}, state)};
+                if (const auto record{state.GetAsset(id)}) listed.insert(record->seq);
+            }
+            if (!named.empty()) {
+                if (only) {
+                    std::set<uint32_t> both;
+                    std::set_intersection(seqs.begin(), seqs.end(), listed.begin(), listed.end(), std::inserter(both, both.end()));
+                    seqs = std::move(both);
+                } else {
+                    seqs = std::move(listed);
+                }
+            }
+            search.filters.only = std::move(seqs);
+        }
+        if (auto exact{ExactQuery(query, state)}) {
+            search.exact = std::move(*exact);
+        } else {
+            search.text = query;
+        }
+        Page page;
+        try {
+            page = Search(view, search);
+        } catch (const std::invalid_argument& e) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, e.what());
+        }
+        hits = std::move(page.hits);
+        result.pushKV("next_cursor", CursorToJSON(page.next));
+        result.pushKV("partial", page.partial);
+        result.pushKV("scanned", page.scanned);
+        return UniValue{};
+    });
+    // Each with what getasset shows of it now (its logo, data, controller), unless retired.
+    UniValue assets(UniValue::VARR);
+    {
+        LOCK(::cs_main);
+        const bitassets::State state{StateOf(chainman)};
+        for (const Hit& hit : hits) {
+            UniValue obj{HitToJSON(hit)};
+            if (const auto record{state.GetAsset(hit.row.id)}; record && record->seq == hit.row.seq) {
+                const UniValue more{AssetToJSON(chainman.ActiveChainstate(), state, hit.row.id, *record, std::nullopt)};
+                for (const std::string& key : more.getKeys()) {
+                    if (!obj.exists(key)) obj.pushKV(key, more[key]);
+                }
+            }
+            assets.push_back(std::move(obj));
+        }
+    }
+    UniValue out(UniValue::VOBJ);
+    out.pushKV("assets", std::move(assets));
+    for (const std::string& key : result.getKeys()) out.pushKV(key, result[key]);
+    out.pushKV("height", height);
+    return out;
+}
+
+RPCMethod searchassets()
+{
+    return RPCMethod{
+        "searchassets",
+        "Search, filter and sort the assets, a page at a time, by the node's search index (getassetindexinfo): a page\n"
+        "never reads the assets whole, however many there are. Go on with the cursor \"next_cursor\" a page returns.\n"
+        "A text matches the whole name, its start, or the start of any of its words, in any case; \"#\" and a number,\n"
+        "a number (\"1739-0029\"), or a hash (\"0x\" and 64 hex digits), that asset only.\n"
+        "A search stops at a budget of index entries it looks at; a page cut short by it says \"partial\": go on with\n"
+        "\"next_cursor\" (filters that few assets pass, along an order that is not theirs, take several calls).\n"
+        "What the wallet holds: searchmyassets (a wallet command), with the same arguments.",
+        bitassets::SearchAssetsArgs(),
+        bitassets::SearchAssetsResult(),
+        RPCExamples{HelpExampleCli("searchassets", "\"gold\"") + HelpExampleCli("-named searchassets", "query=gold filters='{\"has_pool\":true}' sort=volume limit=20") +
+                    HelpExampleCli("searchassets", "\"\" '{\"exclude_dead\":5760,\"exclude_burned\":true}' newest") + HelpExampleRpc("searchassets", "\"gold\", {}, \"supply\", null, 100")},
+        [&](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
+{
+    ChainstateManager& chainman{EnsureAnyChainman(request.context)};
+    UniValue params(UniValue::VARR);
+    for (size_t i{0}; i < 5; ++i) params.push_back(i < request.params.size() ? request.params[i] : UniValue{});
+    return SearchAssetsImpl(chainman, params, nullptr);
+},
+    };
+}
+
+/** The assets a text names in a search of pools or auctions, bounded (bitassets::index::MatchingAssets). */
+std::optional<std::vector<AssetId>> AssetsOfText(const sidechain::StoreView& view, const std::string& query, bool& partial)
+{
+    using namespace bitassets::index;
+    if (util::TrimString(query).empty()) return std::nullopt;
+    const bitassets::State state{view};
+    Request search;
+    if (auto exact{ExactQuery(query, state)}) {
+        search.exact = std::move(*exact);
+    } else {
+        search.text = query;
+    }
+    return MatchingAssets(view, search, 1000, partial);
+}
+
+const RPCResult NEXT_CURSOR{RPCResult::Type::ANY, "next_cursor", "The cursor of the next page (a string); null when there is no more (a full page always has one: the next may be empty)"};
+
+/** The sorts of the pools, the app's names of the sorts of the assets mapped onto them. */
+bitassets::index::PoolSort PoolSortOf(const std::string& name)
+{
+    using bitassets::index::PoolSort;
+    if (const auto sort{bitassets::index::ParsePoolSort(name)}) return *sort;
+    if (name == "volume" || name == "activity") return PoolSort::VOLUME;
+    if (name == "newest") return PoolSort::NEWEST;
+    if (name == "relevance" || name == "pool_depth" || name == "name" || name == "supply" || name == "oldest") return PoolSort::DEPTH;
+    throw JSONRPCError(RPC_INVALID_PARAMETER, "Unknown sort: " + name);
+}
+
+RPCMethod searchpools()
+{
+    return RPCMethod{
+        "searchpools",
+        "Search and sort the pools, a page at a time, by the node's search index. A text matches the names of their assets as\n"
+        "searchassets matches them (the pools of the first 1000 assets it matches, found within the search's budget).",
+        {
+            {"query", RPCArg::Type::STR, RPCArg::Default{""}, "Text, a number or a hash, matched against either asset"},
+            {"filters", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "(the filters of searchassets that are not these are taken and left aside)",
+            {
+                {"exclude_abandoned", RPCArg::Type::BOOL, RPCArg::Default{true}, "Leave out those nobody provides liquidity to"},
+                {"chn_only", RPCArg::Type::BOOL, RPCArg::Default{false}, "Only pools with CHN"},
+                {"min_depth", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED, "At least this much CHN in the pool"},
+                {"exclude_keywords", RPCArg::Type::ARR, RPCArg::Optional::OMITTED, "Leave out those with an asset with any of these words in its name",
+                    {{"keyword", RPCArg::Type::STR, RPCArg::Optional::OMITTED, ""}}},
+            }},
+            {"sort", RPCArg::Type::STR, RPCArg::Default{"depth"}, "depth (CHN held; pools with CHN only), volume (CHN traded in the window; those traded only), "
+                "price_change (of the second asset in the first, CHN for a pool with CHN, over the window; largest rise first), newest. "
+                "The sorts of searchassets map onto these: relevance, pool_depth, name, supply, oldest: depth; activity: volume"},
+            {"cursor", RPCArg::Type::STR_HEX, RPCArg::Default{""}, "\"next_cursor\" of the page before"},
+            {"limit", RPCArg::Type::NUM, RPCArg::Default{50}, strprintf("From 1 to %u", bitassets::index::MAX_PAGE)},
+        },
+        RPCResult{RPCResult::Type::OBJ, "", "",
+        {
+            {RPCResult::Type::ARR, "pools", "", {{RPCResult::Type::OBJ, "", "", [] {
+                std::vector<RPCResult> results{PoolResults()};
+                results.push_back({RPCResult::Type::NUM, "depth", "The CHN it holds (0 for a pool without CHN)"});
+                results.push_back({RPCResult::Type::NUM, "volume_window", "CHN traded over the volume window"});
+                results.push_back({RPCResult::Type::NUM, "price_change", "The change of the price of asset_b in asset_a over the window, in percent"});
+                results.push_back({RPCResult::Type::NUM, "last_activity", "The height of the last block that touched it"});
+                return results;
+            }()}}},
+            NEXT_CURSOR,
+            {RPCResult::Type::BOOL, "partial", "The search stopped at a budget: go on with next_cursor (or narrow the text)"},
+            {RPCResult::Type::NUM, "scanned", "Entries looked at"},
+            {RPCResult::Type::NUM, "height", "The height of the tip"},
+        }},
+        RPCExamples{HelpExampleCli("searchpools", "") + HelpExampleCli("searchpools", "\"gold\" '{}' volume")},
+        [&](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
+{
+    using namespace bitassets::index;
+    ChainstateManager& chainman{EnsureAnyChainman(request.context)};
+    PoolRequest search;
+    const std::string query{request.params[0].isNull() ? "" : request.params[0].get_str()};
+    search.sort = PoolSortOf(request.params[2].isNull() ? "depth" : request.params[2].get_str());
+    search.cursor = ParseCursor(request.params[3]);
+    search.limit = ParseLimit(request.params[4]);
+    std::vector<std::string> keywords;
+    if (const UniValue& filters{request.params[1]}; !filters.isNull()) {
+        for (const std::string& key : filters.getKeys()) {
+            const UniValue& v{filters[key]};
+            if (v.isNull() || AssetOnlyFilter(key)) continue;
+            if (key == "exclude_abandoned") {
+                search.exclude_abandoned = v.get_bool();
+            } else if (key == "chn_only") {
+                search.chn_only = v.get_bool();
+            } else if (key == "min_depth") {
+                search.min_depth = static_cast<uint64_t>(AmountFromValue(v));
+            } else if (key == "exclude_keywords") {
+                keywords = ParseKeywords(v);
+            } else {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Unknown filter: " + key);
+            }
+        }
+    }
+    return WithIndexView(chainman, [&](const sidechain::StoreView& view, int height) {
+        const bitassets::State state{view};
+        bool partial{false};
+        search.assets = AssetsOfText(view, query, partial);
+        PoolPage page;
+        try {
+            page = SearchPools(view, search);
+        } catch (const std::invalid_argument& e) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, e.what());
+        }
+        UniValue pools(UniValue::VARR);
+        for (const PoolRow& row : page.pools) {
+            const auto pool{state.GetPool(row.id)};
+            if (!pool) continue;
+            // A pool with CHN shows its price in CHN.
+            UniValue obj{PoolToJSON(state, row.id, *pool, pool->asset0.IsNull() ? pool->asset1 : pool->asset0)};
+            if (!keywords.empty() && (HasKeyword(obj["asset_a"].get_str(), keywords) || HasKeyword(obj["asset_b"].get_str(), keywords))) continue;
+            obj.pushKV("depth", ValueFromAmount(static_cast<CAmount>(std::min<uint64_t>(row.Depth(), MAX_MONEY))));
+            obj.pushKV("volume_window", ValueFromAmount(static_cast<CAmount>(std::min<uint64_t>(row.volume, MAX_MONEY))));
+            UniValue change;
+            change.setNumStr(strprintf("%.4f", row.ChangePpm() / 1e4));
+            obj.pushKV("price_change", change);
+            obj.pushKV("last_activity", row.last);
+            pools.push_back(std::move(obj));
+        }
+        UniValue result(UniValue::VOBJ);
+        result.pushKV("pools", std::move(pools));
+        result.pushKV("next_cursor", CursorToJSON(page.next));
+        result.pushKV("partial", page.partial || partial);
+        result.pushKV("scanned", page.scanned);
+        result.pushKV("height", height);
+        return result;
+    });
+},
+    };
+}
+
+RPCMethod searchauctions()
+{
+    return RPCMethod{
+        "searchauctions",
+        "Search and sort the auctions, a page at a time, by the node's search index. A text matches the names of what they sell or\n"
+        "sell for, as searchassets matches them (auctions not closed only).",
+        {
+            {"query", RPCArg::Type::STR, RPCArg::Default{""}, "Text, a number or a hash, matched against either asset"},
+            {"filters", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "(the filters of searchassets that are not these are taken and left aside)",
+            {
+                {"status", RPCArg::Type::STR, RPCArg::Default{"active"}, "open, upcoming, active (open or upcoming), ended (not collected yet) or any (not closed)"},
+                {"include_closed", RPCArg::Type::BOOL, RPCArg::Default{false}, "Also those collected (sort newest, no text)"},
+                {"exclude_keywords", RPCArg::Type::ARR, RPCArg::Optional::OMITTED, "Leave out those of an asset with any of these words in its name",
+                    {{"keyword", RPCArg::Type::STR, RPCArg::Optional::OMITTED, ""}}},
+            }},
+            {"sort", RPCArg::Type::STR, RPCArg::Default{"ending_soon"}, "ending_soon (by last block) or newest (any other sort of searchassets: ending_soon, but newest)"},
+            {"cursor", RPCArg::Type::STR_HEX, RPCArg::Default{""}, "\"next_cursor\" of the page before"},
+            {"limit", RPCArg::Type::NUM, RPCArg::Default{50}, strprintf("From 1 to %u", bitassets::index::MAX_PAGE)},
+        },
+        RPCResult{RPCResult::Type::OBJ, "", "",
+        {
+            {RPCResult::Type::ARR, "auctions", "", {{RPCResult::Type::OBJ, "", "", AuctionResults()}}},
+            NEXT_CURSOR,
+            {RPCResult::Type::BOOL, "partial", "The search stopped at a budget: go on with next_cursor (or narrow the text)"},
+            {RPCResult::Type::NUM, "scanned", "Entries looked at"},
+            {RPCResult::Type::NUM, "height", "The height of the next block, which the status and prices are for"},
+        }},
+        RPCExamples{HelpExampleCli("searchauctions", "") + HelpExampleCli("searchauctions", "\"gold\" '{\"status\":\"open\"}' newest")},
+        [&](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
+{
+    using namespace bitassets::index;
+    ChainstateManager& chainman{EnsureAnyChainman(request.context)};
+    AuctionRequest search;
+    const std::string query{request.params[0].isNull() ? "" : request.params[0].get_str()};
+    const std::string sort_name{request.params[2].isNull() ? "ending_soon" : request.params[2].get_str()};
+    search.sort = sort_name == "newest" ? AuctionSort::NEWEST : AuctionSort::ENDING_SOON;
+    if (!ParseAuctionSort(sort_name) && !ParseSort(sort_name)) throw JSONRPCError(RPC_INVALID_PARAMETER, "Unknown sort: " + sort_name);
+    search.cursor = ParseCursor(request.params[3]);
+    search.limit = ParseLimit(request.params[4]);
+    std::vector<std::string> keywords;
+    if (const UniValue& filters{request.params[1]}; !filters.isNull()) {
+        for (const std::string& key : filters.getKeys()) {
+            const UniValue& v{filters[key]};
+            if (v.isNull() || AssetOnlyFilter(key)) continue;
+            if (key == "status") {
+                search.status = v.get_str();
+                if (search.status != "open" && search.status != "upcoming" && search.status != "active" && search.status != "ended" && search.status != "any") {
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, "Unknown status: " + search.status);
+                }
+            } else if (key == "include_closed") {
+                search.include_closed = v.get_bool();
+            } else if (key == "exclude_keywords") {
+                keywords = ParseKeywords(v);
+            } else {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Unknown filter: " + key);
+            }
+        }
+    }
+    std::vector<std::pair<Txid, bitassets::Auction>> found;
+    UniValue result(UniValue::VOBJ);
+    WithIndexView(chainman, [&](const sidechain::StoreView& view, int height) {
+        bool partial{false};
+        search.assets = AssetsOfText(view, query, partial);
+        search.height = height + 1;
+        AuctionPage page;
+        try {
+            page = SearchAuctions(view, search);
+        } catch (const std::invalid_argument& e) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, e.what());
+        }
+        found = std::move(page.auctions);
+        result.pushKV("next_cursor", CursorToJSON(page.next));
+        result.pushKV("partial", page.partial || partial);
+        result.pushKV("scanned", page.scanned);
+        return UniValue{};
+    });
+    // Shown as they are now, with who holds their receipts.
+    LOCK(::cs_main);
+    const bitassets::State state{StateOf(chainman)};
+    const int height{chainman.ActiveChain().Height() + 1};
+    UniValue auctions(UniValue::VARR);
+    for (const auto& [id, auction] : found) {
+        const auto now{state.GetAuction(id)};
+        if (!now) continue;
+        UniValue obj{AuctionToJSON(chainman.ActiveChainstate(), state, id, *now, height)};
+        if (!keywords.empty() && (HasKeyword(obj["base"].get_str(), keywords) || HasKeyword(obj["quote"].get_str(), keywords))) continue;
+        auctions.push_back(std::move(obj));
+    }
+    UniValue out(UniValue::VOBJ);
+    out.pushKV("auctions", std::move(auctions));
+    for (const std::string& key : result.getKeys()) out.pushKV(key, result[key]);
+    out.pushKV("height", height);
+    return out;
+},
+    };
+}
+
+RPCMethod getassetindexinfo()
+{
+    return RPCMethod{
+        "getassetindexinfo",
+        "The search index of the assets (searchassets, searchpools, searchauctions). It is derived data kept with the state of the\n"
+        "chain, block by block: always at the tip, undone with the blocks by a reorganisation, nothing to enable or sync apart.",
+        {},
+        RPCResult{RPCResult::Type::OBJ, "", "",
+        {
+            {RPCResult::Type::BOOL, "synced", "Whether it is at the tip (always: it is updated with each block)"},
+            {RPCResult::Type::NUM, "height", "The height of the tip it is of"},
+            {RPCResult::Type::STR_HEX, "bestblock", "The tip"},
+            {RPCResult::Type::NUM, "count", "Assets indexed, the retired ones included"},
+            {RPCResult::Type::NUM, "retired", "Of which retired"},
+            {RPCResult::Type::NUM, "pools", "Pools indexed"},
+            {RPCResult::Type::NUM, "volume_window", "The blocks volumes and price changes are over"},
+            {RPCResult::Type::NUM, "max_page", "The most a page holds"},
+        }},
+        RPCExamples{HelpExampleCli("getassetindexinfo", "")},
+        [&](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
+{
+    ChainstateManager& chainman{EnsureAnyChainman(request.context)};
+    LOCK(::cs_main);
+    Chainstate& chainstate{chainman.ActiveChainstate()};
+    const bitassets::index::Info info{bitassets::index::GetInfo(chainstate.SideCache())};
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("synced", true);
+    result.pushKV("height", chainstate.m_chain.Height());
+    result.pushKV("bestblock", chainstate.m_chain.Tip()->GetBlockHash().GetHex());
+    result.pushKV("count", info.assets);
+    result.pushKV("retired", info.retired);
+    result.pushKV("pools", info.pools);
+    result.pushKV("volume_window", chainman.GetConsensus().sidechain.asset_volume_window);
+    result.pushKV("max_page", static_cast<uint64_t>(bitassets::index::MAX_PAGE));
+    return result;
+},
+    };
+}
+
 } // namespace
+
+UniValue SearchBitAssetsJSON(ChainstateManager& chainman, const UniValue& params, const std::vector<bitassets::AssetId>& only)
+{
+    return SearchAssetsImpl(chainman, params, &only);
+}
 
 void RegisterBitAssetsRPCCommands(CRPCTable& t)
 {
@@ -820,6 +1371,10 @@ void RegisterBitAssetsRPCCommands(CRPCTable& t)
         {"bitassets", &listauctions},
         {"bitassets", &getauction},
         {"bitassets", &quotebid},
+        {"bitassets", &searchassets},
+        {"bitassets", &searchpools},
+        {"bitassets", &searchauctions},
+        {"bitassets", &getassetindexinfo},
     };
     for (const auto& c : commands) t.appendCommand(c.name, &c);
 }

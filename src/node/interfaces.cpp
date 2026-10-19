@@ -54,6 +54,7 @@
 #include <primitives/block.h>
 #include <primitives/transaction.h>
 #include <rpc/blockchain.h>
+#include <rpc/bitassets.h>
 #include <rpc/protocol.h>
 #include <rpc/request.h>
 #include <rpc/server.h>
@@ -761,6 +762,10 @@ public:
     {
         LOCK(::cs_main);
         return chainman().ActiveChainstate().SideState().BitAssets().Releasable(asset);
+    }
+    UniValue searchBitAssets(const UniValue& params, const std::vector<bitassets::AssetId>& only) override
+    {
+        return SearchBitAssetsJSON(chainman(), params, only);
     }
     std::optional<bitassets::AssetId> getBitAssetOfSeq(uint32_t seq) override
     {

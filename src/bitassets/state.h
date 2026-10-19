@@ -793,6 +793,8 @@ public:
     std::optional<COutPoint> FirstTokenOf(const uint256& id, Token::Kind kind) const;
     /** The pools of an asset, by id. */
     std::vector<std::pair<uint256, Pool>> PoolsOf(const AssetId& asset) const;
+    /** The auctions not closed that sell an asset or sell for it, by id, `limit` at most. */
+    std::vector<Txid> AuctionsOf(const AssetId& asset, size_t limit) const;
     /** How many pools and auctions there are (read whole: for information). */
     size_t PoolCount() const;
 
@@ -825,6 +827,7 @@ private:
  *  5: withdrawal refunds wait with the deposits, not behind the payouts of the transactions; derived
  *     again, so that a node that kept refunds in the old queue does not pay differently from one that
  *     syncs from scratch.
+ *  (The search index, derived data, has a layout of its own: bitassets::index::INDEX_LAYOUT.)
  */
 inline constexpr uint32_t STORE_LAYOUT{5};
 /** Whether the assets in a store are in the layout of this version, or there are none yet. */

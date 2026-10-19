@@ -219,4 +219,62 @@ uint64_t ParseUnits(const UniValue& value, uint8_t decimals, bool allow_zero)
     return static_cast<uint64_t>(units);
 }
 
+std::vector<RPCArg> SearchAssetsArgs()
+{
+    return {
+        {"query", RPCArg::Type::STR, RPCArg::Default{""}, "Text, \"#\" and a number, a number, or a hash"},
+        {"filters", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "",
+        {
+            {"min_supply", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED, "At least this supply, in whole units"},
+            {"has_pool", RPCArg::Type::BOOL, RPCArg::Default{false}, "Only those with a pool someone provides liquidity to"},
+            {"has_logo", RPCArg::Type::BOOL, RPCArg::Default{false}, "Only those with a logo"},
+            {"active_within_blocks", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Only those touched in the last this many blocks"},
+            {"exclude_dead", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Leave out those not touched in the last this many blocks; true: in the volume window (about a day)"},
+            {"created_after", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Only those registered after this height"},
+            {"exclude_burned", RPCArg::Type::BOOL, RPCArg::Default{false}, "Leave out those with no supply"},
+            {"exclude_retired", RPCArg::Type::BOOL, RPCArg::Default{true}, "Leave out the retired ones"},
+            {"exclude_keywords", RPCArg::Type::ARR, RPCArg::Optional::OMITTED, "Leave out those with any of these words in their names (whole words, any case)",
+                {{"keyword", RPCArg::Type::STR, RPCArg::Optional::OMITTED, ""}}},
+            {"assets", RPCArg::Type::ARR, RPCArg::Optional::OMITTED, "Only these (names, numbers or hashes; at most 5000)",
+                {{"asset", RPCArg::Type::STR, RPCArg::Optional::OMITTED, ""}}},
+        }},
+        {"sort", RPCArg::Type::STR, RPCArg::Default{"relevance"}, "relevance (a text: the whole name, then its start, then a word's start; no text: as activity), "
+            "name, newest, oldest, supply, activity (last touched first), volume (traded in the window; those not traded are left out), pool_depth (those with a pool with CHN only)"},
+        {"cursor", RPCArg::Type::STR_HEX, RPCArg::Default{""}, "\"next_cursor\" of the page before, with the same query, filters and sort"},
+        {"limit", RPCArg::Type::NUM, RPCArg::Default{50}, "How many at most, from 1 to 200"},
+    };
+}
+
+RPCResult SearchAssetsResult()
+{
+    return RPCResult{RPCResult::Type::OBJ, "", "",
+    {
+        {RPCResult::Type::ARR, "assets", "", {{RPCResult::Type::OBJ, "", "These and, unless retired, the other fields of getasset (registration, data, releasable, control, logo)", {
+            {RPCResult::Type::STR_HEX, "asset", "The hash of its name"},
+            {RPCResult::Type::STR, "name", /*optional=*/true, "Its name, if public"},
+            {RPCResult::Type::STR, "label", "Its name, or \"0x\" and its hash"},
+            {RPCResult::Type::STR, "seq", "Its number"},
+            {RPCResult::Type::NUM, "decimals", ""},
+            {RPCResult::Type::NUM, "supply", "How much there is"},
+            {RPCResult::Type::NUM, "minted", "All ever minted"},
+            {RPCResult::Type::NUM, "burned", "All ever burned"},
+            {RPCResult::Type::BOOL, "fixed", "Whether its supply is fixed for good"},
+            {RPCResult::Type::BOOL, "retired", "Whether it was retired (its name may be another asset's now)"},
+            {RPCResult::Type::BOOL, "has_logo", ""},
+            {RPCResult::Type::BOOL, "has_pool", "Whether it has a pool someone provides liquidity to"},
+            {RPCResult::Type::NUM, "pools", "How many"},
+            {RPCResult::Type::NUM, "pool_depth", "The CHN in its pool with CHN (0 if none)"},
+            {RPCResult::Type::NUM, "volume", "CHN traded in its pools with CHN and its auctions for CHN over the volume window"},
+            {RPCResult::Type::NUM, "created", "The height of the block that registered it"},
+            {RPCResult::Type::NUM, "registered", "The same"},
+            {RPCResult::Type::NUM, "last_activity", "The height of the last block that touched it"},
+            {RPCResult::Type::STR, "match", /*optional=*/true, "How the text matched: \"exact\", \"prefix\" or \"word\""},
+        }, RPCResultOptions{.skip_type_check = true}}}},
+        {RPCResult::Type::ANY, "next_cursor", "The cursor of the next page (a string); null when there is no more (a full page always has one: the next may be empty)"},
+        {RPCResult::Type::BOOL, "partial", "The search stopped at its budget before the page was full: go on with next_cursor"},
+        {RPCResult::Type::NUM, "scanned", "Index entries looked at"},
+        {RPCResult::Type::NUM, "height", "The height of the tip the page is of"},
+    }};
+}
+
 } // namespace bitassets

@@ -7,6 +7,7 @@
 
 #include <validation.h>
 
+#include <bitassets/index.h>
 #include <bitassets/state.h>
 
 #include <arith_uint256.h>
@@ -5883,7 +5884,10 @@ void Chainstate::NoteSideChanges(const std::map<std::vector<unsigned char>, std:
     AssertLockHeld(::cs_main);
     // (Only for the mempool's checks: none without one.)
     if (!m_mempool || m_side_changed_all) return;
-    for (const auto& [key, value] : changes) m_side_changed.insert(key);
+    // (Derived data, which no check reads, aside.)
+    for (const auto& [key, value] : changes) {
+        if (!sidechain::IsDerivedKey(key)) m_side_changed.insert(key);
+    }
     // Bounded: past so many (blocks connected without a check between), all.
     if (m_side_changed.size() > MAX_SIDE_CHANGES_NOTED) {
         m_side_changed.clear();
@@ -6294,8 +6298,9 @@ util::Result<void> Chainstate::LoadDrivechainState()
     const bool have_state{db.ReadState(DrivechainStateName(), scdb)};
     // BitAssets: a store whose assets are in the layout of an earlier version is derived again from
     // the blocks (bitassets::STORE_LAYOUT), as a snapshot of an earlier format is.
-    const bool layout_current{bitassets::StoreLayoutCurrent(cache)};
-    if (!layout_current) LogInfo("The assets in the sidechain database are in an earlier layout: deriving it again from the blocks");
+    // So is one without the search index of the assets of this version (derived data: bitassets/index.h).
+    const bool layout_current{bitassets::StoreLayoutCurrent(cache) && bitassets::index::LayoutCurrent(cache)};
+    if (!layout_current) LogInfo("The assets in the sidechain database are in an earlier layout, or without their search index: deriving it again from the blocks");
     if (have_state && layout_current && scdb.GetBlockHash() == tip->GetBlockHash()) {
         m_scdb = std::move(scdb);
         db.WriteFormatVersion();
