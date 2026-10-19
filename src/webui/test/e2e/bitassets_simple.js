@@ -66,7 +66,9 @@
 
     // --- Create a token: GOLD through the wizard of Simple mode ---
     await go('issue');
-    await waitFor('Create a token', () => text('.issue h1') === 'Create a token');
+    // A tab of My assets (user feedback 2026-10-19): its tab says Create a token.
+    const selectedTab = () => (document.querySelector('[role="tab"][aria-selected="true"]') || { textContent: '' }).textContent.trim();
+    await waitFor('Create a token', () => selectedTab() === 'Create a token' && !!document.querySelector('.issue'));
     await check('the page says Create a token', true);
     set(await waitFor('the name field', () => $('#issue-name')), 'GOLD');
     await waitFor('the name free', () => text('.issue').includes('is free'), 20000);
@@ -108,7 +110,7 @@
     await go('my-assets');
     await waitFor('GOLD in My assets', () => text('.my-assets').includes('GOLD'), 30000);
     const tabs = $$('[role="tab"]').map((t) => t.textContent.trim());
-    await check('My assets: holdings, being created, activity', JSON.stringify(tabs) === JSON.stringify(['Holdings', 'Being created', 'Activity']), JSON.stringify(tabs));
+    await check('My assets: holdings, Create a token (its tab), being created, activity', JSON.stringify(tabs) === JSON.stringify(['Holdings', 'Create a token', 'Being created', 'Activity']), JSON.stringify(tabs));
     await shot('ba-simple-my-assets-midnight');
     await go('home');
     await waitFor('the cards of BitAssets', () => text('.home').includes('My assets'), 30000);
@@ -125,7 +127,7 @@
     await waitFor('GOLD in My assets', () => text('.my-assets').includes('GOLD'), 30000);
     await shot('ba-simple-my-assets-light');
     await go('issue');
-    await waitFor('the wizard again', () => text('.issue').includes('Create a token'));
+    await waitFor('the wizard again', () => !!document.querySelector('.issue') && (document.querySelector('[role="tab"][aria-selected="true"]') || { textContent: '' }).textContent.trim() === 'Create a token');
     const another = button('Issue another');
     if (another) another.click();
     set(await waitFor('the name field', () => $('#issue-name')), 'SILVER');
