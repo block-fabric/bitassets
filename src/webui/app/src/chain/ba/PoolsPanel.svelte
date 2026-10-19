@@ -11,6 +11,7 @@
   import AssetBadge from './AssetBadge.svelte';
   import Chart from './Chart.svelte';
   import { approx, curvePoints, formatAmount, formatPercent, formatPrice, isChn, type Pool } from './model';
+  import { compactNumber } from './axis';
   import { ba, decimalsOf, morePools, priceSeries, showMorePools, tradeIntent } from './store.svelte';
 
   let query = $state('');
@@ -76,7 +77,7 @@
       <section class="panel">
         <div class="panel-head"><h3>The curve</h3></div>
         <div class="panel-body">
-          <Chart points={curvePoints(approx(pool.reserve_a), approx(pool.reserve_b))} marks={[{ x: approx(pool.reserve_a), y: approx(pool.reserve_b) }]} logX yZero area={false} label={t('The curve of the pool: what it holds of each asset')} formatX={(x) => formatPrice(x, 4)} formatY={(y) => formatPrice(y, 4)} />
+          <Chart points={curvePoints(approx(pool.reserve_a), approx(pool.reserve_b))} marks={[{ x: approx(pool.reserve_a), y: approx(pool.reserve_b) }]} logX yZero area={false} label={t('The curve of the pool: what it holds of each asset')} formatX={(x) => compactNumber(x, 4)} formatY={(y) => formatPrice(y, 4)} />
           <p class="ba-help">Volume: {formatAmount(pool.volume_a, decimalsOf(pool.asset_a_id))} <SafeText text={pool.asset_a} /> and {formatAmount(pool.volume_b, decimalsOf(pool.asset_b_id))} <SafeText text={pool.asset_b} /> traded in.</p>
         </div>
       </section>

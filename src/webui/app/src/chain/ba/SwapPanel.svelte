@@ -13,6 +13,7 @@
   import Chart from './Chart.svelte';
   import UnitsInput from './UnitsInput.svelte';
   import { amountParam, approx, assetArg, CHN_ID, curvePoints, formatAmount, formatPrice, formatUnits, isChn, lessSlippage, MAX_IMPACT, MIN_CHN_PAYOUT, unitsAtMost, unitsOf, WARN_IMPACT, type SwapQuote, type Amount } from './model';
+  import { compactNumber } from './axis';
   import { ba, decimalsOf, labelOf, nameOf, poolOf, refreshBitAssets, tradeIntent } from './store.svelte';
   import Term from '../../components/Term.svelte';
   import { simpleMode } from '../../lib/uimode.svelte';
@@ -253,7 +254,7 @@
     <div class="panel-head"><h3>The pool</h3>{#if pool}<span class="muted small">{pool.swaps} trades</span>{/if}</div>
     <div class="panel-body">
       {#if pool && !pool.abandoned && reserves}
-        <Chart points={curve} marks={marks} logX yZero area={false} label={t('The curve of the pool: what it holds of each asset')} formatX={(x) => formatPrice(x, 4)} formatY={(y) => formatPrice(y, 4)} tall={220} />
+        <Chart points={curve} marks={marks} logX yZero area={false} label={t('The curve of the pool: what it holds of each asset')} formatX={(x) => compactNumber(x, 4)} formatY={(y) => formatPrice(y, 4)} tall={220} />
         <p class="ba-help">The pool holds {formatPrice(reserves.pay)} <SafeText text={labelOf(pay)} /> and {formatPrice(reserves.get)} <SafeText text={labelOf(get)} />; their product never falls. The trade moves it along the curve, from the first point to the second: the further, the worse the price.</p>
       {:else}
         <p class="ba-empty">No pool to show.</p>
