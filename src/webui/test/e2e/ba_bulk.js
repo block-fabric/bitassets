@@ -57,6 +57,32 @@
   };
   const ownRpc = (m, p, w) => own(() => rpc(m, p, w));
 
+  // With PROFILE: the time spent in a few built-ins the pages lean on, to tell where the work goes.
+  const spent = new Map();
+  if (window.__E2E_PROFILE) {
+    const wrap = (obj, name, label) => {
+      const f = obj[name];
+      obj[name] = function (...args) {
+        const t0 = performance.now();
+        try {
+          return f.apply(this, args);
+        } finally {
+          const k = label;
+          const d = performance.now() - t0;
+          const e = spent.get(k) || [0, 0];
+          spent.set(k, [e[0] + d, e[1] + 1]);
+        }
+      };
+    };
+    wrap(Array.prototype, 'sort', 'Array.sort');
+    wrap(Array.prototype, 'filter', 'Array.filter');
+    wrap(Array.prototype, 'map', 'Array.map');
+    wrap(JSON, 'stringify', 'JSON.stringify');
+    wrap(JSON, 'parse', 'JSON.parse');
+    wrap(String.prototype, 'localeCompare', 'String.localeCompare');
+    wrap(String.prototype, 'toLowerCase', 'String.toLowerCase');
+    wrap(BigInt.prototype, 'toString', 'BigInt.toString');
+  }
   // The frames of the page.
   let measuring = false;
   const gaps = [];
@@ -162,6 +188,7 @@
     for (const [k, n] of [...blame.entries()].sort((x, y) => y[1] - x[1]).slice(0, 15)) await log(`BLAME ${n} ${k}`);
     const slowEvents = events.filter((e) => e[2] > 30).length;
     perf('bulk.slowEventBatches', slowEvents);
+    for (const [k, [ms, n]] of [...spent.entries()].sort((a, b) => b[1][0] - a[1][0])) await log(`SPENT ${Math.round(ms)} ms ${n} calls ${k}`);
     perf('bulk.eventHandlerMax', Math.max(0, ...events.map((e) => e[2])));
     await snapshot('ba-bulk-after');
     const limit = Number(window.__E2E_MAXLONG || 0);

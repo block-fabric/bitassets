@@ -161,8 +161,21 @@ export function chainTxNotice(txid: string): { warning?: string; actions?: { lab
   };
 }
 
+// The asset moves of the wallet read again on its news, at most once a second while transactions keep coming (a
+// script making assets: each read worked out the Transactions page again; user feedback 2026-10-19, item 10).
+let lastRead = 0;
+let readLater: ReturnType<typeof setTimeout> | null = null;
+
 export function refreshChainTx(wallet: string): void {
   void wallet;
   startBitAssets();
-  void refreshBitAssets({ node: false });
+  if (readLater) return;
+  const wait = Math.max(0, lastRead + 1000 - Date.now());
+  const read = () => {
+    readLater = null;
+    lastRead = Date.now();
+    void refreshBitAssets({ node: false });
+  };
+  if (wait === 0) read();
+  else readLater = setTimeout(read, wait);
 }
