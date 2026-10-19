@@ -14,6 +14,17 @@
     el.dispatchEvent(new Event('input', { bubbles: true }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
   };
+  // An asset in a searchable picker (ba/AssetPicker.svelte): open it, type its name, click it.
+  const pickAsset = async (id, asset, name, keepOpenShot = false) => {
+    $(`#${id}`).click();
+    const search = await waitFor(`the search of ${id}`, () => $('.asset-picker input[type="search"]'));
+    set(search, name);
+    const option = await waitFor(`${name} in ${id}`, () => $(`[role="option"][data-id="${asset}"]`), 20000);
+    if (keepOpenShot) await shot('ba-asset-picker');
+    option.click();
+    await waitFor(`${name} picked in ${id}`, () => $(`#${id}`).dataset.value === asset);
+  };
+
   const openDialog = () => $$('dialog[open]').pop();
   const button = (label, root = document) => $$('button', root).find((b) => b.textContent.trim().replace(/\s+/g, ' ').startsWith(label));
   async function click(label, root) {
@@ -189,8 +200,8 @@
 
     // --- Trade: a pool of GOLD and CHN, then a swap ---
     await go('trade', 'liquidity');
-    const lqA = await waitFor('the liquidity form', () => $('#lq-a'));
-    set(lqA, gold.asset);
+    await waitFor('the liquidity form', () => $('#lq-a'));
+    await pickAsset('lq-a', gold.asset, 'GOLD');
     await sleep(300);
     set($('#lq-amount-a'), '500');
     set($('#lq-amount-b'), '5');
@@ -203,7 +214,7 @@
     await waitFor('the pool shares in the wallet', async () => (await rpc('listmyassets', [], W)).liquidity.length === 1, 60000);
 
     await go('trade', 'swap');
-    await waitFor('the pair chosen', () => $('#swap-get') && $('#swap-get').value === gold.asset, 20000);
+    await waitFor('the pair chosen', () => $('#swap-get') && $('#swap-get').dataset.value === gold.asset, 20000);
     set($('#swap-amount'), '0.04');
     await waitFor('the quote of the node', () => text('.trade').includes('At least'), 20000);
     await sleep(500);
@@ -221,7 +232,7 @@
 
     // --- Auctions: sell 100 GOLD, bid, buy all that is left, collect ---
     await go('auctions', 'sell');
-    await waitFor('GOLD to sell', () => $('#sell-asset') && $('#sell-asset').value === gold.asset, 20000);
+    await waitFor('GOLD to sell', () => $('#sell-asset') && $('#sell-asset').dataset.value === gold.asset, 20000);
     set($('#sell-amount'), '100');
     set($('#sell-start'), '2');
     set($('#sell-end'), '1');
@@ -252,8 +263,9 @@
     // --- Send: GOLD to an address, from the Send page ---
     const to = await rpc('getnewaddress', ['friend'], W);
     await go('send');
-    const chip = await waitFor('GOLD to send', () => $$('section[aria-label="What to send"] button').find((b) => b.textContent.includes('GOLD')), 20000);
-    chip.click();
+    await waitFor('the picker of what to send', () => $('#send-what'), 20000);
+    await pickAsset('send-what', gold.asset, 'GOLD', true);
+    await shot('ba-send-picker');
     set(await waitFor('the address field', () => $('#asset-to')), to);
     set($('#asset-amount'), '12.5');
     await sleep(800);

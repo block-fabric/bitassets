@@ -108,6 +108,17 @@ function fresh() {
   };
 }
 
+/** Pick an asset in the searchable picker of a field (ba/AssetPicker.svelte), as a user does: open it, click the asset. */
+async function pickAsset(id: string, asset: string): Promise<void> {
+  await fireEvent.click(document.querySelector(`#${id}`)!);
+  const option = await waitFor(() => {
+    const o = document.querySelector<HTMLElement>(`[role="option"][data-id="${asset}"]`);
+    if (!o) throw new Error(`no option ${asset} in ${id}`);
+    return o;
+  });
+  await fireEvent.click(option);
+}
+
 function units(n: number | string, d: number): bigint {
   return unitsOf(n, d);
 }
@@ -648,7 +659,7 @@ describe.runIf(CHAIN.name === 'BitAssets')('the pages of BitAssets', () => {
     render(Trade);
     render(DialogHost);
     await loaded();
-    await waitFor(() => expect((document.querySelector('#swap-get') as HTMLSelectElement).value).toBe(GOLD));
+    await waitFor(() => expect((document.querySelector('#swap-get') as HTMLElement).dataset.value).toBe(GOLD));
     await fireEvent.input(document.querySelector('#swap-amount')!, { target: { value: '0.5' } });
     await waitFor(() => expect(called('quoteswap').length).toBeGreaterThan(0));
     await waitFor(() => expect(screen.getByText('At least')).toBeTruthy());
@@ -674,7 +685,7 @@ describe.runIf(CHAIN.name === 'BitAssets')('the pages of BitAssets', () => {
 
     nav.tab = 'liquidity';
     await waitFor(() => expect(document.querySelector('#lq-a')).not.toBeNull());
-    await fireEvent.change(document.querySelector('#lq-a')!, { target: { value: SILVER } });
+    await pickAsset('lq-a', SILVER);
     await fireEvent.input(document.querySelector('#lq-amount-a')!, { target: { value: '20' } });
     await fireEvent.input(document.querySelector('#lq-amount-b')!, { target: { value: '1' } });
     // 20 SILVER and 1 CHN make too few shares to open a pool.
@@ -711,7 +722,7 @@ describe.runIf(CHAIN.name === 'BitAssets')('the pages of BitAssets', () => {
 
     nav.tab = 'sell';
     await waitFor(() => expect(document.querySelector('#sell-amount')).not.toBeNull());
-    await waitFor(() => expect((document.querySelector('#sell-asset') as HTMLSelectElement).value).toBe(GOLD));
+    await waitFor(() => expect((document.querySelector('#sell-asset') as HTMLElement).dataset.value).toBe(GOLD));
     await fireEvent.input(document.querySelector('#sell-amount')!, { target: { value: '50' } });
     await fireEvent.input(document.querySelector('#sell-start')!, { target: { value: '10' } });
     await fireEvent.input(document.querySelector('#sell-end')!, { target: { value: '20' } });
@@ -746,7 +757,7 @@ describe.runIf(CHAIN.name === 'BitAssets')('the pages of BitAssets', () => {
     await loaded();
     nav.tab = 'liquidity';
     await waitFor(() => expect(document.querySelector('#lq-a')).not.toBeNull());
-    await fireEvent.change(document.querySelector('#lq-a')!, { target: { value: SILVER } });
+    await pickAsset('lq-a', SILVER);
     await fireEvent.input(document.querySelector('#lq-amount-a')!, { target: { value: '30' } });
     await fireEvent.input(document.querySelector('#lq-amount-b')!, { target: { value: '5' } });
     await waitFor(() => expect(screen.getByText('Share of the pool')).toBeTruthy());
@@ -905,7 +916,7 @@ describe('Simple mode', () => {
     expect(screen.queryByRole('tab', { name: 'Pools' })).toBeNull();
     expect(screen.queryByRole('heading', { name: 'The pool' })).toBeNull();
     expect(screen.getByRole('heading', { name: 'How a swap works' })).toBeTruthy();
-    await waitFor(() => expect((document.querySelector('#swap-get') as HTMLSelectElement).value).toBe(GOLD));
+    await waitFor(() => expect((document.querySelector('#swap-get') as HTMLElement).dataset.value).toBe(GOLD));
     expect(screen.queryByRole('group', { name: 'Slippage' })).toBeNull();
     await fireEvent.input(document.querySelector('#swap-amount')!, { target: { value: '0.5' } });
     await waitFor(() => expect(screen.getByTestId('swap-plain').textContent).toMatch(/You pay 0\.5\s*CHN and get about/));

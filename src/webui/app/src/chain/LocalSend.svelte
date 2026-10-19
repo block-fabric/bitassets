@@ -12,6 +12,7 @@
   import { toast, wallets } from '../lib/state.svelte';
   import './ba/ba.css';
   import AssetBadge from './ba/AssetBadge.svelte';
+  import AssetPicker from './ba/AssetPicker.svelte';
   import UnitsInput from './ba/UnitsInput.svelte';
   import { amountParam, approx, assetArg, CHN_ID, formatAmount, formatUnits, unitsAtMost, unitsOf } from './ba/model';
   import { ba, nameOf, refreshBitAssets, sendIntent, startBitAssets, unlockHoldings } from './ba/store.svelte';
@@ -32,6 +33,11 @@
     active = what !== CHN_ID;
   });
 
+  // What to send, in the searchable picker (hundreds of assets): CHN first, then what the wallet holds.
+  const sendChoices = $derived([
+    { id: CHN_ID, label: 'CHN', seq: '' },
+    ...holdings.map((h) => ({ id: h.asset, label: h.label, seq: ba.assets.find((a) => a.asset === h.asset)?.seq, held: formatAmount(h.balance, h.decimals, { max: 4 }) })),
+  ]);
   const holding = $derived(holdings.find((h) => h.asset === what) ?? null);
   const decimals = $derived(holding?.decimals ?? 0);
   const held = $derived(holding ? unitsAtMost(holding.balance, holding.decimals) : 0n);
@@ -78,11 +84,8 @@
 
 {#if wallets.current !== null}
   <section class="panel what" aria-label="What to send">
-    <div class="ba-chips" role="group" aria-label="What to send">
-      <button type="button" class="ba-chip" aria-pressed={what === CHN_ID} onclick={() => (what = CHN_ID)}><AssetBadge id={CHN_ID} label="CHN" size="s" /></button>
-      {#each holdings as h (h.asset)}
-        <button type="button" class="ba-chip" aria-pressed={what === h.asset} onclick={() => (what = h.asset)}><AssetBadge id={h.asset} label={h.label} size="s" /> <span class="count">{formatAmount(h.balance, h.decimals, { max: 4 })}</span></button>
-      {/each}
+    <div class="pick-row">
+      <AssetPicker id="send-what" label="Asset to send" bind:value={what} choices={sendChoices} />
       {#if ba.mineState === 'locked' && holdings.length === 0}
         <button type="button" class="ba-chip" onclick={() => void unlockHoldings()}><Icon name="unlock" size={14} /> Show my assets</button>
       {/if}
@@ -112,6 +115,16 @@
     flex-direction: column;
     gap: 0.5rem;
     padding: 0.8rem 1rem;
+  }
+  .pick-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 0.5rem;
+    max-width: 44rem;
+  }
+  .pick-row :global(.asset-picker) {
+    flex: 1 1 18rem;
   }
   .asset-send {
     padding: 1.1rem;

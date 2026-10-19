@@ -94,7 +94,7 @@
     // --- Swap: CHN for GOLD from its plain quote ---
     await go('trade', 'swap');
     await check('Swap without the tabs of the pools', !$$('[role="tab"]').some((t) => t.textContent.trim() === 'Pools'));
-    await waitFor('the pair chosen', () => $('#swap-get') && $('#swap-get').value === gold.asset, 30000);
+    await waitFor('the pair chosen', () => $('#swap-get') && $('#swap-get').dataset.value === gold.asset, 30000);
     set($('#swap-amount'), '0.04');
     await waitFor('the quote in plain words', () => text('[data-testid="swap-plain"]').includes('and get about'), 20000);
     await shot('ba-simple-swap-midnight');
