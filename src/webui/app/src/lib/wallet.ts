@@ -430,6 +430,19 @@ export function mergeByTxid(records: readonly TxRecord[], merge: (txid: string) 
 }
 
 /**
+ * The one record of a transaction for its notices (the toast, the desktop, the bell): its halves merged as
+ * mergeByTxid does, whatever the chain knows of it. A transaction that pays the wallet itself (a token's
+ * change, an asset sent with the wallet's own outputs) is listed by the node as a send and a receive of
+ * almost nothing: one notice of the send with its net, never a "received 0" beside it (user feedback
+ * 2026-10-19). Undefined when none of the records is of it.
+ */
+export function noticeRecordOf(records: readonly TxRecord[], txid: string): TxRecord | undefined {
+  const own = records.filter((r) => r.txid === txid && !(r.type === 'mined' && r.amount === 0n));
+  if (own.length === 0) return undefined;
+  return mergeByTxid(own, () => true)[0];
+}
+
+/**
  * An output of a coinbase with a role of the chain (chain/roles.ts) that pays nothing: FastBlocks' block of stake
  * without fees pays its producer a Staked output of 0. Not a payment: the history, the notices and the CSV leave
  * it out (those that pay something stay).

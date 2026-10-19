@@ -388,10 +388,56 @@ mode"). `lib/uimode.svelte.ts` holds it:
 * `simpleMode()` in a template or a `$derived` follows the preference. A page
   may hide sections, tabs or columns in Simple mode, never what a beginner
   needs; a page with no simple variant shows the same in both.
+* **The navigation of Simple mode is the same short list in every app** (the
+  rule; user feedback 2026-10-19), in the sidebar, the workspace tabs and Home's
+  quick actions:
+
+  | Place | Page | Name in Simple mode | What it is for (shown under the name) |
+  |---|---|---|---|
+  | 1 | `home` | Home | Your balance at a glance |
+  | 2–4 | `send`, `receive`, `transactions` | Send, Receive, **Activity** | Pay someone; Get paid; Every payment in and out |
+  | 5 | `peg` (a sidechain) or `sidechains` (Chains) | **Move coins** | Bring coins in from the main chain, or send them back |
+  | 6–8 | the chain's main features: its pages marked `simple: true` in chain/local.ts, at most three (`SIMPLE_MAX_FEATURES`), never a tool nor a page of Advanced only | its `simpleTitle` | its `simpleSummary` |
+  | last | `settings` | Settings | Language, look and options |
+
+  Each name is in plain words (`simpleTitle`, at most 22 characters) with a
+  line saying what the page is for (`simpleSummary`, at most 60), without
+  words of the trade (BMM, PSBT, mempool, validator, bundle, liquidity...).
+  The sidebar groups them as Home · *Your money* · *Features* · Settings and
+  shows the line under each name. Everything else (Overview, Manage wallets,
+  the explorer, the tools, the node window, the pages of a chain not marked
+  `simple`) is Advanced's: the palette and links still reach it in Simple
+  mode, and the wallets are managed from the wallet's card of the sidebar.
+  `lib/uimode.svelte.ts` (`simpleNavPages()`) holds the rule;
+  `test/simple-nav.test.ts`, merged into every app, checks the app's own list
+  against it. The main features of each app:
+
+  | App | Main features in Simple mode |
+  |---|---|
+  | Chains, the template | none (Move coins is the chain's own) |
+  | Thunder | Pay many people (Batch pay) |
+  | BitNames | Get a name, My names |
+  | BitAssets | My assets, Swap, Create a token |
+  | zSide | Private money (Private) |
+  | Hivemind | Questions (Markets), My bets (Portfolio) |
+  | FastBlocks | Stake and earn (Staking) |
+  | Layers | My assets, Swap, Stake and earn |
 * Pages marked `advanced: true` in `PAGES` (the advanced transactions, the
-  tools, the node window, solo mining, the kit) leave the sidebar, the
-  workspace tabs and Home's quick actions in Simple mode; the palette and links
-  still reach them.
+  tools, the node window, solo mining, the kit) leave Home's quick actions in
+  Simple mode as well.
+* **Names told apart** (user feedback 2026-10-19): the section is *Wallet*,
+  the page that creates, opens, backs up and encrypts wallets is **Manage
+  wallets** (id `wallets`); on BitAssets and Layers the market of every asset
+  is **Explore assets** (id `assets`), what the wallet holds **My assets**
+  (`my-assets`). The ids, and so the links, shortcuts and `go()` calls that
+  name them, are unchanged.
+* **The sidebar folds** into a rail of icons (user feedback 2026-10-19): the
+  button at its foot, **Ctrl+B**, or the palette ("Collapse the sidebar");
+  each icon says its page and what it is for in its tooltip, a section is a
+  line. It is a preference (`prefs.sidebarCollapsed`), so each app remembers
+  it per network. In the workspace layout the same preference shows the areas
+  other than the current one as icons. A window narrower than 760 px keeps
+  the drawer, never folded.
 * `components/Term.svelte` (`<Term id="bmm">merge-mined</Term>`) explains a word
   of the trade from `lib/glossary.ts` on hover, focus or a tap; a chain adds
   its own words with `addTerms()`.
@@ -422,7 +468,7 @@ switch; the e2e scripts too (`common.js`), except `run_simple.py`.
 | `role` | `sidechain` (its peg and merged mining pages, its home) or `mainchain` (the pages of Chains). C++: `WEBUI_SIDECHAIN` |
 | `coin` | The ticker and the name of the coin: the units (`CHN`, `mCHN`, `bits`, `sat` are the ids kept in the preferences; the names shown are the chain's) |
 | `uriScheme` | The scheme of its payment URIs (BIP 21): `sidechain:` here, `thunder:`, `bitnames:`... The links the app opens, hands over to the running app, registers on Windows and in the desktop entry |
-| `brand` | Its mark (`mark`: SVG paths on a 32 grid, drawn by components/Brand.svelte), the colour of the mark (`color`, the CSS variable `--brand`), the hue the icon of the app is turned by (`iconHue`, before the tint of a test network: icontint.cpp) |
+| `brand` | Its mark (`mark`: SVG paths on a 32 grid, drawn by components/Brand.svelte), the colour of the mark (`color`, the CSS variable `--brand`), the hue the icon of the app is turned by (`iconHue`, before the tint of a test network: icontint.cpp; 0 now that the icon is the chain's own). The icon of the app (window, taskbar, tray, desktop entry, Windows program and installer) is drawn from `mark` and `color` by `app/scripts/appicon.py` into `app/public/icon-256.png` and `res/icons/app.ico`: run it after a change of either (user feedback 2026-10-19: every app showed the coin of Bitcoin) |
 | `networks` | Per network (main, test, signet, regtest): the default ports (`p2p`, `rpc`) and the address prefixes (`hrp`, `pubkey`, `script`) the interface checks addresses with. `test_<bin>-app` (chainconfig_tests.cpp) checks them against the chain parameters |
 | `mainchain` | A sidechain: the name, ticker and URI scheme of its mainchain, and its networks (the RPC port, the default of the Mainchain settings; the address prefixes, for the withdrawals: `checkAddress(..., 'mainchain')`) |
 | `links` | Help links (`guide`, `website`, `source`, `issues`): items of the menu "This node" and the palette, opened in the browser of the desktop |

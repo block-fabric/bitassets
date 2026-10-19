@@ -81,6 +81,10 @@ class GtkWindowImpl final : public Window
 public:
     GtkWindowImpl(const Options& options, Callbacks callbacks) : m_callbacks(std::move(callbacks)), m_devtools(options.devtools)
     {
+        // The name of the program, which GTK gives the window as its class (X11 WM_CLASS) and its app id
+        // (Wayland): the desktop matches it to the desktop entry <bin>-app.desktop (StartupWMClass), so that
+        // the taskbar and the dock show the chain's icon, not a generic one (user feedback 2026-10-19).
+        g_set_prgname((std::string{chain::STEM} + "-app").c_str());
         if (!gtk_init_check(nullptr, nullptr)) throw std::runtime_error("Cannot open the display (GTK init failed)");
 
         WebKitWebContext* context{webkit_web_context_get_default()};

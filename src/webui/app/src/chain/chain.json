@@ -7,7 +7,7 @@
   "uriScheme": "bitassets",
   "brand": {
     "color": "#2bc79a",
-    "iconHue": 127,
+    "iconHue": 0,
     "mark": ["M9.5 5h13l6.5 7.5L16 28 3 12.5z", "M3 12.5h26", "M12.5 5L10 12.5 16 28l6-15.5L19.5 5"]
   },
   "networks": {
