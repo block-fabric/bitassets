@@ -12,21 +12,39 @@
   import Chart from './Chart.svelte';
   import { approx, curvePoints, formatAmount, formatPercent, formatPrice, isChn, type Pool } from './model';
   import { compactNumber } from './axis';
+  import HiddenToggle from './HiddenToggle.svelte';
+  import { hiddenAsset } from './visible.svelte';
   import { ba, decimalsOf, morePools, priceSeries, showMorePools, tradeIntent } from './store.svelte';
 
   let query = $state('');
   let showClosed = $state(false);
   let open = $state<string | null>(null);
-
-  const list = $derived(
+  // Sorted and filtered as the user likes (user feedback 2026-10-19), without the pools of assets the wallet hides.
+  type PoolSort = 'traded' | 'trades' | 'deepest' | 'newest' | 'name';
+  type PoolFilter = 'all' | 'chn' | 'mine';
+  let sort = $state<PoolSort>('traded');
+  let filter = $state<PoolFilter>('all');
+  let showHidden = $state(false);
+  const positions = $derived(new Set((ba.mine?.liquidity ?? []).map((l) => l.pool)));
+  const isHidden = (p: Pool) => hiddenAsset(p.asset_a_id, p.asset_a) || hiddenAsset(p.asset_b_id, p.asset_b);
+  const SORTS: Record<PoolSort, (x: Pool, y: Pool) => number> = {
+    traded: (x, y) => volumeChn(y) - volumeChn(x) || y.swaps - x.swaps,
+    trades: (x, y) => y.swaps - x.swaps,
+    deepest: (x, y) => approx(y.reserve_a) * approx(y.reserve_b) - approx(x.reserve_a) * approx(x.reserve_b),
+    newest: (x, y) => y.created - x.created,
+    name: (x, y) => `${x.asset_a}/${x.asset_b}`.localeCompare(`${y.asset_a}/${y.asset_b}`),
+  };
+  const matching = $derived(
     ba.pools
       .filter((p) => showClosed || !p.abandoned)
+      .filter((p) => filter === 'all' || (filter === 'chn' && (isChn(p.asset_a_id) || isChn(p.asset_b_id))) || (filter === 'mine' && positions.has(p.pool)))
       .filter((p) => {
         const q = query.trim().toLowerCase();
         return !q || p.asset_a.toLowerCase().includes(q) || p.asset_b.toLowerCase().includes(q);
-      })
-      .sort((x, y) => volumeChn(y) - volumeChn(x) || y.swaps - x.swaps),
+      }),
   );
+  const hiddenCount = $derived(showHidden ? 0 : matching.filter(isHidden).length);
+  const list = $derived((showHidden ? matching : matching.filter((p) => !isHidden(p))).sort(SORTS[sort]));
   const closed = $derived(ba.pools.filter((p) => p.abandoned).length);
   const pool = $derived(ba.pools.find((p) => p.pool === open) ?? null);
   const position = $derived(pool ? (ba.mine?.liquidity.find((l) => l.pool === pool.pool) ?? null) : null);
@@ -87,8 +105,23 @@
   <section class="panel">
     <div class="panel-head">
       <input type="search" class="search" placeholder="Find a pool by an asset" aria-label="Find a pool" bind:value={query} />
+      <label class="sort"><span class="muted">Sort</span>
+        <select bind:value={sort} aria-label="Sort pools">
+          <option value="traded">Most traded</option>
+          <option value="trades">Most trades</option>
+          <option value="deepest">Deepest</option>
+          <option value="newest">Newest</option>
+          <option value="name">Name</option>
+        </select>
+      </label>
       {#if closed}<label class="check"><input type="checkbox" bind:checked={showClosed} /> <span>Closed pools ({closed})</span></label>{/if}
     </div>
+    <div class="ba-chips" role="group" aria-label="Filter pools">
+      <button type="button" class="ba-chip" aria-pressed={filter === 'all'} onclick={() => (filter = 'all')}>All</button>
+      <button type="button" class="ba-chip" aria-pressed={filter === 'chn'} onclick={() => (filter = 'chn')}>With CHN</button>
+      <button type="button" class="ba-chip" aria-pressed={filter === 'mine'} onclick={() => (filter = 'mine')}>Yours</button>
+    </div>
+    <HiddenToggle count={hiddenCount} bind:show={showHidden} />
     {#if list.length === 0}
       <p class="ba-empty">{ba.pools.length === 0 ? 'No pools yet: add liquidity to make the first.' : 'No pool matches.'}</p>
     {:else}
@@ -116,6 +149,11 @@
 {/if}
 
 <style>
+  .sort {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+  }
   .pool-view {
     display: flex;
     flex-direction: column;

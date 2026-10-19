@@ -13,6 +13,10 @@
   import './ba/ba.css';
   import AssetBadge from './ba/AssetBadge.svelte';
   import AssetPicker from './ba/AssetPicker.svelte';
+  import HiddenToggle from './ba/HiddenToggle.svelte';
+  import { lookAlikes, type PickChip, type PickChoice } from './ba/picker';
+  import { withoutHidden } from './ba/visible.svelte';
+  import { assetById, hasPool } from './ba/store.svelte';
   import UnitsInput from './ba/UnitsInput.svelte';
   import { amountParam, approx, assetArg, CHN_ID, formatAmount, formatUnits, unitsAtMost, unitsOf } from './ba/model';
   import { ba, nameOf, refreshBitAssets, sendIntent, startBitAssets, unlockHoldings } from './ba/store.svelte';
@@ -33,11 +37,24 @@
     active = what !== CHN_ID;
   });
 
-  // What to send, in the searchable picker (hundreds of assets): CHN first, then what the wallet holds.
-  const sendChoices = $derived([
-    { id: CHN_ID, label: 'CHN', seq: '' },
-    ...holdings.map((h) => ({ id: h.asset, label: h.label, seq: ba.assets.find((a) => a.asset === h.asset)?.seq, held: formatAmount(h.balance, h.decimals, { max: 4 }) })),
-  ]);
+  // What to send, in the searchable picker (hundreds of assets): CHN first, then what the wallet holds, without what it
+  // hides (its asset filters) unless shown; two of one name marked, told apart by their numbers.
+  let showHidden = $state(false);
+  const visible = $derived(withoutHidden(holdings, (h) => h.asset, (h) => h.label, showHidden));
+  // The asset chosen stays listed (sent to from another page) even if hidden.
+  const listed = $derived(what === CHN_ID || visible.items.some((h) => h.asset === what) ? visible.items : [...visible.items, ...holdings.filter((h) => h.asset === what)]);
+  const sendChoices: PickChoice[] = $derived.by(() => {
+    const list: PickChoice[] = listed.map((h) => ({ id: h.asset, label: h.label, seq: assetById(h.asset)?.seq, held: formatAmount(h.balance, h.decimals, { max: 4 }) }));
+    const twins = lookAlikes(list);
+    return [{ id: CHN_ID, label: 'CHN', seq: '' }, ...list.map((c) => (twins.has(c.id) ? { ...c, warn: t('Another asset you hold has this name: check its number') } : c))];
+  });
+  // The filters of Browse assets.
+  const sendChips: PickChip[] = [
+    { id: 'market', label: 'With a market', test: (c) => c.id === CHN_ID || hasPool(c.id) },
+    { id: 'mintable', label: 'Mintable', test: (c) => c.id === CHN_ID || assetById(c.id)?.fixed === false },
+    { id: 'fixed', label: 'Fixed supply', test: (c) => c.id === CHN_ID || assetById(c.id)?.fixed === true },
+    { id: 'controlled', label: 'Controlled', test: (c) => c.id === CHN_ID || !!holdings.find((h) => h.asset === c.id)?.control },
+  ];
   const holding = $derived(holdings.find((h) => h.asset === what) ?? null);
   const decimals = $derived(holding?.decimals ?? 0);
   const held = $derived(holding ? unitsAtMost(holding.balance, holding.decimals) : 0n);
@@ -85,11 +102,12 @@
 {#if wallets.current !== null}
   <section class="panel what" aria-label="What to send">
     <div class="pick-row">
-      <AssetPicker id="send-what" label="Asset to send" bind:value={what} choices={sendChoices} />
+      <AssetPicker id="send-what" label="Asset to send" bind:value={what} choices={sendChoices} chips={sendChips} />
       {#if ba.mineState === 'locked' && holdings.length === 0}
         <button type="button" class="ba-chip" onclick={() => void unlockHoldings()}><Icon name="unlock" size={14} /> Show my assets</button>
       {/if}
     </div>
+    <HiddenToggle count={visible.hidden} bind:show={showHidden} />
     {#if !active}<p class="ba-help">Sending CHN. Pick an asset above to send it instead: any address of this chain receives any asset.</p>{/if}
   </section>
 

@@ -218,6 +218,11 @@ std::map<std::string, Bridge::Thread> RpcMethods()
         {"listauctions", Bridge::Thread::WORKER},
         {"getauction", Bridge::Thread::WORKER},
         {"quotebid", Bridge::Thread::WORKER},
+        // Searches of the node, a page at a time (cursor; the pages never read a whole list: user feedback 2026-10-19).
+        // A node without them answers "method not found", and the pages ask the list methods above instead.
+        {"searchassets", Bridge::Thread::WORKER},
+        {"searchpools", Bridge::Thread::WORKER},
+        {"searchauctions", Bridge::Thread::WORKER},
         // What the wallet holds and did: they need the keys too (a reservation is told by a signature of the wallet).
         {"listmyassets", Bridge::Thread::WORKER},
         {"listassetactivity", Bridge::Thread::WORKER},

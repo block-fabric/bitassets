@@ -15,6 +15,8 @@
   import '../ba/ba.css';
   import { barWidth } from '../ba/actions';
   import AssetSelect from '../ba/AssetSelect.svelte';
+  import HiddenToggle from '../ba/HiddenToggle.svelte';
+  import { hiddenAsset } from '../ba/visible.svelte';
   import AssetBadge from '../ba/AssetBadge.svelte';
   import AuctionView from '../ba/AuctionView.svelte';
   import Chart from '../ba/Chart.svelte';
@@ -60,11 +62,30 @@
     { id: 'done', label: 'Sold out or ended' },
     { id: 'closed', label: 'Collected' },
   ];
-  const list = $derived(
-    filter === 'closed'
+  // Searched, sorted (user feedback 2026-10-19), without the auctions of assets the wallet hides unless shown.
+  type AuctionSort = 'newest' | 'ending' | 'cheapest' | 'bids' | 'name';
+  let query = $state('');
+  let sort = $state<AuctionSort>('newest');
+  let showHidden = $state(false);
+  const isHidden = (a: Auction) => hiddenAsset(a.base_id, a.base) || hiddenAsset(a.quote_id, a.quote);
+  const SORTS: Record<AuctionSort, (x: Auction, y: Auction) => number> = {
+    newest: (x, y) => y.start_height - x.start_height,
+    ending: (x, y) => x.end_height - y.end_height,
+    cheapest: (x, y) => (x.unit_price || Infinity) - (y.unit_price || Infinity),
+    bids: (x, y) => y.bids - x.bids,
+    name: (x, y) => x.base.localeCompare(y.base),
+  };
+  const matching = $derived(
+    (filter === 'closed'
       ? closed
-      : ba.auctions.filter((a) => filter === 'live' || (filter === 'open' && a.status === 'open') || (filter === 'upcoming' && a.status === 'upcoming') || (filter === 'done' && (a.status === 'sold out' || a.status === 'ended'))),
+      : ba.auctions.filter((a) => filter === 'live' || (filter === 'open' && a.status === 'open') || (filter === 'upcoming' && a.status === 'upcoming') || (filter === 'done' && (a.status === 'sold out' || a.status === 'ended')))
+    ).filter((a) => {
+      const q = query.trim().toLowerCase();
+      return !q || a.base.toLowerCase().includes(q) || a.quote.toLowerCase().includes(q) || a.auction.startsWith(q);
+    }),
   );
+  const hiddenCount = $derived(showHidden ? 0 : matching.filter(isHidden).length);
+  const list = $derived([...(showHidden ? matching : matching.filter((a) => !isHidden(a)))].sort(SORTS[sort]));
   const counts = $derived({
     live: Math.max(ba.auctions.length, ba.info?.auctions ?? 0),
     open: ba.auctions.filter((a) => a.status === 'open').length,
@@ -186,6 +207,19 @@
         <button type="button" class="ba-chip" aria-pressed={filter === f.id} onclick={() => (filter = f.id)}>{t(f.label)} {#if f.id !== 'closed'}<span class="count">{counts[f.id]}</span>{/if}</button>
       {/each}
     </div>
+    <div class="finder-row">
+      <input type="search" class="search" placeholder="Find an auction by an asset" aria-label="Find an auction" bind:value={query} />
+      <label class="sort"><span class="muted">Sort</span>
+        <select bind:value={sort} aria-label="Sort auctions">
+          <option value="newest">Newest</option>
+          <option value="ending">Ending soonest</option>
+          <option value="cheapest">Cheapest a unit</option>
+          <option value="bids">Most bids</option>
+          <option value="name">Name</option>
+        </select>
+      </label>
+    </div>
+    <HiddenToggle count={hiddenCount} bind:show={showHidden} />
     {#if list.length === 0}
       <div class="panel ba-empty">{filter === 'closed' ? 'No auction was collected yet.' : 'No auction here.'} <button type="button" class="btn small" onclick={() => (nav.tab = 'sell')}>Sell by auction</button></div>
     {:else}
@@ -268,6 +302,21 @@
 </div>
 
 <style>
+  .finder-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.6rem;
+    margin: 0.5rem 0;
+  }
+  .finder-row .search {
+    flex: 1 1 14rem;
+  }
+  .sort {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+  }
   .sell {
     padding: 1.2rem;
   }

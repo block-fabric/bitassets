@@ -11,9 +11,10 @@
   import { rpc } from '../../lib/rpc';
   import { toast, wallets } from '../../lib/state.svelte';
   import AssetSelect from './AssetSelect.svelte';
+  import { hiddenAsset } from './visible.svelte';
   import UnitsInput from './UnitsInput.svelte';
   import { amountParam, assetArg, CHN_ID, formatAmount, formatPercent, formatPrice, formatUnits, isChn, MIN_LIQUIDITY, MIN_OPEN_CHN, MIN_OPEN_SHARES, pairedAmount, provide, unitsAtMost, unitsOf, type Pool, type Amount } from './model';
-  import { ba, decimalsOf, labelOf, nameOf, poolOf, refreshBitAssets, tradeIntent } from './store.svelte';
+  import { assetById, ba, decimalsOf, labelOf, nameOf, poolOf, refreshBitAssets, tradeIntent } from './store.svelte';
 
   let a = $state('');
   let b = $state(CHN_ID);
@@ -24,7 +25,12 @@
   let slippage = $state(1);
   let busy = $state(false);
 
-  const choices = $derived(ba.assets.map((x) => ({ id: x.asset, label: x.label, seq: x.seq })));
+  // The newest assets the store keeps, and those the wallet holds, without what it hides (unless chosen already).
+  const choices = $derived.by(() => {
+    const seen = new Set<string>();
+    const all = [...ba.assets.map((x) => ({ id: x.asset, label: x.label, seq: x.seq })), ...(ba.mine?.assets ?? []).map((h) => ({ id: h.asset, label: h.label, seq: assetById(h.asset)?.seq ?? '' }))];
+    return all.filter((c) => !seen.has(c.id) && (seen.add(c.id), true) && (c.id === a || c.id === b || !hiddenAsset(c.id, c.label)));
+  });
   $effect(() => {
     if (!tradeIntent.a && !tradeIntent.b) return;
     if (tradeIntent.a) a = tradeIntent.a;

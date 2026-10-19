@@ -11,6 +11,22 @@ export interface PickChoice {
   seq?: string;
   /** What the wallet holds of it, written. */
   held?: string;
+  /** A warning shown on its row (a name like another asset the wallet holds). */
+  warn?: string;
+}
+
+/** A filter of the picker, as the chips at the top of Browse assets (With a market, Mintable...). */
+export interface PickChip {
+  id: string;
+  label: string;
+  test: (c: PickChoice) => boolean;
+}
+
+/** The choices that hold the same name (any case) as another of them: look-alikes, told apart by their numbers. */
+export function lookAlikes(choices: readonly PickChoice[]): Set<string> {
+  const byName = new Map<string, number>();
+  for (const c of choices) byName.set(c.label.toLowerCase(), (byName.get(c.label.toLowerCase()) ?? 0) + 1);
+  return new Set(choices.filter((c) => (byName.get(c.label.toLowerCase()) ?? 0) > 1).map((c) => c.id));
 }
 
 export type PickRow = { kind: 'head'; text: string } | { kind: 'item'; choice: PickChoice; fav: boolean };

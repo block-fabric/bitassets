@@ -1,5 +1,5 @@
 <script lang="ts">
-  // Assets: every asset of the chain, as cards to search (a name, a number such as 1739-0029, or a hash
+  // Browse assets: the assets of the chain, as cards to search (a name, a number such as 1739-0029, or a hash
   // "0x…": also an asset whose name is private), filter (held or controlled by the wallet, with a market,
   // mintable, fixed, dead) and sort (newest, by name, by supply, by the value of the supply, most traded).
   // An asset opens whole (ba/AssetView.svelte). The Explore tab of the Qt window of BitAssets.
@@ -13,13 +13,21 @@
   import '../ba/ba.css';
   import AssetBadge from '../ba/AssetBadge.svelte';
   import AssetView from '../ba/AssetView.svelte';
-  import { approx, assetArg, formatAmount, formatPrice, isSeq, type Asset } from '../ba/model';
-  import { ba, chnPrice, poolOf, startBitAssets } from '../ba/store.svelte';
+  import { untrack } from 'svelte';
+  import { assetArg, formatAmount, formatPrice, isSeq, type Asset } from '../ba/model';
+  import { assetById, ba, chnPrice, hasPool, noteKnownAssets, startBitAssets } from '../ba/store.svelte';
+  import { PAGE, searchAssets, sortAssets, type AssetSort } from '../ba/search';
+  import { hiding, searchFiltersOf } from '../ba/hide.svelte';
+  import { hiddenAsset } from '../ba/visible.svelte';
+  import HiddenToggle from '../ba/HiddenToggle.svelte';
+  import { wallets } from '../../lib/state.svelte';
 
   $effect(() => startBitAssets());
 
   type Filter = 'all' | 'mine' | 'market' | 'mintable' | 'fixed' | 'dead';
   type Sort = 'newest' | 'oldest' | 'name' | 'supply' | 'value' | 'traded';
+  // The sorts of the node's search (ba/search.ts): worth and trade by the depth and the volume of the pools.
+  const SERVER_SORT: Record<Sort, AssetSort> = { newest: 'newest', oldest: 'oldest', name: 'name', supply: 'supply', value: 'pool_depth', traded: 'volume' };
 
   let query = $state('');
   let filter = $state<Filter>('all');
@@ -29,101 +37,108 @@
   let looking = $state(false);
   /** An asset found by its hash or number that the list does not hold (its name is private). */
   let found = $state<Asset | null>(null);
-  /** Tiles drawn: more on "Show more" (a chain of thousands of assets stays quick to open). */
-  const TILES = 240;
-  let drawn = $state(TILES);
-  /**
-   * Past MAX_ASSETS the list does not hold every asset: what the user types is asked of the node too
-   * (listassets with its match), and what it finds is listed with the rest (audit port-2 #4).
-   */
-  const complete = $derived(!ba.info || ba.assets.length >= ba.info.assets);
-  let remote = $state.raw<Asset[]>([]);
-  let remoteSeq = 0;
-  $effect(() => {
-    const q = query.trim();
-    const mine = ++remoteSeq;
-    if (complete || q.length < 2) {
-      remote = [];
-      return;
+  /** What the wallet hides (its asset filters, ba/hide.svelte.ts) shown anyway. */
+  let showHidden = $state(false);
+
+  // The list is the node's, a page at a time as the user scrolls (user feedback 2026-10-19: hundreds of thousands of
+  // assets; the page never reads them all): what is typed, the filter and the sort asked of searchassets (or, on a node
+  // without it, of listassets: its first page only).
+  let results = $state.raw<Asset[]>([]);
+  let cursor: string | null = null;
+  let loading = $state(false);
+  let more = $state(false);
+  let fallback = $state(false);
+  let searchError = $state('');
+  let total = $state<number | undefined>(undefined);
+  let run = 0;
+
+  const mineIds = $derived(new Set((ba.mine?.assets ?? []).map((a) => a.asset)));
+  const controlled = $derived(new Set((ba.mine?.assets ?? []).filter((a) => a.control).map((a) => a.asset)));
+
+  /** What the filter keeps that the node's search does not tell (held, mintable, fixed, dead), and what the wallet ignores. */
+  function keep(a: Asset): boolean {
+    if (filter === 'mine' && !mineIds.has(a.asset)) return false;
+    if (filter === 'mintable' && a.fixed) return false;
+    if (filter === 'fixed' && !a.fixed) return false;
+    if (filter === 'dead' && !a.releasable) return false;
+    return showHidden || !hiddenAsset(a.asset, a.label);
+  }
+  const list = $derived(results.filter(keep));
+  const hiddenHere = $derived(showHidden ? 0 : results.filter((a) => hiddenAsset(a.asset, a.label)).length);
+  const filtersOn = $derived.by(() => {
+    void hiding.version;
+    return Object.keys(searchFiltersOf()).length > 0;
+  });
+
+  /** Ask the node for a page: the first (anew) or the next. Pages the filter empties ask for the next, a few at most. */
+  async function fetchPage(anew: boolean): Promise<void> {
+    const mine = anew ? ++run : run;
+    if (anew) {
+      cursor = null;
+      results = [];
+      more = false;
     }
-    const timer = setTimeout(() => {
-      rpc
-        .raw<Asset[]>('listassets', [100, 0, q])
-        .then((found) => {
-          if (mine === remoteSeq) remote = found ?? [];
-        })
-        .catch(() => undefined);
-    }, 300);
-    return () => clearTimeout(timer);
-  });
-  const pool = $derived.by(() => {
-    if (!remote.length) return ba.assets;
-    const have = new Set(ba.assets.map((a) => a.asset));
-    return [...ba.assets, ...remote.filter((a) => !have.has(a.asset))];
-  });
+    loading = true;
+    searchError = '';
+    try {
+      // The assets of the wallet: its own list, no search.
+      if (filter === 'mine') {
+        const own = (ba.mine?.assets ?? []).map((h) => assetById(h.asset) ?? ({ asset: h.asset, label: h.label, seq: '', decimals: h.decimals, supply: h.supply, minted: h.supply, burned: 0, fixed: h.fixed, registered: 0, registration: '', releasable: false } as Asset));
+        const q = query.trim().toLowerCase();
+        results = sortAssets(own.filter((a) => !q || a.label.toLowerCase().includes(q) || a.seq === q), SERVER_SORT[sort]);
+        return;
+      }
+      for (let i = 0; i < 5; i++) {
+        const page = await searchAssets(
+          { query: query.trim(), filters: { ...(showHidden ? {} : searchFiltersOf()), ...(filter === 'market' ? { has_pool: true } : {}) }, sort: SERVER_SORT[sort], cursor, limit: PAGE },
+          hasPool,
+        );
+        if (mine !== run) return;
+        const have = new Set(results.map((a) => a.asset));
+        results = [...results, ...page.items.filter((a) => !have.has(a.asset))];
+        cursor = page.cursor;
+        fallback = page.fallback;
+        total = page.total;
+        more = cursor !== null;
+        if (!more || page.items.filter(keep).length >= 12) break;
+      }
+    } catch (e) {
+      if (mine === run) searchError = errorText(e);
+    } finally {
+      if (mine === run) loading = false;
+    }
+  }
+
+  // Asked anew as the user types (a moment after), picks a filter or a sort, or the wallet's filters change; and when
+  // the node counts other assets (a block registered some).
   $effect(() => {
-    void query;
     void filter;
     void sort;
-    drawn = TILES;
+    void showHidden;
+    void hiding.version;
+    void ba.info?.assets;
+    void wallets.current;
+    const q = query;
+    if (!ba.loaded) return;
+    const timer = setTimeout(() => void untrack(() => fetchPage(true)), q ? 300 : 0);
+    return () => clearTimeout(timer);
   });
+
+  /** The next page when the end of the list comes into view (or "Show more"). */
+  function atEnd(node: HTMLElement) {
+    if (typeof IntersectionObserver === 'undefined') return;
+    const io = new IntersectionObserver((entries) => {
+      if (entries.some((e) => e.isIntersecting) && more && !loading) void fetchPage(false);
+    });
+    io.observe(node);
+    return { destroy: () => io.disconnect() };
+  }
 
   // Opened for an asset (from another page, the palette, the home).
   $effect(() => {
     void nav.focus;
     const key = takeFocus('assets');
     if (key) shown = key;
-  });
-
-  const mineIds = $derived(new Set((ba.mine?.assets ?? []).map((a) => a.asset)));
-  const controlled = $derived(new Set((ba.mine?.assets ?? []).filter((a) => a.control).map((a) => a.asset)));
-  const withPool = $derived(new Set(ba.pools.filter((p) => !p.abandoned).flatMap((p) => [p.asset_a_id, p.asset_b_id])));
-
-  /** What a pool of the asset traded, in CHN where it trades with CHN, for "most traded". */
-  function traded(id: string): number {
-    const p = poolOf(id, '0'.repeat(64));
-    if (!p) return 0;
-    return approx(p.asset_a_id === id ? p.volume_b : p.volume_a);
-  }
-
-  const counts = $derived({
-    all: ba.assets.length,
-    mine: ba.assets.filter((a) => mineIds.has(a.asset)).length,
-    market: ba.assets.filter((a) => withPool.has(a.asset)).length,
-    mintable: ba.assets.filter((a) => !a.fixed).length,
-    fixed: ba.assets.filter((a) => a.fixed).length,
-    dead: ba.assets.filter((a) => a.releasable).length,
-  });
-
-  const list = $derived.by(() => {
-    const q = query.trim().toLowerCase();
-    let out = pool.filter((a) => {
-      if (filter === 'mine' && !mineIds.has(a.asset)) return false;
-      if (filter === 'market' && !withPool.has(a.asset)) return false;
-      if (filter === 'mintable' && a.fixed) return false;
-      if (filter === 'fixed' && !a.fixed) return false;
-      if (filter === 'dead' && !a.releasable) return false;
-      if (!q) return true;
-      return a.label.toLowerCase().includes(q) || a.seq === q || a.asset.startsWith(q.replace(/^0x/, '')) || (a.data?.info ?? '').toLowerCase().includes(q);
-    });
-    const value = (a: Asset) => (chnPrice(a.asset) ?? 0) * approx(a.supply);
-    out = [...out].sort((a, b) => {
-      switch (sort) {
-        case 'oldest':
-          return a.registered - b.registered;
-        case 'name':
-          return a.label.localeCompare(b.label);
-        case 'supply':
-          return approx(b.supply) - approx(a.supply);
-        case 'value':
-          return value(b) - value(a);
-        case 'traded':
-          return traded(b.asset) - traded(a.asset);
-        default:
-          return b.registered - a.registered;
-      }
-    });
-    return out;
   });
 
   const FILTERS: { id: Filter; label: string }[] = [
@@ -134,6 +149,7 @@
     { id: 'fixed', label: 'Fixed supply' },
     { id: 'dead', label: 'Dead' },
   ];
+  const counts = $derived<Partial<Record<Filter, number>>>({ all: ba.info?.assets ?? undefined, mine: mineIds.size });
 
   /** Enter: an asset by its exact name, number or hash, also one the list does not hold (a private name). */
   async function lookup() {
@@ -150,6 +166,7 @@
     try {
       const a = await rpc.raw<Asset>('getasset', [q]);
       found = a;
+      noteKnownAssets([a]);
       shown = a.asset;
     } catch (e) {
       lookupError = errorText(e);
@@ -186,7 +203,7 @@
       <div class="bar">
         <div class="ba-chips" role="group" aria-label="Filter">
           {#each FILTERS as f (f.id)}
-            <button type="button" class="ba-chip" aria-pressed={filter === f.id} onclick={() => (filter = f.id)}>{t(f.label)} <span class="count">{counts[f.id]}</span></button>
+            <button type="button" class="ba-chip" aria-pressed={filter === f.id} onclick={() => (filter = f.id)}>{t(f.label)}{#if counts[f.id] !== undefined} <span class="count">{counts[f.id]}</span>{/if}</button>
           {/each}
         </div>
         <label class="sort">
@@ -203,11 +220,13 @@
       </div>
     </section>
 
-    {#if !ba.loaded}
-      <p class="ba-empty">Loading…</p>
+    <HiddenToggle count={hiddenHere} some={filtersOn} bind:show={showHidden} />
+    {#if searchError}<p class="ba-problems bad" role="alert"><SafeText text={searchError} /></p>{/if}
+    {#if !ba.loaded || (loading && list.length === 0)}
+      <p class="ba-empty" role="status">Loading…</p>
     {:else if list.length === 0}
       <div class="panel ba-empty">
-        {#if ba.assets.length === 0}
+        {#if (ba.info?.assets ?? 0) === 0}
           No asset is registered yet. Issue the first one.
         {:else}
           No asset matches. Press Enter to look for one by its exact name, number or hash: a private name is not listed.
@@ -215,7 +234,7 @@
       </div>
     {:else}
       <ul class="grid" aria-label="Assets">
-        {#each list.slice(0, drawn) as a (a.asset)}
+        {#each list as a (a.asset)}
           {@const price = chnPrice(a.asset)}
           <li>
             <button type="button" class="panel tile" onclick={() => (shown = a.asset)}>
@@ -237,14 +256,15 @@
           </li>
         {/each}
       </ul>
-      {#if list.length > drawn}
-        <p class="more"><button type="button" class="btn" onclick={() => (drawn += TILES)}>{t('Show more (%1 more)', formatCount(list.length - drawn))}</button></p>
+      <div class="end" use:atEnd></div>
+      {#if more}
+        <p class="more"><button type="button" class="btn" disabled={loading} onclick={() => void fetchPage(false)}>{loading ? 'Loading…' : 'Show more'}</button></p>
       {/if}
     {/if}
-    {#if !complete}
-      <p class="ba-help">{t('The %1 oldest of the %2 assets are not listed here: type a name to find them, or its number or hash and press Enter.', formatCount(ba.info!.assets - ba.assets.length), formatCount(ba.info!.assets))}</p>
+    {#if fallback && (ba.info?.assets ?? 0) > PAGE}
+      <p class="ba-help">{t('This node lists %1 assets at a time: type a name to find others, or a number or hash and press Enter.', formatCount(200))}</p>
     {/if}
-    {#if found && !ba.assets.some((a) => a.asset === found?.asset)}
+    {#if found && !list.some((a) => a.asset === found?.asset)}
       <p class="ba-help">Found by its hash: <button type="button" class="btn small ghost" onclick={() => (shown = found?.asset ?? null)}><SafeText text={found.label} /></button> <span class="faint" translate="no">{assetArg(found.asset)}</span></p>
     {/if}
   {/if}

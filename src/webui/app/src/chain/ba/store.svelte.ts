@@ -15,7 +15,8 @@ import { every } from '../../lib/poll';
 import { rpc } from '../../lib/rpc';
 import { node, toast, wallets } from '../../lib/state.svelte';
 import { WalletError } from '../../lib/wallet';
-import { EXACT_METHODS, type Activity, type AssetTx, type Amount, type Asset, type AssetData, type Auction, type BitAssetsInfo, type Holdings, type Pool } from './model';
+import { loadHiding } from './hide.svelte';
+import { EXACT_METHODS, type Activity, type AssetTx, type Amount, type Asset, type AssetData, type Auction, type BitAssetsInfo, type Holding, type Holdings, type Pool } from './model';
 
 // Amounts past 2^53 units read exactly, wherever the methods are called (audit 7 E-BA6).
 setExactMethods(EXACT_METHODS);
@@ -81,9 +82,13 @@ export function emptyJournal(): Journal {
 
 export type MineState = 'none' | 'loading' | 'ok' | 'locked' | 'error';
 
-/** Assets read a call (listassets count), and at most in all: past that, the Assets page asks the node as the user types. */
-export const ASSET_PAGE = 1000;
-export const MAX_ASSETS = 20_000;
+/**
+ * The newest assets the store keeps (one listassets call), for their names on the pages: never the whole list (user
+ * feedback 2026-10-19: hundreds of thousands of assets, millions later). Browse assets and the pickers ask the node
+ * as the user searches (ba/search.ts: searchassets, paged by a cursor).
+ */
+export const ASSET_PAGE = 500;
+export const MAX_ASSETS = ASSET_PAGE;
 /** Entries of the asset activity read at first, and more each time "Show more" is pressed (up to MAX_ACTIVITY). */
 export const ACTIVITY_PAGE = 200;
 export const MAX_ACTIVITY = 5000;
@@ -91,23 +96,21 @@ export const MAX_ACTIVITY = 5000;
 export const TRANSFERS = 1000;
 
 /**
- * Every asset of the chain, in the order of registration, in pages of ASSET_PAGE (audit port-2 #4: a single
- * listassets [1000, 0] left the newest out once there were more); past MAX_ASSETS, the newest MAX_ASSETS
- * (`total`: the assets the node counts, getbitassetsinfo).
+ * The newest ASSET_PAGE assets of the chain (audit port-2 #4: the newest, never only the first registered;
+ * `total`: the assets the node counts, getbitassetsinfo), in one call.
  */
 export async function readAllAssets(total: number | Promise<number>): Promise<Asset[]> {
-  // The first page at once, with the other calls of a refresh; the count of the node decides the rest.
-  const first = rpc.raw<Asset[]>('listassets', [ASSET_PAGE, 0]);
-  first.catch(() => undefined);
-  const from = Math.max(0, (await total) - MAX_ASSETS);
-  const out: Asset[] = [];
-  for (let skip = from; skip < from + MAX_ASSETS; skip += ASSET_PAGE) {
-    const page = (await (skip === 0 ? first : rpc.raw<Asset[]>('listassets', [ASSET_PAGE, skip]))) ?? [];
-    out.push(...page);
-    if (page.length < ASSET_PAGE) break;
-  }
-  return out;
+  const from = Math.max(0, (await total) - ASSET_PAGE);
+  return (await rpc.raw<Asset[]>('listassets', [ASSET_PAGE, from])) ?? [];
 }
+
+/** Whether two lists read are the same (then the one shown stays: nothing that depends on it is worked out again). */
+function same(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (Array.isArray(a) && Array.isArray(b) && a.length !== b.length) return false;
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
 
 /**
  * Pools and auctions are read a page at a time (listpools, listauctions [count, skip]: audit 7 E-BA3, anyone can
@@ -527,9 +530,10 @@ export async function refreshBitAssets(options: { node?: boolean } = {}): Promis
         if (nodeCalls) {
           const [info, assets, pools, auctions] = await nodeCalls;
           ba.info = info;
-          ba.assets = assets ?? [];
-          ba.pools = pools ?? [];
-          ba.auctions = auctions ?? [];
+          // A list unchanged is kept (the pages work out nothing again: a burst of blocks redrew them for nothing).
+          if (!same(ba.assets, assets ?? [])) ba.assets = assets ?? [];
+          if (!same(ba.pools, pools ?? [])) ba.pools = pools ?? [];
+          if (!same(ba.auctions, auctions ?? [])) ba.auctions = auctions ?? [];
           ba.height = info?.height ?? -1;
           if (notePrices(ba.pools, ba.height, Math.floor(Date.now() / 1000))) saveJournal();
         } else {
@@ -544,7 +548,7 @@ export async function refreshBitAssets(options: { node?: boolean } = {}): Promis
       if (transfersCall) {
         const transfers = await transfersCall;
         if (wallets.current === wallet && transfers) {
-          ba.transfers = transfers;
+          if (ba.transfersWallet !== wallet || !same(ba.transfers, transfers)) ba.transfers = transfers;
           ba.transfersWallet = wallet;
         }
       }
@@ -563,8 +567,8 @@ export async function refreshBitAssets(options: { node?: boolean } = {}): Promis
         try {
           const [mine, activity] = await walletCalls;
           if (wallets.current === wallet) {
-            ba.mine = mine;
-            ba.activity = activity ?? [];
+            if (ba.wallet !== wallet || !same(ba.mine, mine)) ba.mine = mine;
+            if (ba.wallet !== wallet || !same(ba.activity, activity ?? [])) ba.activity = activity ?? [];
             ba.mineState = 'ok';
             ba.mineError = '';
             ba.wallet = wallet;
@@ -633,6 +637,8 @@ let lastWallet: string | null | undefined;
  * the wallet's part also every 5 seconds (the mempool), the chain's lists only with blocks.
  */
 export function startBitAssets(): void {
+  // What the wallets hide of the assets (their asset filters), read once.
+  void loadHiding();
   const tick = () => {
     const tip = node.tip?.hash ?? '';
     if (tip !== lastTip || wallets.current !== lastWallet) {
@@ -677,16 +683,57 @@ export function resetBitAssets(): void {
 
 // --- Lookups ---
 
+// Lookups by id, from maps made once per list read (the lists are replaced whole): a page that names hundreds of
+// assets, each by a find over thousands, took frames (user feedback 2026-10-19, item 10).
+let assetMap = new Map<string, Asset>();
+let assetMapOf: unknown = null;
+let heldMap = new Map<string, Holding>();
+let heldMapOf: unknown = null;
+let poolMap = new Map<string, Pool>();
+let poolMapOf: unknown = null;
+let pooled = new Set<string>();
+/** Assets the pages found apart from the list read (a search, a lookup): their names known everywhere. */
+const known = new Map<string, Asset>();
+
+/** An asset by id, among those read or found. */
+export function assetById(id: string): Asset | undefined {
+  const list = ba.assets;
+  if (assetMapOf !== list) {
+    assetMap = new Map(list.map((a) => [a.asset, a]));
+    assetMapOf = list;
+  }
+  return assetMap.get(id) ?? known.get(id);
+}
+
+/** Keep assets found by a search or a lookup, for their names and decimals (at most 5,000, the latest kept). */
+export function noteKnownAssets(list: readonly Asset[]): void {
+  for (const a of list) {
+    known.delete(a.asset);
+    known.set(a.asset, a);
+  }
+  while (known.size > 5000) known.delete(known.keys().next().value as string);
+}
+
+/** What the wallet holds of an asset, by id. */
+export function holdingOf(id: string): Holding | undefined {
+  const list = ba.mine?.assets ?? null;
+  if (heldMapOf !== list) {
+    heldMap = new Map((list ?? []).map((h) => [h.asset, h]));
+    heldMapOf = list;
+  }
+  return heldMap.get(id);
+}
+
 /** The decimals of an asset, by id (CHN: 8; an asset not listed: 0). */
 export function decimalsOf(id: string): number {
   if (/^0+$/.test(id)) return 8;
-  return ba.assets.find((a) => a.asset === id)?.decimals ?? ba.mine?.assets.find((a) => a.asset === id)?.decimals ?? 0;
+  return assetById(id)?.decimals ?? holdingOf(id)?.decimals ?? 0;
 }
 
 /** The label of an asset, by id. Text of the chain. */
 export function labelOf(id: string): string {
   if (/^0+$/.test(id)) return 'CHN';
-  return ba.assets.find((a) => a.asset === id)?.label ?? ba.mine?.assets.find((a) => a.asset === id)?.label ?? `0x${id.slice(0, 12)}…`;
+  return assetById(id)?.label ?? holdingOf(id)?.label ?? `0x${id.slice(0, 12)}…`;
 }
 
 /**
@@ -698,15 +745,36 @@ export function labelOf(id: string): string {
  */
 export function nameOf(id: string, label?: string): string {
   if (/^0+$/.test(id)) return 'CHN';
-  const listed = ba.assets.find((a) => a.asset === id);
-  const text = label ?? listed?.label ?? ba.mine?.assets.find((a) => a.asset === id)?.label ?? '';
+  const listed = assetById(id);
+  const text = label ?? listed?.label ?? holdingOf(id)?.label ?? '';
   const tag = listed?.seq ? `#${listed.seq}` : `0x${id.slice(0, 8)}…${id.slice(-4)}`;
   return text ? `${tag} · "${text}"` : tag;
 }
 
 /** The pool of two assets, either way round. */
 export function poolOf(a: string, b: string): Pool | undefined {
-  return ba.pools.find((p) => (p.asset_a_id === a && p.asset_b_id === b) || (p.asset_a_id === b && p.asset_b_id === a));
+  const list = ba.pools;
+  if (poolMapOf !== list) {
+    poolMap = new Map();
+    pooled = new Set();
+    // The first of the list either way round, as a search of it found.
+    for (const p of list) {
+      if (!poolMap.has(`${p.asset_a_id}:${p.asset_b_id}`)) poolMap.set(`${p.asset_a_id}:${p.asset_b_id}`, p);
+      if (!poolMap.has(`${p.asset_b_id}:${p.asset_a_id}`)) poolMap.set(`${p.asset_b_id}:${p.asset_a_id}`, p);
+      if (!p.abandoned) {
+        pooled.add(p.asset_a_id);
+        pooled.add(p.asset_b_id);
+      }
+    }
+    poolMapOf = list;
+  }
+  return poolMap.get(`${a}:${b}`);
+}
+
+/** Whether an asset has a pool not abandoned (a market). */
+export function hasPool(id: string): boolean {
+  void poolOf('', '');
+  return pooled.has(id);
 }
 
 /** The price of one of an asset in CHN, from its pool with CHN (undefined when it has none, or nobody provides to it). */

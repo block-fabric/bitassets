@@ -13,15 +13,19 @@
   import AssetBadge from './AssetBadge.svelte';
   import { HELD_SHOWN, heldRows } from './held';
   import { formatAmount, formatPrice } from './model';
-  import { ba, chnPrice, startBitAssets, unlockHoldings } from './store.svelte';
+  import { assetById, ba, chnPrice, startBitAssets, unlockHoldings } from './store.svelte';
+  import HiddenToggle from './HiddenToggle.svelte';
+  import { withoutHidden } from './visible.svelte';
 
   let { compact = false }: { compact?: boolean } = $props();
   $effect(() => startBitAssets());
 
   const simple = $derived(simpleMode() || compact);
-  const holdings = $derived(ba.wallet === wallets.current ? (ba.mine?.assets ?? []) : []);
-  const seqs = $derived(new Map(ba.assets.map((a) => [a.asset, a.seq])));
-  const held = $derived(heldRows(holdings, chnPrice, (id) => seqs.get(id) ?? ''));
+  // What the wallet hides (its asset filters: ba/hide.svelte.ts) is left out, unless shown.
+  let showHidden = $state(false);
+  const visible = $derived(withoutHidden(ba.wallet === wallets.current ? (ba.mine?.assets ?? []) : [], (h) => h.asset, (h) => h.label, showHidden));
+  const holdings = $derived(visible.items);
+  const held = $derived(heldRows(holdings, chnPrice, (id) => assetById(id)?.seq ?? ''));
   const shown = $derived(held.rows.slice(0, HELD_SHOWN));
 </script>
 
@@ -30,6 +34,7 @@
     <h2 id="held-title">Your assets</h2>
     {#if held.rows.length > 0}<button type="button" class="btn ghost small" onclick={() => go('my-assets')}>View all <Icon name="arrow" size={14} /></button>{/if}
   </div>
+  <HiddenToggle count={visible.hidden} bind:show={showHidden} />
   {#if wallets.current === null}
     <p class="muted">No wallet is loaded.</p>
   {:else if ba.mineState === 'locked'}

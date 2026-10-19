@@ -14,7 +14,8 @@
   import UnitsInput from './UnitsInput.svelte';
   import { amountParam, approx, assetArg, CHN_ID, curvePoints, formatAmount, formatPrice, formatUnits, isChn, lessSlippage, MAX_IMPACT, MIN_CHN_PAYOUT, unitsAtMost, unitsOf, WARN_IMPACT, type SwapQuote, type Amount } from './model';
   import { compactNumber } from './axis';
-  import { ba, decimalsOf, labelOf, nameOf, poolOf, refreshBitAssets, tradeIntent } from './store.svelte';
+  import { hiddenAsset } from './visible.svelte';
+  import { assetById, ba, decimalsOf, labelOf, nameOf, poolOf, refreshBitAssets, tradeIntent } from './store.svelte';
   import Term from '../../components/Term.svelte';
   import { simpleMode } from '../../lib/uimode.svelte';
   import './terms';
@@ -36,7 +37,8 @@
 
   /** The assets that trade in a pool: those the lists offer. */
   const traded = $derived([...new Set(ba.pools.flatMap((p) => [p.asset_a_id, p.asset_b_id]))].filter((id) => !isChn(id)));
-  const choices = $derived(traded.map((id) => ({ id, label: labelOf(id), seq: ba.assets.find((a) => a.asset === id)?.seq })));
+  // Without what the wallet hides (its asset filters), unless chosen already.
+  const choices = $derived(traded.filter((id) => id === pay || id === get || !hiddenAsset(id, labelOf(id))).map((id) => ({ id, label: labelOf(id), seq: assetById(id)?.seq })));
 
   // A pair asked for by another page (an asset's Trade button).
   $effect(() => {

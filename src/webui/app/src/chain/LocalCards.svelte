@@ -14,12 +14,14 @@
   import { approx, formatAmount, formatPrice, isChn, unitPrice } from './ba/model';
   import { ba, chnPrice, decimalsOf, pendingOf, startBitAssets } from './ba/store.svelte';
   import { simpleMode } from '../lib/uimode.svelte';
+  import { withoutHidden } from './ba/visible.svelte';
 
   $effect(() => startBitAssets());
   // Simple mode (lib/uimode.svelte.ts): no auctions card (Advanced's), the actions in plain words.
   const simple = $derived(simpleMode());
 
-  const holdings = $derived(ba.wallet === wallets.current ? (ba.mine?.assets ?? []) : []);
+  // What the wallet hides (its asset filters) counts nowhere here.
+  const holdings = $derived(withoutHidden(ba.wallet === wallets.current ? (ba.mine?.assets ?? []) : [], (h) => h.asset, (h) => h.label).items);
   const worth = $derived(holdings.reduce((n, h) => n + (chnPrice(h.asset) ?? 0) * approx(h.balance), 0));
   const top = $derived(
     holdings

@@ -4,7 +4,7 @@
 // changed and burned, an asset issued by the wizard then registered by itself, a swap, a new pool, a bid and
 // buying all of an auction, an auction started, an asset sent from the Send page, the cards of the home, and
 // where the pages are in the menus.
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { createHash } from 'node:crypto';
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { CHAIN } from './config';
@@ -53,7 +53,14 @@ import {
   type Pool,
 } from './ba/model';
 import { pendingList } from '../lib/pending.svelte';
-import { ACTIVITY_PAGE, ASSET_PAGE, ba, baView, MAX_ASSETS, nameOf, notePrices, priceSeries, readAllAssets, refreshBitAssets, resetBitAssets, sanitizeJournal, sendIntent } from './ba/store.svelte';
+import { resetSearchSupport } from './ba/search';
+import { assetHidden, assetIgnored, filtersOf, ignoreAsset, ignoreName, loadHiding, resetHiding, searchFiltersOf, setFilters, unignoreAsset, unignoreName } from './ba/hide.svelte';
+import HeldAssets from './ba/HeldAssets.svelte';
+import Transactions from '../pages/Transactions.svelte';
+import LocalSettings from './LocalSettings.svelte';
+import { LOCAL_SETTINGS_TABS } from './settings';
+import { chainTxHidden, chainTxNotice } from './txinfo.svelte';
+import { ACTIVITY_PAGE, ASSET_PAGE, ba, baView, nameOf, notePrices, priceSeries, refreshBitAssets, resetBitAssets, sanitizeJournal, sendIntent } from './ba/store.svelte';
 import { setTransport, type BridgeRequest } from '../lib/bridge';
 import { buildCommands, menuSections } from '../lib/commands.svelte';
 import { dialogs } from '../lib/dialogs.svelte';
@@ -82,6 +89,9 @@ let auctions: Auction[] = [];
 let mine: Holdings = { assets: [], reservations: [], liquidity: [], receipts: [] };
 let store: unknown = null;
 let locked = false;
+let searchSupported = false;
+let prefsStore: Record<string, unknown> = {};
+let history: string[] = [];
 let hidden: Asset[] = [];
 let activityCount = 1;
 const calls: BridgeRequest[] = [];
@@ -167,6 +177,19 @@ async function fakeNode(r: BridgeRequest): Promise<unknown> {
       const all = [...assets, ...hidden].filter((a) => p[2] === undefined || a.label.toLowerCase().includes(String(p[2]).toLowerCase()));
       return p[2] === undefined ? assets.slice(Number(p[1] ?? 0), Number(p[1] ?? 0) + Number(p[0] ?? 100)) : all.slice(0, Number(p[0]));
     }
+    case 'searchassets': {
+      // [query, filters, sort, cursor, limit], as the node of the other work will take them; an older node has none.
+      if (!searchSupported) fail('Method not found', -32601);
+      const [q, f, sort, cursor, limit] = p as [string, Record<string, unknown>, string, string | null, number];
+      let list = [...assets, ...hidden].filter((a) => !q || a.label.toLowerCase().includes(q.toLowerCase()) || a.seq === q);
+      if (f.exclude_dead) list = list.filter((a) => !a.releasable);
+      const words = ((f.exclude_keywords as string[] | undefined) ?? []).map((w) => w.toLowerCase());
+      list = list.filter((a) => !words.some((w) => a.label.toLowerCase().includes(w)));
+      list.sort(sort === 'name' ? (x, y) => x.label.localeCompare(y.label) : sort === 'oldest' ? (x, y) => x.registered - y.registered : (x, y) => y.registered - x.registered);
+      const from = cursor ? Number(cursor) : 0;
+      const page = list.slice(from, from + limit);
+      return { assets: page, cursor: from + limit < list.length ? String(from + limit) : null, total: list.length };
+    }
     case 'getasset': {
       const a = byArg(p[0]);
       if (!a) fail('No such asset is registered');
@@ -245,9 +268,13 @@ async function fakeNode(r: BridgeRequest): Promise<unknown> {
     case 'validateaddress':
       return { isvalid: true, address: p[0] };
     case 'prefs.get':
-      return {};
+      return prefsStore;
     case 'prefs.set':
+      Object.assign(prefsStore, p);
       return {};
+    case 'wallet.transactions':
+      // The history of the wallet: one record per transaction of `history` (RecordJson in walletapi.cpp).
+      return { height: 21, hash: 'ab'.repeat(32), maturity: 100, records: history.map((txid, i) => [txid, 0, 'recv', ME, '', 1_700_000_000 + i, 0, 0, 'confirmed', 3, 0, true, 'key', 19, 'c', false, false, true]) };
     default:
       return null;
   }
@@ -279,6 +306,11 @@ beforeEach(() => {
   wallets.balances.w = { trusted: 1_000_000_000n, untrustedPending: 0n, immature: 0n };
   fresh();
   hidden = [];
+  searchSupported = false;
+  prefsStore = {};
+  history = [];
+  resetSearchSupport();
+  resetHiding();
   activityCount = 1;
   store = null;
   locked = false;
@@ -818,30 +850,38 @@ describe.runIf(CHAIN.name === 'BitAssets')('the pages of BitAssets', () => {
     expect(nameOf('8'.repeat(64))).toBe('0x88888888…8888');
   });
 
-  it('Assets: every asset, past the first 1000, and the newest past the most read (audit port-2 #4)', async () => {
+  it('Browse assets: a page at a time from the node, never the whole list, the newest first (user feedback 2026-10-19; audit port-2 #4)', async () => {
     assets = Array.from({ length: 1025 }, (_, i) => asset(i.toString(16).padStart(64, '0').replace(/^0/, '7'), { label: `F${String(i + 1).padStart(4, '0')}`, name: `F${i + 1}`, seq: `${1000 + i}-0001`, registered: i + 1 }));
-    render(Assets);
-    await waitFor(() => expect(ba.assets.length).toBe(1025), { timeout: 10000 });
-    expect(called('listassets').map((c) => c.params)).toEqual([[ASSET_PAGE, 0], [ASSET_PAGE, ASSET_PAGE]]);
-    await waitFor(() => expect(screen.getByRole('button', { name: /^All/ }).textContent).toContain('1025'));
-    // The newest first, findable by typing.
-    await fireEvent.input(screen.getByRole('searchbox', { name: 'Find an asset' }), { target: { value: 'F1025' } });
-    await waitFor(() => expect(within(screen.getByRole('list', { name: 'Assets' })).getAllByRole('listitem').length).toBe(1));
-    // Drawn a few hundred at a time.
-    await fireEvent.input(screen.getByRole('searchbox', { name: 'Find an asset' }), { target: { value: '' } });
-    await waitFor(() => expect(within(screen.getByRole('list', { name: 'Assets' })).getAllByRole('listitem').length).toBe(240));
-    await fireEvent.click(screen.getByRole('button', { name: /Show more/ }));
-    await waitFor(() => expect(within(screen.getByRole('list', { name: 'Assets' })).getAllByRole('listitem').length).toBe(480));
-    // Past the most read, the newest are read, and typing asks the node for the others.
-    calls.length = 0;
-    await readAllAssets(MAX_ASSETS + 5000);
-    expect(called('listassets').map((c) => (c.params as number[])[1])).toEqual([0, 5000]);
+    // A node without searchassets: the store keeps the newest ASSET_PAGE, the page lists the newest page of listassets.
+    const view = render(Assets);
+    await waitFor(() => expect(ba.assets.length).toBe(ASSET_PAGE), { timeout: 10000 });
+    expect(called('listassets')[0].params).toEqual([ASSET_PAGE, 1025 - ASSET_PAGE]);
+    expect(ba.assets[ba.assets.length - 1].label).toBe('F1025');
+    const tiles = () => within(screen.getByRole('list', { name: 'Assets' })).getAllByRole('listitem');
+    await waitFor(() => expect(tiles().length).toBe(100));
+    expect(called('listassets').every((c) => (c.params as number[])[0] <= ASSET_PAGE)).toBe(true);
+    expect(tiles()[0].textContent).toContain('F1025');
+    expect(screen.getByText(/This node lists 200 assets at a time/)).toBeTruthy();
+    // Typing asks the node (its match), a moment after.
+    await fireEvent.input(screen.getByRole('searchbox', { name: 'Find an asset' }), { target: { value: 'F0003' } });
+    await waitFor(() => expect(called('listassets').some((c) => (c.params as unknown[])[2] === 'F0003')).toBe(true));
+    await waitFor(() => expect(tiles().length).toBe(1));
+    view.unmount();
+    // A node with searchassets: pages by its cursor, as the end of the list comes or on "Show more"; what is typed is its.
+    searchSupported = true;
+    resetSearchSupport();
     hidden = [asset('6'.repeat(64), { label: 'ZINC', name: 'ZINC', seq: '5555-0001', registered: 2000 })];
-    await refreshBitAssets();
-    await waitFor(() => expect(screen.getByText(/oldest of the 1\D?026 assets are not listed here/)).toBeTruthy());
+    calls.length = 0;
+    render(Assets);
+    await waitFor(() => expect(tiles().length).toBe(100), { timeout: 10000 });
+    expect(tiles()[0].textContent).toContain('ZINC');
+    await fireEvent.click(screen.getByRole('button', { name: 'Show more' }));
+    await waitFor(() => expect(tiles().length).toBe(200));
+    expect(called('searchassets').map((c) => (c.params as unknown[])[3])).toEqual([null, '100']);
+    expect(called('searchassets').every((c) => ((c.params as unknown[])[4] as number) <= 200)).toBe(true);
     await fireEvent.input(screen.getByRole('searchbox', { name: 'Find an asset' }), { target: { value: 'zin' } });
-    await waitFor(() => expect(called('listassets').some((c) => (c.params as unknown[])[2] === 'zin')).toBe(true));
-    await waitFor(() => expect(within(screen.getByRole('list', { name: 'Assets' })).getByText('ZINC')).toBeTruthy());
+    await waitFor(() => expect(tiles().length).toBe(1));
+    expect(within(screen.getByRole('list', { name: 'Assets' })).getByText('ZINC')).toBeTruthy();
   }, 30000);
 
   it('My assets: older activity read on asking; tables are cards when narrow; no faint text under 4.5:1 (audit port-2 #13)', async () => {
@@ -1056,5 +1096,166 @@ describe('audit 7: names and amounts', () => {
     // Exact amounts are left as they are.
     expect(unitsAtMost(12.5, 2)).toBe(1250n);
     expect(unitsAtLeast('9223372.036854775807', 12)).toBe(9223372036854775807n);
+  });
+});
+
+describe('the assets a wallet hides (user feedback 2026-10-19, item 19)', () => {
+  it('ignores an asset in this wallet only, never CHN; names, words and filters; kept in the preferences', async () => {
+    await loadHiding();
+    ignoreAsset(SILVER);
+    ignoreAsset(CHN_ID);
+    expect(assetIgnored(SILVER, 'SILVER')).toBe(true);
+    expect(assetIgnored(CHN_ID, 'CHN')).toBe(false);
+    expect((prefsStore.assetFilters as Record<string, { ignored: string[] }>).w.ignored).toEqual([SILVER]);
+    expect(assetIgnored(SILVER, 'SILVER', 'other')).toBe(false);
+    ignoreName('gold');
+    expect(assetIgnored(GOLD, 'GOLD')).toBe(true);
+    expect(assetIgnored('5'.repeat(64), 'Gold')).toBe(true);
+    unignoreName('GOLD');
+    setFilters({ keywords: ['ebbl'] });
+    expect(assetHidden({ id: PEBBLES, label: 'PEBBLES' })).toBe(true);
+    setFilters({ keywords: [], hideDead: true });
+    expect(assetHidden({ id: PEBBLES, label: 'PEBBLES', releasable: true })).toBe(true);
+    expect(searchFiltersOf()).toEqual({ exclude_dead: true });
+    // Read back after a restart.
+    resetHiding();
+    await loadHiding();
+    expect(filtersOf().ignored).toEqual([SILVER]);
+    expect(filtersOf().hideDead).toBe(true);
+  });
+
+  it('hides it on the home, in My assets, the Send picker, the pools, the auctions and Browse assets, each list showing it on asking', async () => {
+    prefsStore = { assetFilters: { w: { ignored: [GOLD] } } };
+    render(HeldAssets);
+    await loaded();
+    const held = screen.getByTestId('held-assets');
+    await waitFor(() => expect(held.textContent).toContain('SILVER'));
+    expect(held.textContent).not.toContain('GOLD');
+    await fireEvent.click(within(held).getByRole('button', { name: 'Show them' }));
+    await waitFor(() => expect(held.textContent).toContain('GOLD'));
+    cleanup();
+
+    render(LocalSend);
+    await loaded();
+    await fireEvent.click(document.querySelector('#send-what')!);
+    await waitFor(() => expect(document.querySelector(`[role="option"][data-id="${SILVER}"]`)).not.toBeNull());
+    expect(document.querySelector(`[role="option"][data-id="${GOLD}"]`)).toBeNull();
+    cleanup();
+
+    nav.tab = 'pools';
+    render(Trade);
+    await loaded();
+    await waitFor(() => expect(screen.getByTestId('hidden-assets').textContent).toContain('1 hidden'));
+    expect(screen.queryByRole('table', { name: 'Pools' })).toBeNull();
+    await fireEvent.click(screen.getByRole('button', { name: 'Show them' }));
+    await waitFor(() => expect(screen.getByRole('table', { name: 'Pools' })).toBeTruthy());
+    cleanup();
+
+    nav.tab = '';
+    render(Auctions);
+    await loaded();
+    await waitFor(() => expect(screen.getByTestId('hidden-assets')).toBeTruthy());
+    expect(screen.queryByRole('list', { name: 'Auctions' })).toBeNull();
+    cleanup();
+
+    render(Assets);
+    await loaded();
+    const tiles = () => within(screen.getByRole('list', { name: 'Assets' })).getAllByRole('listitem').map((li) => li.textContent ?? '');
+    await waitFor(() => expect(tiles().some((x) => x.includes('SILVER'))).toBe(true));
+    expect(tiles().some((x) => x.includes('GOLD'))).toBe(false);
+  });
+
+  it('sorts and finds pools and auctions', async () => {
+    pools = [...pools, { ...pools[0], pool: id('q'), asset_a: 'SILVER', asset_a_id: SILVER, swaps: 9, created: 1 }];
+    nav.tab = 'pools';
+    render(Trade);
+    await loaded();
+    const rows = () => within(screen.getByRole('table', { name: 'Pools' })).getAllByRole('row').slice(1).map((r) => r.textContent ?? '');
+    await waitFor(() => expect(rows().length).toBe(2));
+    await fireEvent.change(screen.getByRole('combobox', { name: 'Sort pools' }), { target: { value: 'newest' } });
+    await waitFor(() => expect(rows()[0]).toContain('GOLD'));
+    await fireEvent.change(screen.getByRole('combobox', { name: 'Sort pools' }), { target: { value: 'trades' } });
+    await waitFor(() => expect(rows()[0]).toContain('SILVER'));
+    await fireEvent.input(screen.getByRole('searchbox', { name: 'Find a pool' }), { target: { value: 'gol' } });
+    await waitFor(() => expect(rows().length).toBe(1));
+    cleanup();
+    nav.tab = '';
+    render(Auctions);
+    await loaded();
+    await waitFor(() => expect(within(screen.getByRole('list', { name: 'Auctions' })).getAllByRole('listitem').length).toBe(1));
+    await fireEvent.input(screen.getByRole('searchbox', { name: 'Find an auction' }), { target: { value: 'zzz' } });
+    await waitFor(() => expect(screen.queryByRole('list', { name: 'Auctions' })).toBeNull());
+  });
+
+  it('folds the transactions of an ignored asset in the Transactions page, gives no notice of them; offers Ignore on the notice of an asset received, and warns of a look-alike', async () => {
+    const T1 = id('1');
+    const T2 = id('2');
+    const LOOK = '4'.repeat(64);
+    history = [T1, T2];
+    ba.transfersWallet = 'w';
+    ba.transfers = [
+      { txid: T1, time: 2, confirmations: 3, category: 'receive', asset: GOLD, label: 'GOLD', seq: '1739-0029', decimals: 2, amount: '5', sign: 1, to: [{ address: ME, mine: true }], from: [{ address: OTHER, mine: false }], abandoned: false },
+      { txid: T2, time: 1, confirmations: 3, category: 'receive', asset: LOOK, label: 'SILVER', seq: '7777-0001', decimals: 0, amount: '1', sign: 1, to: [{ address: ME, mine: true }], from: [{ address: OTHER, mine: false }], abandoned: false },
+    ];
+    await refreshBitAssets();
+    ba.transfersWallet = 'w';
+    prefsStore = { assetFilters: { w: { ignored: [GOLD] } } };
+    resetHiding();
+    await loadHiding();
+    expect(chainTxHidden(T1)).toBe(true);
+    expect(chainTxHidden(T2)).toBe(false);
+    // The Transactions page: one line says the hidden one, which shows on asking.
+    render(Transactions);
+    const rows = () => within(screen.getByRole('grid', { name: 'Transactions' })).queryAllByRole('row').filter((r) => r.querySelector('[role="gridcell"], td'));
+    await waitFor(() => expect(screen.getByTestId('hidden-transactions').textContent).toMatch(/1 hidden transaction/), { timeout: 5000 });
+    await waitFor(() => expect(rows().length).toBe(1));
+    await fireEvent.click(screen.getByRole('button', { name: 'Show them' }));
+    await waitFor(() => expect(rows().length).toBe(2));
+    cleanup();
+    const notice = chainTxNotice(T2)!;
+    expect(notice.warning).toMatch(/Same name as an asset you hold: this is #7777-0001/);
+    notice.actions![0].run();
+    expect(filtersOf().ignored).toContain(LOOK);
+    expect(chainTxHidden(T2)).toBe(true);
+    unignoreAsset(LOOK);
+  });
+
+  it('is set in Settings, Asset filters: the filters, the words, the names, the ignored assets to unignore', async () => {
+    prefsStore = { assetFilters: { w: { ignored: [SILVER] } } };
+    render(LocalSettings, { props: { tab: 'asset-filters' } });
+    await loaded();
+    await waitFor(() => expect(screen.getByRole('list', { name: 'Ignored assets' }).textContent).toContain('SILVER'));
+    await fireEvent.click(screen.getByRole('checkbox', { name: /Hide dead assets/ }));
+    expect(filtersOf().hideDead).toBe(true);
+    await fireEvent.input(screen.getByRole('textbox', { name: 'A word to ignore' }), { target: { value: 'airdrop' } });
+    await fireEvent.click(screen.getAllByRole('button', { name: 'Add' })[0]);
+    expect(filtersOf().keywords).toEqual(['airdrop']);
+    await fireEvent.click(screen.getByRole('button', { name: 'Unignore' }));
+    expect(filtersOf().ignored).toEqual([]);
+    expect(LOCAL_SETTINGS_TABS).toEqual([{ id: 'asset-filters', label: 'Asset filters' }]);
+  });
+});
+
+describe('a burst of blocks and transactions (user feedback 2026-10-19, item 10)', () => {
+  it('keeps the lists the node answers the same with (nothing is worked out again), and works out a row once', async () => {
+    await refreshBitAssets();
+    const before = { assets: ba.assets, pools: ba.pools, auctions: ba.auctions, mine: ba.mine, activity: ba.activity, transfers: ba.transfers };
+    const version = ba.version;
+    await refreshBitAssets();
+    expect(ba.version).toBeGreaterThan(version);
+    expect(ba.assets).toBe(before.assets);
+    expect(ba.pools).toBe(before.pools);
+    expect(ba.auctions).toBe(before.auctions);
+    expect(ba.mine).toBe(before.mine);
+    expect(ba.activity).toBe(before.activity);
+    // A change is taken.
+    assets = [...assets, asset('3'.repeat(64), { label: 'NEW', seq: '1234-0001', registered: 30 })];
+    await refreshBitAssets();
+    expect(ba.assets).not.toBe(before.assets);
+    // What a transaction is worked out once while its list stays.
+    ba.transfersWallet = 'w';
+    ba.transfers = [{ txid: id('1'), time: 2, confirmations: 1, category: 'send', asset: GOLD, label: 'GOLD', seq: '1739-0029', decimals: 2, amount: '1', sign: -1, to: [{ address: OTHER, mine: false }], from: [], abandoned: false }];
+    const { chainTxOf } = await import('./txinfo.svelte');
+    expect(chainTxOf(id('1'))).toBe(chainTxOf(id('1')));
   });
 });

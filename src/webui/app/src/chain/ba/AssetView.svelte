@@ -17,6 +17,8 @@
   import Chart from './Chart.svelte';
   import { approx, assetArg, AUCTION_STATUS, auctionProgress, DATA_FIELDS, formatAmount, formatPercent, formatPrice, isChn, unitPrice, type Asset, type AssetHistory, type Auction, type DataField, type Pool } from './model';
   import { ba, chnPrice, nameOf, priceSeries, refreshBitAssets, sellIntent, sendAsset, tradeIntent } from './store.svelte';
+  import { ignoreAsset, ignoreName, unignoreAsset, unignoreName } from './hide.svelte';
+  import { ignoredAsset } from './visible.svelte';
 
   let { id, onback }: { id: string; onback?: () => void } = $props();
 
@@ -154,6 +156,15 @@
         {#if holding && approx(holding.balance) > 0}<button type="button" class="btn" onclick={sell}><Icon name="gavel" size={15} /> Sell by auction</button>{/if}
         {#if controlled}<button type="button" class="btn" onclick={() => goTo('my-assets', '', id)}><Icon name="crown" size={15} /> Manage</button>{/if}
         {#if controlled && !asset.fixed && (ba.info?.logo_height ?? -1) >= 0}<button type="button" class="btn" onclick={() => goTo('my-assets', '', id)}><Icon name="picture" size={15} /> {asset.logo ? 'Change logo' : 'Add a logo'}</button>{/if}
+        <!-- Hide it in this wallet's lists (display only: the coins stay), or every asset of its name (ba/hide.svelte.ts). -->
+        {#if wallets.current !== null}
+          {#if ignoredAsset(id, asset.label)}
+            <button type="button" class="btn ghost" onclick={() => { unignoreAsset(id); unignoreName(asset?.label ?? ''); }}><Icon name="eye" size={15} /> Unignore</button>
+          {:else}
+            <button type="button" class="btn ghost" onclick={() => ignoreAsset(id)}><Icon name="eyeoff" size={15} /> Ignore this asset</button>
+            <button type="button" class="btn ghost" onclick={() => ignoreName(asset?.label ?? '')}>Ignore every asset named <SafeText text={asset.label} /></button>
+          {/if}
+        {/if}
       </div>
     </header>
 

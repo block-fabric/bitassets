@@ -23,6 +23,9 @@
   import { assetMovesOf } from '../txinfo.svelte';
   import ManagePanel from '../ba/ManagePanel.svelte';
   import Issue from './Issue.svelte';
+  import HiddenToggle from '../ba/HiddenToggle.svelte';
+  import { withoutHidden } from '../ba/visible.svelte';
+  import { chainTxHidden } from '../txinfo.svelte';
   import UnitsInput from '../ba/UnitsInput.svelte';
   import {
     amountParam,
@@ -73,7 +76,11 @@
 
   const noWallet = $derived(!walletsEnabled() || wallets.current === null);
   const mine = $derived(ba.wallet === wallets.current ? ba.mine : null);
-  const holdings = $derived((mine?.assets ?? []).slice().sort((a, b) => (chnPrice(b.asset) ?? 0) * approx(b.balance) - (chnPrice(a.asset) ?? 0) * approx(a.balance) || a.label.localeCompare(b.label)));
+  // What the wallet hides (its asset filters: ba/hide.svelte.ts) is left out of its holdings and activity, unless shown.
+  let showHidden = $state(false);
+  const visible = $derived(withoutHidden(mine?.assets ?? [], (h) => h.asset, (h) => h.label, showHidden));
+  const activity = $derived(showHidden ? ba.activity : ba.activity.filter((a) => !chainTxHidden(a.txid)));
+  const holdings = $derived(visible.items.slice().sort((a, b) => (chnPrice(b.asset) ?? 0) * approx(b.balance) - (chnPrice(a.asset) ?? 0) * approx(a.balance) || a.label.localeCompare(b.label)));
   let picked = $state<string | null>(null);
   $effect(() => {
     void nav.focus;
@@ -288,6 +295,7 @@
     {#if tab === 'register'}
       <Issue embedded />
     {:else if tab === 'holdings'}
+      <HiddenToggle count={visible.hidden} bind:show={showHidden} />
       {#if holdings.length === 0}
         <div class="panel ba-empty">
           {#if ba.mineState === 'loading'}Loading…{:else if simple}Nothing yet: swap CHN for a token, create one of your own, or have one sent to an address of this wallet.{:else}Nothing yet: register a new asset, buy one in Trade, or have one sent to an address of this wallet.{/if}
@@ -458,14 +466,15 @@
       {/if}
     {:else}
       <section class="panel">
-        {#if ba.activity.length === 0}
+        <HiddenToggle count={ba.activity.length - (showHidden ? ba.activity.filter((a) => !chainTxHidden(a.txid)).length : activity.length)} bind:show={showHidden} />
+        {#if activity.length === 0}
           <p class="ba-empty">Nothing yet.</p>
         {:else}
           <div class="ba-wrap">
             <table class="ba-table" use:stacked aria-label="Activity">
               <thead><tr><th>When</th><th>What</th><th>Details</th><th class="end">Confirmations</th><th>Transaction</th></tr></thead>
               <tbody>
-                {#each ba.activity as a (a.txid)}
+                {#each activity as a (a.txid)}
                   <tr>
                     <td class="num">{formatTime(a.time)}</td>
                     <td>{t(OPERATIONS[a.operation] ?? 'Other')}</td>

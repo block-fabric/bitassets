@@ -4,7 +4,9 @@
 import { t } from '../lib/i18n.svelte';
 import { wallets } from '../lib/state.svelte';
 import { formatAmount, type AssetTx } from './ba/model';
-import { ba, refreshBitAssets, startBitAssets } from './ba/store.svelte';
+import { ba, holdingOf, refreshBitAssets, startBitAssets } from './ba/store.svelte';
+import { ignoreAsset } from './ba/hide.svelte';
+import { hiddenAsset } from './ba/visible.svelte';
 
 export interface ChainTx {
   type: string;
@@ -104,8 +106,23 @@ export function assetMovesOf(txid: string): AssetTx[] {
   return byTxid.get(txid) ?? [];
 }
 
+/** What chainTxOf made for each transaction, while the list read stays the same (a page asks it for every row, often). */
+let made = new Map<string, ChainTx | undefined>();
+let madeOf: unknown = null;
+
 export function chainTxOf(txid: string): ChainTx | undefined {
   const moves = assetMovesOf(txid);
+  if (madeOf !== byTxidOf) {
+    made = new Map();
+    madeOf = byTxidOf;
+  }
+  if (made.has(txid)) return made.get(txid);
+  const out = makeChainTx(moves);
+  made.set(txid, out);
+  return out;
+}
+
+function makeChainTx(moves: AssetTx[]): ChainTx | undefined {
   if (!moves.length) return undefined;
   const parties = (e: AssetTx) => counterparty(e).parties.map((p) => p.address);
   return {
@@ -117,6 +134,30 @@ export function chainTxOf(txid: string): ChainTx | undefined {
       moves.map((e) => signedAmount(e).replace('−', '-')).join('; '),
       moves.map((e) => { const c = counterparty(e); return c.dir ? `${c.dir} ${[...c.parties.map((p) => p.address), ...(c.self ? ['this wallet'] : [])].join(' ')}` : ''; }).join('; '),
     ],
+  };
+}
+
+/**
+ * Whether the transaction only moved assets the wallet hides (ignored, or left out by its filters: ba/hide.svelte.ts):
+ * the Transactions page folds it into "N hidden transactions", the notices leave it out (user feedback 2026-10-19).
+ */
+export function chainTxHidden(txid: string): boolean {
+  const moves = assetMovesOf(txid);
+  return moves.length > 0 && moves.every((e) => !!e.asset && hiddenAsset(e.asset, e.label));
+}
+
+/** What the notice of an asset received offers (Ignore this asset) and warns of (a name like one the wallet holds). */
+export function chainTxNotice(txid: string): { warning?: string; actions?: { label: string; run: () => void }[] } | undefined {
+  const got = assetMovesOf(txid).filter((e) => e.asset && e.sign > 0 && e.category === 'receive');
+  if (!got.length) return undefined;
+  const e = got[0];
+  const asset = e.asset!;
+  const label = (e.label ?? '').toLowerCase();
+  // Another asset of the wallet of the same name (any case): a look-alike, told apart by its number.
+  const twin = label ? (ba.mine?.assets ?? []).find((h) => h.asset !== asset && h.label.toLowerCase() === label && !!holdingOf(h.asset)) : undefined;
+  return {
+    warning: twin ? t('Same name as an asset you hold: this is #%1, not the one you hold.', e.seq ?? asset.slice(0, 8)) : undefined,
+    actions: [{ label: t('Ignore this asset'), run: () => ignoreAsset(asset) }],
   };
 }
 

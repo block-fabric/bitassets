@@ -310,6 +310,23 @@
     await shot('ba-workspace-my-assets-light');
     T().savePrefs({ layout: 'dashboard', theme: 'midnight' });
 
+    // --- The details of a transaction: the asset it moved (user feedback 2026-10-19, items 13-15) ---
+    await go('transactions');
+    for (const [type, shotName] of [['Registered', 'ba-details-registered'], ['Minted', 'ba-details-minted'], ['Auction bid', 'ba-details-bid']]) {
+      const row = await waitFor(`a row "${type}"`, () => $$('[role="row"]').find((r) => r.textContent.includes(type)), 30000);
+      // The wallet's own outputs are "this wallet", once: never two of its addresses in the row.
+      await check(`${type}: the row names the wallet once`, (row.textContent.match(/this wallet/g) || []).length <= 1, row.textContent.slice(0, 200));
+      row.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+      const section = await waitFor(`the asset movement of "${type}"`, () => $('[data-testid="asset-movement"]'), 20000);
+      await check(`${type}: its details show the asset, the exact amount and the direction`, /GOLD/.test(section.textContent) && /#\d{4}-\d{4}/.test(section.textContent) && /(Into|Out of) this wallet|Neither/.test(section.textContent), section.textContent.slice(0, 300));
+      await sleep(400);
+      await shot(shotName);
+      const close = $$('dialog[open] button').find((b) => /^Close$/.test(b.textContent.trim()));
+      if (close) close.click();
+      else document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+      await sleep(400);
+    }
+
     await rpc('setbmm', [false]);
     await log(`ASSET ${gold.asset}`);
     {

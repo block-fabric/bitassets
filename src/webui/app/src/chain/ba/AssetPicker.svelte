@@ -8,7 +8,7 @@
   import Icon from '../../components/Icon.svelte';
   import SafeText from '../../components/SafeText.svelte';
   import AssetBadge from './AssetBadge.svelte';
-  import { pickerRows, type PickChoice, type PickRow } from './picker';
+  import { pickerRows, type PickChip, type PickChoice, type PickRow } from './picker';
   import { isFavourite, loadPicks, notePicked, picks, toggleFavourite } from './picks.svelte';
 
   let {
@@ -19,6 +19,7 @@
     disabled = false,
     placeholder = 'Choose an asset',
     onpick,
+    chips = [],
   }: {
     id: string;
     label: string;
@@ -27,7 +28,11 @@
     disabled?: boolean;
     placeholder?: string;
     onpick?: (id: string) => void;
+    /** Filters at the top of the list (as those of Browse assets): one at a time, "All" first. */
+    chips?: readonly PickChip[];
   } = $props();
+  let chip = $state('');
+  const filtered = $derived(chip ? choices.filter((c) => chips.find((x) => x.id === chip)?.test(c) ?? true) : choices);
 
   /** The height of a row, in pixels (the list draws only the rows in view). */
   const ROW = 44;
@@ -46,7 +51,7 @@
   });
 
   const current = $derived(choices.find((c) => c.id === value));
-  const rows: PickRow[] = $derived(open ? pickerRows(choices, query, picks.favourites, picks.recent) : []);
+  const rows: PickRow[] = $derived(open ? pickerRows(filtered, query, picks.favourites, picks.recent) : []);
   const first = $derived(Math.max(0, Math.floor(scrollTop / ROW) - 3));
   const last = $derived(Math.min(rows.length, first + VIEW + 7));
   const shown = $derived(rows.slice(first, last).map((row, i) => ({ row, index: first + i })));
@@ -146,6 +151,7 @@
         {#if current.seq}<span class="seq" translate="no">#{current.seq}</span>{/if}
         <SafeText text={current.label} />
       </span>
+      {#if current.warn}<span class="warn" title={current.warn}><Icon name="alert" size={14} label={current.warn} /></span>{/if}
       {#if current.held}<span class="held" translate="no">{current.held}</span>{/if}
     {:else}
       <span class="name muted">{t(placeholder)}</span>
@@ -171,6 +177,12 @@
         oninput={typed}
         onkeydown={onkey}
       />
+      {#if chips.length}
+        <div class="chips" role="group" aria-label="Filter">
+          <button type="button" class="ba-chip small" aria-pressed={chip === ''} onclick={() => { chip = ''; typed(); input?.focus(); }}>All</button>
+          {#each chips as c (c.id)}<button type="button" class="ba-chip small" aria-pressed={chip === c.id} onclick={() => { chip = c.id; typed(); input?.focus(); }}>{t(c.label)}</button>{/each}
+        </div>
+      {/if}
       {#if rows.length === 0}
         <p class="none">No asset matches.</p>
       {:else}
@@ -199,6 +211,7 @@
                     {#if c.seq}<span class="seq" translate="no">#{c.seq}</span>{/if}
                     <SafeText text={c.label} />
                   </span>
+                  {#if c.warn}<span class="warn" title={c.warn}><Icon name="alert" size={14} label={c.warn} /></span>{/if}
                   {#if c.held}<span class="held" translate="no">{c.held}</span>{/if}
                   <button
                     type="button"
@@ -313,6 +326,16 @@
   }
   .opt[aria-selected='true'] .name {
     font-weight: 650;
+  }
+  .chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    margin-bottom: 0.35rem;
+  }
+  .warn {
+    flex: none;
+    color: var(--warning);
   }
   .star {
     flex: none;

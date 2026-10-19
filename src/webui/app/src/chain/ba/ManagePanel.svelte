@@ -31,6 +31,8 @@
   $effect(() => {
     const a = arg;
     void holding.supply;
+    // Asked again with each refresh of the store (a logo or data changed in a block; the holding may be the same).
+    void ba.version;
     rpc
       .raw<Asset>('getasset', [a])
       .then((r) => {
