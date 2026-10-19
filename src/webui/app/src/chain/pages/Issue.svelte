@@ -26,6 +26,9 @@
   import { simpleMode } from '../../lib/uimode.svelte';
   import '../ba/terms';
 
+  /** Shown as a tab of My assets, under its heading. */
+  let { embedded = false }: { embedded?: boolean } = $props();
+
   $effect(() => startBitAssets());
 
   // Simple mode (lib/uimode.svelte.ts): "Create a token", the same wizard and the same calls (reserveasset, then
@@ -208,8 +211,9 @@
 {#if noWallet}
   <NoWallet page={PAGES.issue} />
 {:else}
-  <div class="page ba-page issue">
-    <header class="page-head"><h1>{simple ? 'Create a token' : 'Register new asset'}</h1></header>
+  <div class="page ba-page issue" class:embedded>
+    <!-- A tab of My assets (user feedback 2026-10-19): the tab says its name. -->
+    {#if !embedded}<header class="page-head"><h1>{simple ? 'Create a token' : 'Register new asset'}</h1></header>{/if}
     {#if simple}
       <p class="ba-help lead">A <Term id="asset">token</Term> of your own: points, tickets, shares. Give it a name and an amount; you can send it, swap it, and make more later with its <Term id="controlcoin">control coin</Term>.</p>
     {:else}
@@ -344,6 +348,9 @@
 {/if}
 
 <style>
+  .embedded {
+    padding: 0;
+  }
   .lead {
     max-width: 52rem;
   }

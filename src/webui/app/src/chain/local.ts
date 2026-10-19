@@ -55,11 +55,12 @@ export interface LocalPage {
 }
 
 export const LOCAL_PAGES = [
-  // "Explore assets" (user feedback 2026-10-19: told apart from My assets); its id, links and shortcut stay.
-  { id: 'assets', title: 'Explore assets', icon: 'gem', section: 'chain', shortcut: 'Alt+6', summary: 'Every asset of the chain: its supply, markets, auctions and history', keywords: 'bitassets explore token find search supply', quick: { label: 'Explore assets', icon: 'gem' } },
+  // "Browse assets" (user feedback 2026-10-19: told apart from My assets); its id, links and shortcut stay.
+  { id: 'assets', title: 'Browse assets', icon: 'gem', section: 'chain', shortcut: 'Alt+6', summary: 'Every asset of the chain: its supply, markets, auctions and history', keywords: 'bitassets explore token find search supply', quick: { label: 'Browse assets', icon: 'gem' } },
   { id: 'my-assets', title: 'My assets', simple: true, simpleSummary: 'The tokens you hold', icon: 'holdings', section: 'chain', summary: 'What this wallet holds and controls: balances, pool shares, auctions to collect, activity', wallet: true, keywords: 'portfolio balances holdings mint burn control liquidity receipts activity' },
   // Shown as "Register new asset" (user decision, 2026-10-15); its id stays issue.
-  { id: 'issue', title: 'Register new asset', simpleTitle: 'Create a token', simpleSummary: 'Make a token of your own', simple: true, icon: 'issue', section: 'chain', summary: 'Create an asset of your own, with its supply, decimals and description', wallet: true, keywords: 'create new asset token register reserve mint', quick: { label: 'Register new asset', icon: 'issue', simpleLabel: 'Create a token' } },
+  // A tab of My assets (user feedback 2026-10-19); go('issue') and its links lead there.
+  { id: 'issue', title: 'Register new asset', tabOf: { page: 'my-assets', tab: 'register' }, simpleTitle: 'Create a token', simpleSummary: 'Make a token of your own', icon: 'issue', section: 'chain', summary: 'Create an asset of your own, with its supply, decimals and description', wallet: true, keywords: 'create new asset token register reserve mint', quick: { label: 'Register new asset', icon: 'issue', simpleLabel: 'Create a token' } },
   { id: 'trade', title: 'Trade', simpleTitle: 'Swap', simple: true, simpleSummary: 'Trade one token for another', icon: 'swap', section: 'chain', summary: 'Swap assets in their pools, and provide liquidity for a share of the fees', keywords: 'swap exchange amm pool liquidity price dex', quick: { label: 'Swap', icon: 'swap' } },
   { id: 'auctions', title: 'Auctions', icon: 'gavel', section: 'chain', summary: 'Buy at a price that falls block by block, or sell by Dutch auction', keywords: 'dutch auction bid sell buy', advanced: true },
 ] as const satisfies readonly LocalPage[];

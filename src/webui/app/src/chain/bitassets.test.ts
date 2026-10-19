@@ -58,7 +58,7 @@ import { setTransport, type BridgeRequest } from '../lib/bridge';
 import { buildCommands, menuSections } from '../lib/commands.svelte';
 import { dialogs } from '../lib/dialogs.svelte';
 import { AREAS, chainBeforeTools, HOME_QUICK_ACTIONS, NAV_SECTIONS } from '../lib/layout';
-import { nav } from '../lib/nav.svelte';
+import { go, nav } from '../lib/nav.svelte';
 import { handleShortcut } from '../lib/keyboard';
 import { app, node, prefs, wallets } from '../lib/state.svelte';
 import { resetWalletData } from '../lib/walletdata.svelte';
@@ -430,10 +430,14 @@ describe.runIf(CHAIN.name === 'BitAssets')('the pages of BitAssets', () => {
   it('are in the Chain section and the menus, before the tools, with their quick actions', () => {
     const own = (LOCAL_PAGES as readonly LocalPage[]).map((p) => p.id);
     expect(own).toEqual(['assets', 'my-assets', 'issue', 'trade', 'auctions']);
-    expect(NAV_SECTIONS.find((s) => s.title === 'Chain')!.pages).toEqual(['peg', ...own, 'explorer']);
-    expect(AREAS.find((a) => a.id === 'chain')!.tabs.map((t) => t.page)).toEqual(['peg', ...own, 'explorer']);
+    // Register new asset is a tab of My assets (user feedback 2026-10-19): not in the navigation, reached through it.
+    const navPages = own.filter((id) => id !== 'issue');
+    expect(NAV_SECTIONS.find((s) => s.title === 'Chain')!.pages).toEqual(['peg', ...navPages, 'explorer']);
+    expect(AREAS.find((a) => a.id === 'chain')!.tabs.map((t) => t.page)).toEqual(['peg', ...navPages, 'explorer']);
+    go('issue');
+    expect([nav.page, nav.tab]).toEqual(['my-assets', 'register']);
     expect(chainBeforeTools(HOME_QUICK_ACTIONS.map((q) => q.page), (p) => p)).toBeNull();
-    expect(HOME_QUICK_ACTIONS.map((q) => q.label)).toEqual(expect.arrayContaining(['Explore assets', 'Register new asset', 'Swap']));
+    expect(HOME_QUICK_ACTIONS.map((q) => q.label)).toEqual(expect.arrayContaining(['Browse assets', 'Register new asset', 'Swap']));
     const chain = menuSections(buildCommands()).find((s) => s.group === 'Chains')!;
     for (const c of LOCAL_COMMANDS) expect(chain.items.map((i) => i.label)).toContain(c.label);
     chain.items.find((c) => c.label === 'Add liquidity…')!.run();
@@ -959,11 +963,11 @@ describe('Simple mode', () => {
     render(MyAssets);
     await loaded();
     const tabs = () => screen.getAllByRole('tab').map((x) => x.textContent?.trim());
-    await waitFor(() => expect(tabs()).toEqual(['Holdings', 'Being created', 'Activity']));
+    await waitFor(() => expect(tabs()).toEqual(['Holdings', 'Create a token', 'Being created', 'Activity']));
     expect(screen.getByRole('list', { name: 'Holdings' })).toBeTruthy();
     expect(screen.getByRole('button', { name: /Create a token/ })).toBeTruthy();
     prefs.uiMode = 'advanced';
-    await waitFor(() => expect(tabs()).toEqual(['Holdings', 'Being issued', 'Pool shares', 'My auctions', 'Activity']));
+    await waitFor(() => expect(tabs()).toEqual(['Holdings', 'Register new asset', 'Being issued', 'Pool shares', 'My auctions', 'Activity']));
   });
 
   it('the cards of the home: no auctions card', async () => {

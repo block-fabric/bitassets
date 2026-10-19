@@ -89,7 +89,7 @@
       {/if}
       {#snippet actions()}
         <button type="button" class="btn grow" onclick={() => go('trade', 'swap')}><Icon name="swap" size={15} /> Swap</button>
-        <button type="button" class="btn ghost" onclick={() => go('assets')}>Explore assets</button>
+        <button type="button" class="btn ghost" onclick={() => go('assets')}>Browse assets</button>
       {/snippet}
     </Card>
 
