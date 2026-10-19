@@ -236,7 +236,7 @@
           <li>
             <button type="button" class="panel tile" onclick={() => (shown = a.asset)}>
               <span class="top">
-                <AssetBadge id={a.asset} label={a.label} seq={a.seq} />
+                <AssetBadge id={a.asset} label={a.label} display={a.display_name ?? ""} seq={a.seq} />
                 {#if controlled.has(a.asset)}<span class="ba-tag accent" title="This wallet holds its control coin"><Icon name="crown" size={12} /></span>{/if}
               </span>
               {#if a.data?.info}<SafeText class="blurb" text={a.data.info} />{:else}<span class="blurb faint">No description.</span>{/if}

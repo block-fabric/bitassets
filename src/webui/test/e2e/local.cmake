@@ -13,3 +13,7 @@ webui_local_e2e(ba_bulk 41820 --js-var COUNT=300 --js-var "PAGE=\"transactions\"
 webui_local_e2e(ba_ignore 41850)
 # ba_feedback.js: pictures of the pages the user feedback of 2026-10-19 changed (a chart of a tiny and a huge price, the picker searched, Register new asset in My assets, a mint's details).
 webui_local_e2e(ba_feedback 41880)
+# ba_tickers.js: tickers and display names (ticker@0): the wizard (ticker uppercased, display name), its confirmation, the
+# list, the asset page, the compact Your assets of the Home and the Overview, the display name changed by its controller,
+# the "this wallet" chip of Transactions opened in the explorer, the addresses and roles in the registration's details.
+webui_local_e2e(ba_tickers 49300 --app-arg=-testactivationheight=ticker@0)

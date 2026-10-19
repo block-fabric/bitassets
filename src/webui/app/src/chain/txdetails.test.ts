@@ -8,7 +8,9 @@ import LocalTxCell from './LocalTxCell.svelte';
 import LocalTxDetails from './LocalTxDetails.svelte';
 import { ba } from './ba/store.svelte';
 import type { AssetTx } from './ba/model';
-import { categoryText, chainTxOf, counterparty, shortAddress } from './txinfo.svelte';
+import { categoryText, chainTxDetails, chainTxOf, counterparty, middleAddress, ownAddresses, shortAddress } from './txinfo.svelte';
+import { fireEvent } from '@testing-library/svelte';
+import { nav } from '../lib/nav.svelte';
 import { setTransport } from '../lib/bridge';
 import { wallets } from '../lib/state.svelte';
 
@@ -43,16 +45,16 @@ describe('the other side of a move', () => {
     // A mint and a registration pay the coins and the control coin to the wallet.
     for (const category of ['mint', 'register']) {
       const c = counterparty(move(category, 1, { to: [mine(ME1), mine(ME2)] }));
-      expect(c, category).toEqual({ dir: 'to', parties: [], self: true });
+      expect(c, category).toEqual({ dir: 'to', parties: [], self: true, own: [mine(ME1), mine(ME2)] });
     }
     // A send: to the other side only (the wallet's asset change is no destination), each address once.
-    expect(counterparty(move('send', -1, { to: [theirs(OTHER), mine(ME1), theirs(OTHER)] }))).toEqual({ dir: 'to', parties: [theirs(OTHER)], self: false });
+    expect(counterparty(move('send', -1, { to: [theirs(OTHER), mine(ME1), theirs(OTHER)] }))).toEqual({ dir: 'to', parties: [theirs(OTHER)], self: false, own: [] });
     // A swap: its result and its change both to the wallet.
     expect(counterparty(move('swap', 1, { to: [mine(ME1), mine(ME2)] })).parties).toEqual([]);
     // A receive: who paid it.
-    expect(counterparty(move('receive', 1, { to: [mine(ME1)], from: [theirs(OTHER), theirs(OTHER)] }))).toEqual({ dir: 'from', parties: [theirs(OTHER)], self: false });
+    expect(counterparty(move('receive', 1, { to: [mine(ME1)], from: [theirs(OTHER), theirs(OTHER)] }))).toEqual({ dir: 'from', parties: [theirs(OTHER)], self: false, own: [] });
     // A send to the wallet itself: to this wallet.
-    expect(counterparty(move('send', -1, { to: [mine(ME1)] }))).toEqual({ dir: 'to', parties: [], self: true });
+    expect(counterparty(move('send', -1, { to: [mine(ME1)] }))).toEqual({ dir: 'to', parties: [], self: true, own: [mine(ME1)] });
   });
 
   it('shortens an address in the middle for the table', () => {
@@ -106,8 +108,12 @@ describe('every kind of move', () => {
       expect(text, category).toContain('1739-0029');
       expect(text, category).toContain('1,234,567.89');
       expect(text, category).toContain(sign > 0 ? 'Into this wallet' : sign < 0 ? 'Out of this wallet' : 'Neither in nor out');
-      expect(text, category).toContain(`What ${category} did`);
-      expect(text, category).not.toContain(ME1);
+      // The app's own headline where it reads better (a registration, a mint, a burn), else the node's words.
+      if (['register', 'mint', 'burn'].includes(category)) expect(text, category).toContain(category === 'register' ? 'Registered GOLDEN-LONG-TICKER · 1,234,567.89 created' : `${label} 1,234,567.89 GOLDEN-LONG-TICKER`);
+      else expect(text, category).toContain(`What ${category} did`);
+      // The wallet's own addresses, each once, with what it got; no fee here (the CHN side says it once).
+      if (sign > 0) expect((text.match(new RegExp(ME1, 'g')) ?? []).length, category).toBe(1);
+      expect(text, category).not.toContain('Network fee');
       if (sign < 0) expect(text, category).toContain(OTHER);
       view.unmount();
     }
@@ -121,8 +127,43 @@ describe('every kind of move', () => {
     const text = view.getByRole('region', { name: 'Asset movement' }).textContent ?? '';
     expect(text).toContain('Supply');
     expect(text).toContain('1,000.00');
-    expect(text).toContain('this wallet');
+    expect(text).toContain('This wallet');
     view.unmount();
     ba.assets = [];
+  });
+});
+
+describe('the wallet\'s own addresses of a move', () => {
+  it('says what each got (the asset, the control coin, the change of CHN), and opens it in the explorer', async () => {
+    const e = move('register', 1, { display_name: 'Gold Bar Token, 1 g', to: [{ address: ME1, mine: true, roles: ['control coin'] }, { address: ME2, mine: true, roles: ['asset'] }], change: [OTHER] });
+    expect(ownAddresses(e)).toEqual([
+      { address: ME1, roles: ['control coin'] },
+      { address: ME2, roles: ['asset'] },
+      { address: OTHER, roles: ['change'] },
+    ]);
+    ba.transfers = [e];
+    // The cell: one chip, "this wallet" and the first address shortened in the middle, all of them in its tooltip.
+    const cell = render(LocalTxCell, { txid: e.txid });
+    const chip = cell.getByTestId('this-wallet');
+    expect(chip.textContent).toContain(`this wallet · ${middleAddress(ME1)}`);
+    expect(chip.getAttribute('title')).toBe(`${ME1}\n${ME2}`);
+    await fireEvent.click(chip);
+    expect(nav.page).toBe('explorer');
+    expect(nav.tab).toBe(`search:${ME1}`);
+    cell.unmount();
+    // The details: the headline with the display name, every address with its role.
+    const view = render(LocalTxDetails, { wallet: 'w', txid: e.txid });
+    const text = view.getByRole('region', { name: 'Asset movement' }).textContent ?? '';
+    expect(text).toContain('Registered GOLDEN-LONG-TICKER · Gold Bar Token, 1 g · 12.50 created');
+    const own = view.getByTestId('own-addresses').textContent ?? '';
+    for (const part of [ME1, 'control coin', ME2, 'asset', OTHER, 'change']) expect(own).toContain(part);
+    view.unmount();
+  });
+
+  it('leaves the zero Debit and Credit and the output index of the CHN record out of an asset operation', () => {
+    const e = move('register', 1, { to: [mine(ME1)] });
+    ba.transfers = [e];
+    expect(chainTxDetails(e.txid)).toEqual({ hideZero: true, raw: { 'Output index': 'Output index of the CHN record' }, simpleRows: ['Status', 'Date', 'Transaction fee'] });
+    expect(chainTxDetails('f'.repeat(64))).toBeUndefined();
   });
 });

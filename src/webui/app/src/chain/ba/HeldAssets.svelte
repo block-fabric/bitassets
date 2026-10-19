@@ -12,8 +12,8 @@
   import './ba.css';
   import AssetBadge from './AssetBadge.svelte';
   import { HELD_SHOWN, heldRows } from './held';
-  import { formatAmount, formatPrice } from './model';
-  import { assetById, ba, chnPrice, startBitAssets, unlockHoldings } from './store.svelte';
+  import { assetTitle, formatAmount, formatPrice } from './model';
+  import { assetById, ba, chnPrice, displayNameOf, startBitAssets, unlockHoldings } from './store.svelte';
   import HiddenToggle from './HiddenToggle.svelte';
   import { withoutHidden } from './visible.svelte';
 
@@ -46,33 +46,39 @@
   {:else if held.rows.length === 0 && held.controlledOnly.length === 0}
     <p class="muted empty">No assets yet. <button type="button" class="btn small" onclick={() => go('issue')}>Register new asset</button> <button type="button" class="btn ghost small" onclick={() => go('trade', 'swap')}>Get assets in Trade</button></p>
   {:else}
-    {#if simple}
-      <ul class="compact">
+    <!-- One compact row per asset (user feedback 2026-10-19): its logo, the crown if the wallet controls it, its ticker
+         with its number, its display name, its balance and its worth; narrow, the name goes first, then the worth. -->
+    <table class="rows" aria-labelledby="held-title">
+      <thead class="sr-only"><tr><th scope="col">Asset</th><th scope="col" class="c-name">Name</th><th scope="col">Balance</th><th scope="col" class="c-value">Value (CHN)</th></tr></thead>
+      <tbody>
         {#each shown as r (r.holding.asset)}
-          <li>
-            <button type="button" class="link" onclick={() => goTo('assets', '', r.holding.asset)}><AssetBadge id={r.holding.asset} label={r.holding.label} size="s" /></button>
-            <span class="num">{formatAmount(r.holding.balance, r.holding.decimals)}{#if r.pending} <span class="ba-warn small">+{formatAmount(r.holding.pending, r.holding.decimals)}</span>{/if}</span>
-          </li>
+          {@const display = displayNameOf(r.holding.asset) ?? ''}
+          <tr class="row" data-testid="held-row" onclick={() => goTo('assets', '', r.holding.asset)}>
+            <td class="c-asset">
+              <button type="button" class="link asset" title={assetTitle(r.holding.label, display, r.seq)} onclick={(e) => { e.stopPropagation(); goTo('assets', '', r.holding.asset); }}>
+                <AssetBadge id={r.holding.asset} label={r.holding.label} size="s" showLabel={false} />
+                {#if r.holding.control}<span class="crown" title="You control this asset"><Icon name="crown" size={12} label="You control this asset" /></span>{/if}
+                <SafeText class="ticker" text={r.holding.label} />
+                {#if r.seq}<span class="seq faint" translate="no">#{r.seq}</span>{/if}
+              </button>
+            </td>
+            <td class="c-name muted" title={display}>{#if display}<SafeText text={display} />{/if}</td>
+            <td class="c-balance num" translate="no">{formatAmount(r.holding.balance, r.holding.decimals, { trim: false })}{#if r.pending} <span class="ba-warn on-way" title="Spendable after the next block">+{formatAmount(r.holding.pending, r.holding.decimals, { trim: false })}</span>{/if}</td>
+            <td class="c-value num" translate="no">{r.value !== undefined ? formatPrice(r.value) : '–'}</td>
+          </tr>
         {/each}
-      </ul>
-    {:else}
-      <table class="ba-table">
-        <thead><tr><th scope="col">Asset</th><th scope="col" class="num">Balance</th><th scope="col" class="num">Value (CHN)</th></tr></thead>
-        <tbody>
-          {#each shown as r (r.holding.asset)}
-            <tr class="clickable" onclick={() => goTo('assets', '', r.holding.asset)}>
-              <td><button type="button" class="link" onclick={(e) => { e.stopPropagation(); goTo('assets', '', r.holding.asset); }}><AssetBadge id={r.holding.asset} label={r.holding.label} seq={r.seq} size="s" /></button>{#if r.holding.control} <Icon name="crown" size={12} label="You control it" />{/if}</td>
-              <td class="num">{formatAmount(r.holding.balance, r.holding.decimals)}{#if r.pending}<br /><span class="ba-warn small" title="Spendable after the next block">+{formatAmount(r.holding.pending, r.holding.decimals)} on the way</span>{/if}</td>
-              <td class="num">{r.value !== undefined ? formatPrice(r.value) : '–'}</td>
-            </tr>
-          {/each}
-        </tbody>
-      </table>
-    {/if}
+      </tbody>
+    </table>
     {#if held.rows.length > HELD_SHOWN}<p class="faint small">And {held.rows.length - HELD_SHOWN} more in My assets.</p>{/if}
     {#if held.controlledOnly.length}
-      <p class="small controlled"><span class="muted">You control, without holding any:</span>
-        {#each held.controlledOnly as r, i (r.holding.asset)}{#if i > 0}, {/if}<button type="button" class="link" onclick={() => goTo('assets', '', r.holding.asset)}><SafeText text={r.holding.label} />{#if r.seq} <span class="faint" translate="no">#{r.seq}</span>{/if}</button>{/each}
+      <p class="small controlled" data-testid="controlled-only"><span class="muted">You control, without holding any:</span>
+        {#each held.controlledOnly as r (r.holding.asset)}
+          <button type="button" class="chip" title={assetTitle(r.holding.label, displayNameOf(r.holding.asset), r.seq)} onclick={() => goTo('assets', '', r.holding.asset)}>
+            <AssetBadge id={r.holding.asset} label={r.holding.label} size="s" showLabel={false} />
+            <span class="crown" title="You control this asset"><Icon name="crown" size={11} label="You control this asset" /></span>
+            <SafeText class="ticker" text={r.holding.label} />
+          </button>
+        {/each}
       </p>
     {/if}
   {/if}
@@ -96,22 +102,114 @@
     margin: 0;
     font-size: 1.05rem;
   }
-  .compact {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 0.4rem;
+  .held {
+    container: held / inline-size;
   }
-  .compact li {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 0.6rem;
+  .rows {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
   }
-  .clickable {
+  .row {
+    height: 2.25rem;
     cursor: pointer;
+    border-top: 1px solid var(--line);
+  }
+  .row:first-child {
+    border-top: none;
+  }
+  .row:hover {
+    background: var(--surface-2);
+  }
+  .row td {
+    padding: 0 0.35rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    vertical-align: middle;
+  }
+  .c-asset {
+    width: 42%;
+  }
+  .c-name {
+    width: 26%;
+  }
+  .c-balance {
+    width: 20%;
+  }
+  .c-value {
+    width: 12%;
+  }
+  .asset {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    max-width: 100%;
+    min-width: 0;
+    color: inherit;
+    text-decoration: none;
+  }
+  .asset :global(.ticker),
+  .chip :global(.ticker) {
+    font-weight: 700;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
+  .seq {
+    font-size: 0.75rem;
+    flex: none;
+  }
+  .crown {
+    display: inline-flex;
+    color: var(--warning, var(--accent));
+    flex: none;
+  }
+  .on-way {
+    font-size: 0.75rem;
+  }
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    margin: 0.15rem 0.3rem 0 0;
+    padding: 0.1rem 0.5rem 0.1rem 0.15rem;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--surface-2);
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+    max-width: 14rem;
+  }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+  /* Narrow: the display name goes first, then the worth. */
+  @container held (max-width: 30rem) {
+    .c-name {
+      display: none;
+    }
+    .c-asset {
+      width: 58%;
+    }
+  }
+  @container held (max-width: 21rem) {
+    .c-value {
+      display: none;
+    }
+    .c-asset {
+      width: 62%;
+    }
+    .c-balance {
+      width: 38%;
+    }
   }
   .num {
     text-align: end;

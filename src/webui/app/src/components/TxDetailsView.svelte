@@ -9,10 +9,12 @@
   import { walletApi, type DetailRow, type TxDetails, type TxRecord } from '../lib/wallet';
   import { COINBASE_ROLES } from '../chain/roles';
   import LocalTxDetails from '../chain/LocalTxDetails.svelte';
+  import { chainTxDetails } from '../lib/chaintx';
+  import { simpleMode } from '../lib/uimode.svelte';
 
   let { wallet, record }: { wallet: string; record: Pick<TxRecord, 'txid' | 'idx' | 'address'> } = $props();
 
-  let details: TxDetails | null = $state(null);
+  let details = $state<TxDetails | null>(null);
   let error = $state('');
 
   $effect(() => {
@@ -24,6 +26,19 @@
       .then((d) => (details = d))
       .catch((e) => (error = e instanceof Error ? e.message : String(e)));
   });
+
+  // What the chain says of how its own transactions show (an asset operation: lib/chaintx.ts), else every row.
+  const view = $derived(details ? chainTxDetails(details.txid) : undefined);
+  const simple = $derived(simpleMode());
+  const rows = $derived(
+    (details?.rows ?? []).filter((r) => {
+      if (!view) return true;
+      if (simple && view.simpleRows && !view.simpleRows.includes(r.k)) return false;
+      return !(view.hideZero && (r.k === 'Debit' || r.k === 'Credit') && r.sats !== undefined && Number(r.sats) === 0);
+    }),
+  );
+  const ids = $derived((details?.ids ?? []).filter((r) => !view?.raw[r.k] && !(view && simple && r.k !== 'Transaction ID')));
+  const raw = $derived(view ? (details?.ids ?? []).filter((r) => view.raw[r.k]) : []);
 </script>
 
 {#snippet value(row: DetailRow)}
@@ -55,7 +70,7 @@
     <!-- What the chain knows of it beyond its coin (chain/LocalTxDetails.svelte: an asset moved...), first. -->
     <LocalTxDetails {wallet} txid={details.txid} />
     <dl class="facts">
-      {#each details.rows as row, i (i)}
+      {#each rows as row, i (i)}
         <dt>{t(row.k)}</dt>
         <dd>{@render value(row)}</dd>
       {/each}
@@ -69,7 +84,7 @@
       <p class="pre break" translate="no">{m}</p>
     {/each}
     <dl class="facts ids">
-      {#each details.ids as row, i (i)}
+      {#each ids as row, i (i)}
         <dt>{t(row.k)}</dt>
         <dd>
           <SafeText class={row.k === 'Transaction ID' ? 'mono break' : 'break'} text={row.text} />
@@ -77,6 +92,17 @@
         </dd>
       {/each}
     </dl>
+    {#if raw.length && !simple}
+      <details class="raw" data-testid="tx-raw">
+        <summary>Raw</summary>
+        <dl class="facts">
+          {#each raw as row, i (i)}
+            <dt>{t(view?.raw[row.k] ?? row.k)}</dt>
+            <dd><SafeText class="break" text={row.text} /></dd>
+          {/each}
+        </dl>
+      </details>
+    {/if}
     {#if details.coinbaseNote}<p class="muted note"><SafeText text={details.coinbaseNote} /></p>{/if}
     {#if details.debug}
       <details class="debug">

@@ -38,6 +38,12 @@ export interface BitAssetsInfo {
   /** The first block of the logos of assets (-1: never on this network; older nodes: absent). */
   logo_height?: number;
   max_logo_bytes?: number;
+  /** The first block of tickers and display names (-1: never; older nodes: absent), and whether the next block has them. */
+  ticker_height?: number;
+  tickers_active?: boolean;
+  min_ticker_length?: number;
+  max_ticker_length?: number;
+  max_display_name_bytes?: number;
 }
 
 export interface AssetData {
@@ -74,6 +80,8 @@ export interface Asset {
   name?: string;
   /** Its name, or "0x" and its hash. Text of the chain. */
   label: string;
+  /** Its display name, if it has one (not unique: shown after the ticker, never instead of it). Text of the chain. */
+  display_name?: string;
   /** Its number: 1739-0029. */
   seq: string;
   decimals: number;
@@ -197,6 +205,8 @@ export interface TxParty {
   /** "unknown" where the outputs a transaction spent cannot be read (its block pruned). */
   address: string;
   mine: boolean;
+  /** What its outputs carry of the asset: "asset" (units), "control coin" (newer nodes). */
+  roles?: string[];
 }
 
 /** An asset a transaction of the wallet moved (listassettransactions): one entry per asset. */
@@ -206,9 +216,10 @@ export interface AssetTx {
   confirmations: number;
   blockhash?: string;
   blockheight?: number;
-  category: 'send' | 'receive' | 'register' | 'mint' | 'burn' | 'swap' | 'pool_add' | 'pool_remove' | 'auction' | 'bid' | 'collect' | 'logo' | 'update' | 'control' | 'reserve' | 'release' | string;
+  category: 'send' | 'receive' | 'register' | 'mint' | 'burn' | 'swap' | 'pool_add' | 'pool_remove' | 'auction' | 'bid' | 'collect' | 'logo' | 'display_name' | 'update' | 'control' | 'reserve' | 'release' | string;
   asset?: string;
   label?: string;
+  display_name?: string;
   seq?: string;
   decimals?: number;
   amount?: Amount;
@@ -219,6 +230,8 @@ export interface AssetTx {
   to: TxParty[];
   from: TxParty[];
   abandoned: boolean;
+  /** The wallet's own outputs of CHN that carry nothing (its change), when it paid (newer nodes). */
+  change?: string[];
 }
 
 export interface SwapQuote {
@@ -420,6 +433,70 @@ export function readsAsAnotherAsset(name: string): boolean {
  */
 export function nameMimicsNumber(name: string): boolean {
   return /[#()]/.test(name) || /\d{4}-\d{4}/.test(name);
+}
+
+// --- Tickers and display names (from ticker_height: bitassets::IsTicker, IsDisplayName) ---
+
+export const MIN_TICKER = 2;
+export const MAX_TICKER = 12;
+export const MAX_DISPLAY_NAME_BYTES = 64;
+
+/** The name of a new asset as the wallet sends it from ticker_height: letters uppercased (the node does the same). */
+export function tickerOf(text: string): string {
+  return text.toUpperCase();
+}
+
+/** bitassets::IsTicker: 2 to 12 characters, A to Z and 0 to 9. */
+export function isTicker(name: string): boolean {
+  return new RegExp(`^[A-Z0-9]{${MIN_TICKER},${MAX_TICKER}}$`).test(name);
+}
+
+/** What is wrong with a ticker ('' when nothing): the rules of a ticker, then those of any name. */
+export function tickerProblem(name: string): string {
+  if (name === '') return '';
+  if (/[^A-Za-z0-9]/.test(name)) return 'A ticker is letters A to Z and digits 0 to 9 only: no spaces, dashes or other characters. A longer name goes in the display name.';
+  if (name.length < MIN_TICKER) return `A ticker is at least ${MIN_TICKER} characters.`;
+  if (name.length > MAX_TICKER) return `A ticker is at most ${MAX_TICKER} characters.`;
+  const upper = tickerOf(name);
+  if (upper === 'CHN') return 'CHN is the coin of the chain.';
+  if (/^0X/.test(upper)) return 'A ticker does not start with "0X": that is how a hash is written.';
+  return '';
+}
+
+/** The text of a display name as it is sent: in NFC (the rules take NFC only: a text typed decomposed is composed). */
+export function normalizeDisplayName(text: string): string {
+  return text.normalize('NFC');
+}
+
+/**
+ * Code points a display name may not hold, as the rules refuse them (bitassets::IsDisplayName; the node is the
+ * authority, with its table of Unicode 15.0): controls, format characters (bidirectional overrides, isolates and marks,
+ * zero-width ones, soft hyphen, tags), spaces other than U+0020, line and paragraph separators, combining marks and
+ * variation selectors, conjoining jamo, Hangul fillers, the braille blank, private use, noncharacters, surrogates.
+ */
+const REFUSED = /[\p{Cc}\p{Cf}\p{Co}\p{Cs}\p{Cn}\p{Zl}\p{Zp}\p{M}\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000\u115f\u1160\u3164\uffa0\u2800\u1100-\u11ff\ua960-\ua97f\ud7b0-\ud7ff\ufff0-\ufff8]/u;
+
+/** What is wrong with a display name ('' when nothing, or when it is empty: none). */
+export function displayNameProblem(text: string): string {
+  if (text === '') return '';
+  if (new TextEncoder().encode(text).length > MAX_DISPLAY_NAME_BYTES) return `A display name is at most ${MAX_DISPLAY_NAME_BYTES} bytes (UTF-8: a letter beyond ASCII takes 2 to 4).`;
+  if (text.startsWith(' ') || text.endsWith(' ')) return 'A display name has no space at either end.';
+  if (text !== text.normalize('NFC')) return 'A display name is in NFC: letters with accents composed.';
+  const bad = REFUSED.exec(text);
+  if (bad) {
+    const cp = bad[0].codePointAt(0)!;
+    return `A display name holds no U+${cp.toString(16).toUpperCase().padStart(4, '0')}: no control or invisible characters (bidirectional, zero-width), other spaces or combining marks.`;
+  }
+  // Characters NFC changes into others (the angstrom and ohm signs, CJK compatibility ideographs).
+  for (const c of text) {
+    if (c.normalize('NFC') !== c) return `A display name holds no U+${c.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')}: NFC writes it as another character.`;
+  }
+  return '';
+}
+
+/** How an asset reads: its ticker (its name), its display name after it, its number ("GOLD · Gold Bar Token, 1 g · #1739-0029"). */
+export function assetTitle(label: string, display?: string, seq?: string): string {
+  return [label, display ?? '', seq ? `#${seq}` : ''].filter((x) => x !== '').join(' · ');
 }
 
 /** What is wrong with a name for a new asset ('' when nothing). */

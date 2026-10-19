@@ -9,6 +9,8 @@ export interface PickChoice {
   label: string;
   /** Its number (1739-0029): what tells two assets of names alike apart. */
   seq?: string;
+  /** Its display name, if any (not unique): matched after the name. Text of the chain. */
+  display?: string;
   /** What the wallet holds of it, written. */
   held?: string;
   /** A warning shown on its row (a name like another asset the wallet holds). */
@@ -51,6 +53,13 @@ export function matchScore(c: PickChoice, query: string): number {
   if (label.includes(q)) return 30;
   if (/^[0-9a-f]{4,64}$/.test(q) && c.id.toLowerCase().startsWith(q)) return 25;
   if (c.seq && digits(q).length >= 2 && digits(c.seq).includes(digits(q))) return 10;
+  // The display name: after the names (it is not unique; the ticker is what names an asset).
+  const display = (c.display ?? '').toLowerCase();
+  if (display) {
+    if (display.startsWith(q)) return 40;
+    if (display.split(/[^\p{L}\p{N}]+/u).some((w) => w.startsWith(q))) return 35;
+    if (display.includes(q)) return 15;
+  }
   return 0;
 }
 

@@ -3,11 +3,17 @@
   // with its sign, and the other side: "to" the addresses of a send, "from" those that paid what came in ("yours" marks
   // the wallet's own), with the transaction in the explorer. The asset keeps its name (up to a width); the addresses
   // give way first, shortened in the middle in the table (user feedback 2026-10-19); the wallet's own outputs are
-  // "this wallet", once, never each of its addresses.
+  // "this wallet", once, with the first of its addresses (the others in the tooltip and the details): a click opens it in
+  // the explorer (the wallet's view of it: its label, balance and transactions).
   import SafeText from '../components/SafeText.svelte';
   import { go } from '../lib/nav.svelte';
   import AssetBadge from './ba/AssetBadge.svelte';
-  import { assetMovesOf, counterparty, shortAddress, signedAmount } from './txinfo.svelte';
+  import { assetMovesOf, counterparty, middleAddress, shortAddress, signedAmount } from './txinfo.svelte';
+
+  function openAddress(ev: Event, address: string) {
+    ev.stopPropagation();
+    go('explorer', `search:${address}`);
+  }
 
   // In the table: one line, cut to its column (the row's menu has the explorer); in the activity: whole, with the link.
   let { txid, full = false }: { txid: string; full?: boolean } = $props();
@@ -24,7 +30,12 @@
         {#if side.dir && (side.parties.length || side.self)}
           <span class="party faint" title={side.parties.map((p) => p.address).join(' ')}>{side.dir === 'to' ? 'to' : 'from'}
             {#each side.parties.slice(0, 3) as p (p.address)}<span class="addr" translate="no">{#if p.address === 'unknown'}unknown{:else}<SafeText text={full ? p.address : shortAddress(p.address)} />{/if}</span> {/each}{#if side.parties.length > 3}+{side.parties.length - 3}{/if}
-            {#if side.self && side.parties.length === 0}<span class="ba-tag">this wallet</span>{/if}
+            {#if side.self && side.parties.length === 0}
+              {@const first = side.own[0]?.address ?? ''}
+              {#if first && first !== 'unknown'}
+                <button type="button" class="ba-tag self" data-testid="this-wallet" title={side.own.map((p) => p.address).join('\n')} onclick={(ev) => openAddress(ev, first)} onkeydown={(ev) => ev.stopPropagation()}>this wallet · <span class="addr" translate="no"><SafeText text={middleAddress(first)} /></span>{#if side.own.length > 1} +{side.own.length - 1}{/if}</button>
+              {:else}<span class="ba-tag">this wallet</span>{/if}
+            {/if}
           </span>
         {/if}
       </span>
@@ -101,5 +112,14 @@
   .small {
     font-size: 0.8rem;
     align-self: flex-start;
+  }
+  .self {
+    cursor: pointer;
+    font: inherit;
+    font-size: 0.8rem;
+  }
+  .self:hover,
+  .self:focus-visible {
+    border-color: var(--accent);
   }
 </style>

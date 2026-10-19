@@ -15,8 +15,8 @@
   import AssetBadge from './AssetBadge.svelte';
   import UnitsInput from './UnitsInput.svelte';
   import LogoPicker, { type PickedLogo } from './LogoPicker.svelte';
-  import { amountParam, approx, assetArg, DATA_FIELDS, dataProblems, dataUpdates, formatAmount, formatUnits, unitsAtMost, unitsOf, type Asset, type DataField, type Holding } from './model';
-  import { ba, nameOf, refreshBitAssets, sellIntent, sendAsset, tradeIntent } from './store.svelte';
+  import { amountParam, approx, assetArg, DATA_FIELDS, dataProblems, dataUpdates, displayNameProblem, MAX_DISPLAY_NAME_BYTES, normalizeDisplayName, formatAmount, formatUnits, unitsAtMost, unitsOf, type Asset, type DataField, type Holding } from './model';
+  import { ba, nameOf, refreshBitAssets, sellIntent, sendAsset, tickersActive, tradeIntent } from './store.svelte';
 
   let { holding }: { holding: Holding } = $props();
 
@@ -41,7 +41,7 @@
       .catch(() => undefined);
   });
 
-  type Action = 'mint' | 'data' | 'logo' | 'control' | 'burn' | '';
+  type Action = 'mint' | 'data' | 'logo' | 'display' | 'control' | 'burn' | '';
   let open = $state<Action>('');
   let busy = $state(false);
 
@@ -75,6 +75,28 @@
     await run('setassetlogo', [arg, remove ? '' : (logo?.base64 ?? '')], () => {
       toast('success', remove ? t('Logo removed') : t('Logo set'), t('The logo of %1 changes with the next block.', holding.label));
       logo = null;
+    });
+  }
+  // The display name (from ticker_height): set, changed or removed by the control coin; not unique.
+  const tickers = $derived(tickersActive());
+  let displayText = $state('');
+  let displayFor = '';
+  $effect(() => {
+    if (open !== 'display') {
+      displayFor = '';
+      return;
+    }
+    if (!asset || displayFor === asset.asset) return;
+    displayFor = asset.asset;
+    displayText = asset.display_name ?? '';
+  });
+  const displayValue = $derived(normalizeDisplayName(displayText));
+  const displayProblem = $derived(displayNameProblem(displayValue));
+  const displayBytes = $derived(new TextEncoder().encode(displayValue).length);
+  async function saveDisplay(remove: boolean) {
+    if (!remove && (!displayValue || displayProblem || displayValue === asset?.display_name)) return;
+    await run('setassetdisplayname', [arg, remove ? '' : displayValue], () => {
+      toast('success', remove ? t('Display name removed') : t('Display name set'), t('The display name of %1 changes with the next block.', holding.label));
     });
   }
   // Give control.
@@ -123,6 +145,9 @@
           break;
         case 'setassetlogo':
           r = await walletRpc<T>(wallet, 'setassetlogo', params);
+          break;
+        case 'setassetdisplayname':
+          r = await walletRpc<T>(wallet, 'setassetdisplayname', params);
           break;
         default:
           r = await walletRpc<T>(wallet, 'burnasset', params);
@@ -243,7 +268,7 @@
   <header class="head">
     <AssetBadge {id} label={holding.label} size="l" showLabel={false} />
     <div class="who">
-      <h2><SafeText text={holding.label} /></h2>
+      <h2><SafeText class="ticker" text={holding.label} />{#if asset?.display_name} <SafeText class="display muted" text={asset.display_name} />{/if}</h2>
       <p class="amount"><strong class="num">{formatAmount(holding.balance, decimals)}</strong> <span class="muted">of {formatAmount(holding.supply, decimals)} in all</span></p>
       {#if approx(holding.pending) > 0}<p class="ba-warn small">+{formatAmount(holding.pending, decimals)} on the way: spendable after the next block</p>{/if}
       {#if holding.control_pending}<p class="faint small">The control coin is moving, with a transaction waiting for a block: minting and changes are possible again after it.</p>{/if}
@@ -296,6 +321,24 @@
             <div class="row-buttons">
               <button type="submit" class="btn primary" disabled={busy || !logo}>Save the logo</button>
               {#if asset?.logo}<button type="button" class="btn" disabled={busy} onclick={() => void saveLogo(true)}>Remove the logo</button>{/if}
+            </div>
+          </form>
+        {/if}
+      {/if}
+
+      {#if tickers}
+        <button type="button" class="act" aria-expanded={open === 'display'} onclick={() => toggle('display')} data-testid="edit-display-name"><Icon name="edit" size={16} /> <span>{asset?.display_name ? 'Change its display name' : 'Add a display name'}</span></button>
+        {#if open === 'display'}
+          <form class="ba-form body" onsubmit={(e) => { e.preventDefault(); void saveDisplay(false); }}>
+            <div class="field">
+              <label for="manage-display">Display name</label>
+              <input id="manage-display" type="text" autocomplete="off" placeholder="Such as Gold Bar Token, 1 g" bind:value={displayText} aria-invalid={displayProblem ? 'true' : undefined} />
+              {#if displayProblem}<span class="error">{t(displayProblem)}</span>{:else}<span class="hint"><span translate="no">{displayBytes} / {MAX_DISPLAY_NAME_BYTES}</span> bytes</span>{/if}
+            </div>
+            <p class="ba-help">Shown after the ticker <strong><SafeText text={holding.label} /></strong>, which stays as it is. Not unique: other assets may show the same.</p>
+            <div class="row-buttons">
+              <button type="submit" class="btn primary" disabled={busy || !displayValue || !!displayProblem || displayValue === asset?.display_name}>Save the display name</button>
+              {#if asset?.display_name}<button type="button" class="btn" disabled={busy} onclick={() => void saveDisplay(true)}>Remove it</button>{/if}
             </div>
           </form>
         {/if}

@@ -47,6 +47,11 @@ import {
   unitsOf,
   nameMimicsNumber,
   withdraw,
+  assetTitle,
+  displayNameProblem,
+  isTicker,
+  normalizeDisplayName,
+  tickerProblem,
   type Asset,
   type Auction,
   type Holdings,
@@ -94,6 +99,7 @@ let prefsStore: Record<string, unknown> = {};
 let history: string[] = [];
 let hidden: Asset[] = [];
 let activityCount = 1;
+let tickersOn = false;
 const calls: BridgeRequest[] = [];
 
 function fresh() {
@@ -135,7 +141,7 @@ function units(n: number | string, d: number): bigint {
 
 // What pays or signs goes through the host (rpc.confirmed, local.cpp ConfirmedRpcMethods), which asks on the desktop and runs
 // the call: here, at once, as the node would.
-const CONFIRMED = ['reserveasset', 'registerasset', 'releaseassetreservation', 'sendasset', 'mintasset', 'burnasset', 'updateasset', 'transferassetcontrol', 'fixassetsupply', 'releaseasset', 'swapasset', 'addliquidity', 'removeliquidity', 'createauction', 'bidauction', 'collectauction', 'setassetlogo'];
+const CONFIRMED = ['reserveasset', 'registerasset', 'releaseassetreservation', 'sendasset', 'mintasset', 'burnasset', 'updateasset', 'transferassetcontrol', 'fixassetsupply', 'releaseasset', 'swapasset', 'addliquidity', 'removeliquidity', 'createauction', 'bidauction', 'collectauction', 'setassetlogo', 'setassetdisplayname'];
 
 // The questions the host asked (each a dialog on the desktop), the second steps it was told to run without one
 // (confirm.h Authorizations: [wallet, method, params] as JSON), and how long a question takes to be answered.
@@ -171,7 +177,7 @@ async function fakeNode(r: BridgeRequest): Promise<unknown> {
   const byArg = (arg: unknown) => assets.find((a) => assetArg(a.asset) === arg || a.label === arg);
   switch (r.method) {
     case 'getbitassetsinfo':
-      return { assets: assets.length + hidden.length, reservations: 1, pools: pools.length, auctions: auctions.length, height: 21, reveal_depth: 2, logo_height: 0, max_logo_bytes: 32768 };
+      return { assets: assets.length + hidden.length, reservations: 1, pools: pools.length, auctions: auctions.length, height: 21, reveal_depth: 2, logo_height: 0, max_logo_bytes: 32768, ...(tickersOn ? { ticker_height: 15, tickers_active: true, min_ticker_length: 2, max_ticker_length: 12, max_display_name_bytes: 64 } : { ticker_height: -1, tickers_active: false }) };
     case 'listassets': {
       // [count, skip, match], as the node takes them; `hidden` are the newest past what the page reads.
       const all = [...assets, ...hidden].filter((a) => p[2] === undefined || a.label.toLowerCase().includes(String(p[2]).toLowerCase()));
@@ -254,6 +260,7 @@ async function fakeNode(r: BridgeRequest): Promise<unknown> {
     case 'collectauction':
     case 'releaseassetreservation':
     case 'setassetlogo':
+    case 'setassetdisplayname':
       return { txid: id('7') };
     case 'swapasset':
       return { txid: id('7'), quote: 4.98, min_out: 4.95 };
@@ -317,6 +324,7 @@ beforeEach(() => {
   resetSearchSupport();
   resetHiding();
   activityCount = 1;
+  tickersOn = false;
   store = null;
   locked = false;
   calls.length = 0;
@@ -1295,5 +1303,141 @@ describe('a burst of blocks and transactions (user feedback 2026-10-19, item 10)
     ba.transfers = [{ txid: id('1'), time: 2, confirmations: 1, category: 'send', asset: GOLD, label: 'GOLD', seq: '1739-0029', decimals: 2, amount: '1', sign: -1, to: [{ address: OTHER, mine: false }], from: [], abandoned: false }];
     const { chainTxOf } = await import('./txinfo.svelte');
     expect(chainTxOf(id('1'))).toBe(chainTxOf(id('1')));
+  });
+});
+
+// Tickers and display names (from ticker_height): the name of a new asset is a ticker, a display name beside it.
+describe('tickers and display names', () => {
+  it('checks tickers and display names as the rules do (the node is the authority)', () => {
+    for (const good of ['GOLD', 'AB', 'BTC2', 'ABCDEFGHIJKL', '00']) expect(isTicker(good), good).toBe(true);
+    for (const bad of ['G', 'ABCDEFGHIJKLM', 'gold', 'GO-LD', 'GO LD', 'ÄB']) expect(isTicker(bad), bad).toBe(false);
+    expect(tickerProblem('gold')).toBe('');
+    expect(tickerProblem('Gold Bar')).toMatch(/A to Z and digits/);
+    expect(tickerProblem('G')).toMatch(/at least 2/);
+    expect(tickerProblem('chn')).toMatch(/coin of the chain/);
+    expect(displayNameProblem('Gold Bar Token, 1 g')).toBe('');
+    expect(displayNameProblem('金条 Gold')).toBe('');
+    expect(displayNameProblem('Café 🪙')).toBe('');
+    for (const [bad, why] of [
+      ['GOLD\u202eDLOG', 'U+202E'],
+      ['GO\u200bLD', 'U+200B'],
+      ['GO\u200dLD', 'U+200D'],
+      ['\ufeffGOLD', 'U+FEFF'],
+      ['Gold\u00a0Bar', 'U+00A0'],
+      ['Gold\n', 'U+000A'],
+      [' Gold', 'space'],
+      ['Cafe\u0301', 'NFC'],
+      ['\u212b', 'NFC'],
+      ['x'.repeat(65), '64 bytes'],
+      ['é'.repeat(33), '64 bytes'],
+    ] as const) {
+      expect(displayNameProblem(bad), JSON.stringify(bad)).toContain(why);
+    }
+    // What is typed decomposed is sent composed.
+    expect(normalizeDisplayName('Cafe\u0301')).toBe('Café');
+    expect(assetTitle('GOLD', 'Gold Bar Token, 1 g', '1739-0029')).toBe('GOLD · Gold Bar Token, 1 g · #1739-0029');
+    expect(assetTitle('gold bar', undefined, '1739-0029')).toBe('gold bar · #1739-0029');
+  });
+
+  it('Register new asset: a ticker uppercased as typed, a display name, both registered with the reservation', async () => {
+    tickersOn = true;
+    render(Issue);
+    render(DialogHost);
+    await waitFor(() => expect(ba.info?.tickers_active).toBe(true));
+    const ticker = (await screen.findByLabelText('Ticker')) as HTMLInputElement;
+    expect(ticker.maxLength).toBe(12);
+    await fireEvent.input(ticker, { target: { value: 'gold bar' } });
+    expect(screen.getByText(/A to Z and digits 0 to 9 only/)).toBeTruthy();
+    await fireEvent.input(ticker, { target: { value: 'copper' } });
+    expect(ticker.value).toBe('COPPER');
+    await waitFor(() => expect(screen.getByText(/is free/)).toBeTruthy());
+    const display = screen.getByLabelText(/Display name/) as HTMLInputElement;
+    await fireEvent.input(display, { target: { value: 'Copper\u202e' } });
+    expect(screen.getByText(/U\+202E/)).toBeTruthy();
+    expect((screen.getByRole('button', { name: 'Next' }) as HTMLButtonElement).disabled).toBe(true);
+    await fireEvent.input(display, { target: { value: 'Copper, by the gram' } });
+    expect((screen.getByRole('button', { name: 'Next' }) as HTMLButtonElement).disabled).toBe(false);
+    await fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    await fireEvent.input(document.querySelector('#issue-supply')!, { target: { value: '5' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    // No private name from ticker_height: the ticker is published.
+    expect(screen.queryByText(/Publish the name/)).toBeNull();
+    await fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    const review = await screen.findByRole('heading', { name: 'Review' });
+    const lines = review.parentElement!.textContent ?? '';
+    expect(lines).toContain('TickerCOPPER');
+    expect(lines).toContain('Display nameCopper, by the gram');
+    await fireEvent.click(screen.getByRole('button', { name: /Reserve and issue/ }));
+    await waitFor(() => expect(called('reserveasset')[0]?.params).toEqual(['COPPER']));
+    expect(asked).toEqual(['reserveasset+registerasset']);
+    mine.reservations.push({ txid: id('6'), name: 'COPPER', taken: false, height: 21, registers_from: 23, wait: 0 });
+    await refreshBitAssets();
+    await waitFor(() => expect(called('registerasset').length).toBe(1));
+    // The display name after the logo (none: null), as registerasset takes them.
+    expect(called('registerasset')[0].params).toEqual(['COPPER', '5', 2, {}, true, null, 'Copper, by the gram']);
+    expect(asked).toEqual(['reserveasset+registerasset']);
+  });
+
+  it('My assets: the controller adds, changes and removes the display name', async () => {
+    tickersOn = true;
+    render(MyAssets);
+    render(DialogHost);
+    await loaded();
+    const panel = await screen.findByRole('region', { name: 'Manage GOLD' });
+    await waitFor(() => expect(within(panel).getByRole('button', { name: 'Add a display name' })).toBeTruthy());
+    await fireEvent.click(within(panel).getByRole('button', { name: 'Add a display name' }));
+    const input = within(panel).getByLabelText('Display name') as HTMLInputElement;
+    await fireEvent.input(input, { target: { value: 'Gold\u200bBar' } });
+    expect((within(panel).getByRole('button', { name: 'Save the display name' }) as HTMLButtonElement).disabled).toBe(true);
+    await fireEvent.input(input, { target: { value: 'Gold Bar Token, 1 g' } });
+    await fireEvent.click(within(panel).getByRole('button', { name: 'Save the display name' }));
+    await waitFor(() => expect(called('setassetdisplayname')[0]?.params).toEqual([assetArg(GOLD), 'Gold Bar Token, 1 g']));
+    expect(asked).toContain('setassetdisplayname');
+    // Once listed with it: shown after the ticker, and it can be removed.
+    assets[0] = { ...assets[0], display_name: 'Gold Bar Token, 1 g' };
+    await refreshBitAssets();
+    await waitFor(() => expect(within(panel).getByRole('button', { name: 'Change its display name' })).toBeTruthy());
+    expect(within(panel).getByRole('heading', { level: 2 }).textContent).toContain('Gold Bar Token, 1 g');
+    await fireEvent.click(within(panel).getByRole('button', { name: 'Change its display name' }));
+    await fireEvent.click(await within(panel).findByRole('button', { name: 'Remove it' }));
+    await waitFor(() => expect(called('setassetdisplayname')[1]?.params).toEqual([assetArg(GOLD), '']));
+  });
+
+  it('Your assets on the Home and the Overview: one compact row each, ticker, display name, balance, value; the crown inline', async () => {
+    assets[0] = { ...assets[0], display_name: 'Gold Bar Token, 1 g' };
+    mine.assets.push({ asset: PEBBLES, label: 'PEBBLES', decimals: 0, balance: 0, pending: 0, outputs: 0, control: true, control_pending: false, supply: 0, fixed: false });
+    for (const which of ['home', 'overview']) {
+      const shown = which === 'home' ? render(LocalCards) : render(LocalOverview);
+      await loaded();
+      const held = await waitFor(() => screen.getByTestId('held-assets'));
+      const rows = await waitFor(() => {
+        const r = [...held.querySelectorAll<HTMLElement>('[data-testid="held-row"]')];
+        if (!r.length) throw new Error('no rows');
+        return r;
+      });
+      const cells = [...rows[0].querySelectorAll('td')].map((c) => c.textContent?.trim() ?? '');
+      expect(cells[0]).toContain('GOLD');
+      expect(cells[0]).toContain('#1739-0029');
+      expect(cells[1]).toBe('Gold Bar Token, 1 g');
+      expect(cells[2]).toBe('200.00');
+      expect(cells[3]).toBe('20');
+      // The crown beside the logo, in the same cell, with its tooltip; SILVER is not controlled, and has no price.
+      expect(rows[0].querySelector('.c-asset [title="You control this asset"]')).not.toBeNull();
+      expect(rows[1].querySelector('[title="You control this asset"]')).toBeNull();
+      expect(rows[1].querySelector('.c-value')?.textContent).toBe('–');
+      // Only controlled: an inline chip with its crown.
+      const only = within(held).getByTestId('controlled-only');
+      expect(only.querySelector('.chip [title="You control this asset"]')).not.toBeNull();
+      expect(only.textContent).toContain('PEBBLES');
+      shown.unmount();
+    }
+  });
+
+  it('a picker and the lists show the ticker first, the display name after it, and find an asset by its display name', async () => {
+    assets[0] = { ...assets[0], display_name: 'Gold Bar Token, 1 g' };
+    render(Assets);
+    await loaded();
+    const grid = await screen.findByRole('list', { name: 'Assets' });
+    await waitFor(() => expect(grid.textContent).toMatch(/GOLD\s*·\s*Gold Bar Token, 1 g\s*#1739-0029/));
   });
 });

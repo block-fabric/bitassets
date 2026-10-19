@@ -10,6 +10,7 @@
   import AssetBadge from './AssetBadge.svelte';
   import { pickerRows, type PickChip, type PickChoice, type PickRow } from './picker';
   import { isFavourite, loadPicks, notePicked, picks, toggleFavourite } from './picks.svelte';
+  import { displayNameOf } from './store.svelte';
 
   let {
     id,
@@ -32,7 +33,9 @@
     chips?: readonly PickChip[];
   } = $props();
   let chip = $state('');
-  const filtered = $derived(chip ? choices.filter((c) => chips.find((x) => x.id === chip)?.test(c) ?? true) : choices);
+  // Each with its display name (the store knows it), matched after the name.
+  const named = $derived(choices.map((c) => (c.display !== undefined ? c : { ...c, display: displayNameOf(c.id) })));
+  const filtered = $derived(chip ? named.filter((c) => chips.find((x) => x.id === chip)?.test(c) ?? true) : named);
 
   /** The height of a row, in pixels (the list draws only the rows in view). */
   const ROW = 44;
@@ -209,7 +212,8 @@
                   <AssetBadge id={c.id} label={c.label} size="s" showLabel={false} />
                   <span class="name">
                     {#if c.seq}<span class="seq" translate="no">#{c.seq}</span>{/if}
-                    <SafeText text={c.label} />
+                    <SafeText class="ticker" text={c.label} />
+                    {#if c.display}<SafeText class="display" text={c.display} />{/if}
                   </span>
                   {#if c.warn}<span class="warn" title={c.warn}><Icon name="alert" size={14} label={c.warn} /></span>{/if}
                   {#if c.held}<span class="held" translate="no">{c.held}</span>{/if}
@@ -264,6 +268,14 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .name :global(.ticker) {
+    font-weight: 600;
+  }
+  .name :global(.display) {
+    margin-left: 0.4rem;
+    color: var(--text-muted);
+    font-weight: 400;
   }
   .seq {
     margin-right: 0.4rem;

@@ -35,6 +35,8 @@ export interface PendingIssue {
   public: boolean;
   /** Its logo (base64 of a PNG or JPEG the rules take: ba/logo.ts), registered with it; none if absent. */
   logo?: string;
+  /** Its display name (from ticker_height), registered with it; none if absent. Text of the user, in NFC. */
+  display_name?: string;
   /** When it was reserved (seconds), and the reservation's transaction. */
   time: number;
   reservation: string;
@@ -231,7 +233,7 @@ export function sanitizeJournal(raw: unknown): Journal {
   if (Array.isArray(r.pending)) {
     j.pending = r.pending
       .filter((p) => p && str(p.wallet) && str(p.name) && str(p.supply) && typeof p.decimals === 'number' && str(p.asset))
-      .map((p) => ({ ...p, logo: str(p.logo) && p.logo.length <= MAX_LOGO_BASE64 && /^[A-Za-z0-9+/]+={0,2}$/.test(p.logo) ? p.logo : undefined, data: p.data && typeof p.data === 'object' ? p.data : {}, public: p.public !== false, reservation: str(p.reservation) ? p.reservation : '', time: typeof p.time === 'number' ? p.time : 0, registration: str(p.registration) ? p.registration : undefined, registeredAt: typeof p.registeredAt === 'number' ? p.registeredAt : undefined, needsConfirm: undefined }))
+      .map((p) => ({ ...p, display_name: str(p.display_name) && p.display_name.length > 0 && p.display_name.length <= 64 ? p.display_name : undefined, logo: str(p.logo) && p.logo.length <= MAX_LOGO_BASE64 && /^[A-Za-z0-9+/]+={0,2}$/.test(p.logo) ? p.logo : undefined, data: p.data && typeof p.data === 'object' ? p.data : {}, public: p.public !== false, reservation: str(p.reservation) ? p.reservation : '', time: typeof p.time === 'number' ? p.time : 0, registration: str(p.registration) ? p.registration : undefined, registeredAt: typeof p.registeredAt === 'number' ? p.registeredAt : undefined, needsConfirm: undefined }))
       .slice(-MAX_PENDING);
   }
   if (r.prices && typeof r.prices === 'object') {
@@ -325,7 +327,8 @@ export function dropPending(wallet: string, name: string): void {
 
 /** The parameters of registerasset for an asset being created. */
 export function registerParams(p: PendingIssue): unknown[] {
-  // The logo last, and only with one: the parameters a registration without one always had.
+  // The logo, then the display name, and only with one: the parameters a registration without them always had.
+  if (p.display_name) return [p.name, p.supply, p.decimals, p.data, p.public, p.logo ?? null, p.display_name];
   return p.logo ? [p.name, p.supply, p.decimals, p.data, p.public, p.logo] : [p.name, p.supply, p.decimals, p.data, p.public];
 }
 
@@ -732,6 +735,17 @@ export function holdingOf(id: string): Holding | undefined {
     heldMapOf = list;
   }
   return heldMap.get(id);
+}
+
+/** The display name of an asset, by id, if it has one (among those read or found). Text of the chain. */
+export function displayNameOf(id: string): string | undefined {
+  if (/^0+$/.test(id)) return undefined;
+  return assetById(id)?.display_name || undefined;
+}
+
+/** Whether the chain has tickers and display names from the next block (getbitassetsinfo; older nodes: never). */
+export function tickersActive(): boolean {
+  return ba.info?.tickers_active === true;
 }
 
 /** The decimals of an asset, by id (CHN: 8; an asset not listed: 0). */

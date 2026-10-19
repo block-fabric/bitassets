@@ -10,6 +10,7 @@
 #include <webui/local.h>
 
 #include <bitassets/logo.h>
+#include <bitassets/state.h>
 #include <common/args.h>
 #include <crypto/sha256.h>
 #include <util/strencodings.h>
@@ -20,6 +21,8 @@
 #include <util/fs.h>
 #include <util/fs_helpers.h>
 
+#include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <fstream>
 #include <list>
@@ -258,7 +261,9 @@ confirm::Reveal RegisterAfterReserve()
     reveal.second_vsize = [](const UniValue& params) {
         // Its logo, if any, goes whole into the marker: a byte for a virtual byte.
         const int64_t logo{params.size() > 5 && params[5].isStr() ? static_cast<int64_t>(params[5].get_str().size() * 3 / 4) : 0};
-        return int64_t{350} + (params.size() > 3 ? static_cast<int64_t>(params[3].write().size()) : 0) + logo;
+        // And its display name (at most 64 bytes, and the logo's length when it has none).
+        const int64_t display{params.size() > 6 && params[6].isStr() ? static_cast<int64_t>(params[6].get_str().size()) + 2 : 0};
+        return int64_t{350} + (params.size() > 3 ? static_cast<int64_t>(params[3].write().size()) : 0) + logo + display;
     };
     reveal.when = confirm::AfterDepth("getbitassetsinfo", "reveal_depth");
     return reveal;
@@ -300,6 +305,59 @@ std::function<std::optional<Window::ConfirmDialog>(const confirm::Call&)> WithLo
 }
 } // namespace
 
+namespace {
+/** Whether text is plain ASCII (a display name beyond it is told: the ticker is what tells assets apart). */
+bool PlainAscii(const std::string& text)
+{
+    return std::all_of(text.begin(), text.end(), [](char c) { return static_cast<unsigned char>(c) >= 0x20 && static_cast<unsigned char>(c) < 0x7f; });
+}
+
+/**
+ * A describer that shows the names of an asset as rows of their own after the command: the name (`name_index`; "Ticker"
+ * when it is one, from ticker_height every new name is) and the display name (`display_index`; "removed" when empty, if
+ * `remove_allowed`), the other parameters as `generic` shows them. SIZE_MAX: no such parameter.
+ */
+std::function<std::optional<Window::ConfirmDialog>(const confirm::Call&)> WithNames(std::function<std::optional<Window::ConfirmDialog>(const confirm::Call&)> generic, size_t name_index, size_t display_index, bool remove_allowed)
+{
+    return [=](const confirm::Call& call) -> std::optional<Window::ConfirmDialog> {
+        const UniValue name{name_index == SIZE_MAX ? UniValue{} : call.Arg(name_index)};
+        const UniValue display{display_index == SIZE_MAX ? UniValue{} : call.Arg(display_index)};
+        UniValue others{call.params};
+        if (others.isArray()) {
+            UniValue trimmed{UniValue::VARR};
+            for (size_t i{0}; i < others.size(); ++i) trimmed.push_back(i == name_index || i == display_index ? UniValue{} : others[i]);
+            others = trimmed;
+        }
+        confirm::Call shown{call.node, call.wallet, call.method, others, call.fee_for};
+        auto dialog{generic(shown)};
+        if (!dialog) return dialog;
+        std::vector<dialog::Row> rows;
+        if (name.isStr()) {
+            const std::string& text{name.get_str()};
+            rows.push_back(confirm::Text(bitassets::IsTicker(text) ? "Ticker" : "Name", text));
+        }
+        if (display.isStr()) {
+            const std::string& text{display.get_str()};
+            if (text.empty()) {
+                if (remove_allowed) rows.push_back(confirm::Text("Display name", "removed: the asset is shown by its ticker alone"));
+            } else {
+                if (const auto why{bitassets::WhyNotDisplayName(text)}) throw HostError(BRIDGE_INVALID_REQUEST, strprintf("The rules refuse this display name: %s", *why));
+                rows.push_back(confirm::Text("Display name", text));
+                if (!PlainAscii(text)) rows.push_back(confirm::Note("The display name holds characters beyond plain ASCII. Display names are not unique: the ticker and the number tell assets apart."));
+            }
+        }
+        if (call.method == "setassetdisplayname" && call.fee_for && display.isStr()) {
+            // An update: its inputs and outputs, and the text.
+            if (const auto fee{call.fee_for(static_cast<int64_t>(display.get_str().size()) + 260)}) rows.push_back(confirm::Amount("Network fee, about", *fee));
+        }
+        // After the command (the first rows: the wallet, then "Command").
+        auto at{std::find_if(dialog->rows.begin(), dialog->rows.end(), [](const dialog::Row& r) { return r.label == "Command"; })};
+        dialog->rows.insert(at == dialog->rows.end() ? dialog->rows.end() : at + 1, rows.begin(), rows.end());
+        return dialog;
+    };
+}
+} // namespace
+
 std::map<std::string, confirm::Method> ConfirmedRpcMethods()
 {
     // What the pages do that pays or signs: never the page's to call by itself. The host shows each call on the desktop, its
@@ -308,9 +366,10 @@ std::map<std::string, confirm::Method> ConfirmedRpcMethods()
     return {
         // Reserved and registered in one question: the registration, exactly as shown, is sent by the app without asking
         // again once the reservation is deep enough (confirm::Reveal).
-        {"reserveasset", {confirm::Method::Kind::SPEND, Bridge::Thread::LONG, confirm::Generic("Reserve an asset", "Reserve", "The wallet pays for a reservation of an asset name."), /*fee_unknown=*/true, 1, false, RegisterAfterReserve()}},
-        {"registerasset", {confirm::Method::Kind::SPEND, Bridge::Thread::LONG, WithLogo(confirm::Generic("Register an asset", "Register", "The wallet registers an asset it reserved, with the supply shown."), 5, false), /*fee_unknown=*/true}},
+        {"reserveasset", {confirm::Method::Kind::SPEND, Bridge::Thread::LONG, WithNames(confirm::Generic("Reserve an asset", "Reserve", "The wallet pays for a reservation of an asset name."), 0, SIZE_MAX, false), /*fee_unknown=*/true, 1, false, RegisterAfterReserve()}},
+        {"registerasset", {confirm::Method::Kind::SPEND, Bridge::Thread::LONG, WithNames(WithLogo(confirm::Generic("Register an asset", "Register", "The wallet registers an asset it reserved, with the supply shown."), 5, false), 0, 6, false), /*fee_unknown=*/true}},
         {"setassetlogo", {confirm::Method::Kind::SPEND, Bridge::Thread::LONG, WithLogo(confirm::Generic("Set the logo of an asset", "Set the logo", "The wallet puts this logo on the chain for an asset it controls, in place of the one before: everyone sees it where the asset is shown."), 1, true), /*fee_unknown=*/false, 2}},
+        {"setassetdisplayname", {confirm::Method::Kind::SPEND, Bridge::Thread::LONG, WithNames(confirm::Generic("Set the display name of an asset", "Set the display name", "The wallet puts this display name on the chain for an asset it controls, in place of the one before: everyone sees it after the asset's ticker. Display names are not unique."), SIZE_MAX, 1, true), /*fee_unknown=*/false, 2}},
         {"releaseassetreservation", {confirm::Method::Kind::SPEND, Bridge::Thread::LONG, confirm::Generic("Release a reservation", "Release", "The wallet gives up a reservation of an asset name."), /*fee_unknown=*/true}},
         {"sendasset", {confirm::Method::Kind::SPEND, Bridge::Thread::LONG, confirm::Generic("Send an asset", "Send", "The wallet sends units of an asset to the address shown.", {"address"}, {"amount"}), /*fee_unknown=*/true}},
         {"mintasset", {confirm::Method::Kind::SPEND, Bridge::Thread::LONG, confirm::Generic("Mint an asset", "Mint", "The wallet mints more units of an asset it controls.", {"address"}, {"amount"}), /*fee_unknown=*/true}},

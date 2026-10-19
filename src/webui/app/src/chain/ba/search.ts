@@ -99,7 +99,7 @@ export function filterAssets(list: readonly Asset[], f: SearchFilters, pooled: (
     if (f.has_pool && !pooled(a.asset)) return false;
     if (f.has_logo && !a.logo) return false;
     if (f.min_supply !== undefined && approx(a.supply) < f.min_supply) return false;
-    if (ws.length && ws.some((w) => a.label.toLowerCase().includes(w))) return false;
+    if (ws.length && ws.some((w) => a.label.toLowerCase().includes(w) || (a.display_name ?? '').toLowerCase().includes(w))) return false;
     return true;
   });
 }
@@ -123,7 +123,7 @@ export async function searchAssets(q: SearchQuery, pooled: (id: string) => boole
     // The newest the store keeps whose description or number holds the text too (listassets matches names only).
     const t = text.toLowerCase();
     const have = new Set(found.map((a) => a.asset));
-    const local = t ? ba.assets.filter((a) => !have.has(a.asset) && ((a.data?.info ?? '').toLowerCase().includes(t) || a.seq === text || a.asset.startsWith(t.replace(/^0x/, '')))) : [];
+    const local = t ? ba.assets.filter((a) => !have.has(a.asset) && ((a.data?.info ?? '').toLowerCase().includes(t) || (a.display_name ?? '').toLowerCase().includes(t) || a.seq === text || a.asset.startsWith(t.replace(/^0x/, '')))) : [];
     return sortAssets(filterAssets([...found, ...local], q.filters, pooled), q.sort);
   });
   noteKnownAssets(page.items);
@@ -138,7 +138,7 @@ export async function searchAssets(q: SearchQuery, pooled: (id: string) => boole
 export async function searchMyAssets(q: SearchQuery, wallet: string, own: () => Asset[], pooled: (id: string) => boolean = () => true): Promise<SearchPage<Asset>> {
   const page = await search<Asset>('searchmyassets', (p) => rpc.raw<unknown>('searchmyassets', p, { wallet }), ['assets', 'results', 'items'], q, async () => {
     const t = q.query.trim().toLowerCase();
-    const list = own().filter((a) => !t || a.label.toLowerCase().includes(t) || a.seq === q.query.trim());
+    const list = own().filter((a) => !t || a.label.toLowerCase().includes(t) || (a.display_name ?? '').toLowerCase().includes(t) || a.seq === q.query.trim());
     return sortAssets(filterAssets(list, q.filters, pooled), q.sort);
   });
   noteKnownAssets(page.items);

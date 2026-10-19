@@ -111,6 +111,25 @@ BOOST_AUTO_TEST_CASE(logos_as_the_host_shows_them)
     BOOST_CHECK(methods.contains("setassetlogo") && methods.at("setassetlogo").kind == webui::confirm::Method::Kind::SPEND);
     BOOST_CHECK(webui::local::RpcMethods().contains("listassettransactions"));
     BOOST_CHECK(!webui::local::RpcMethods().contains("setassetlogo"));
+    // A display name pays too, with its two parameters (an empty one removes it), never from the page alone.
+    BOOST_REQUIRE(methods.contains("setassetdisplayname"));
+    BOOST_CHECK(methods.at("setassetdisplayname").kind == webui::confirm::Method::Kind::SPEND);
+    BOOST_CHECK_EQUAL(methods.at("setassetdisplayname").required, 2U);
+    BOOST_CHECK(!webui::local::RpcMethods().contains("setassetdisplayname"));
+    // The registration sent after a reservation counts its display name in the fee it may pay.
+    const auto& reveal{methods.at("reserveasset").reveal};
+    BOOST_REQUIRE(reveal && reveal->second_vsize);
+    UniValue plain{UniValue::VARR}, named{UniValue::VARR};
+    for (UniValue* p : {&plain, &named}) {
+        p->push_back("GOLD");
+        p->push_back("1000");
+        p->push_back(2);
+        p->push_back(UniValue{UniValue::VOBJ});
+        p->push_back(true);
+    }
+    named.push_back(UniValue{});
+    named.push_back(std::string(64, 'g'));
+    BOOST_CHECK_GE(reveal->second_vsize(named), reveal->second_vsize(plain) + 64);
 }
 
 BOOST_AUTO_TEST_CASE(logo_cache_counts_what_it_keeps)

@@ -45,6 +45,8 @@ export function categoryText(e: Pick<AssetTx, 'category' | 'sign'>): string {
       return t('Auction collect');
     case 'logo':
       return t('Logo set');
+    case 'display_name':
+      return t('Display name set');
     case 'update':
       return t('Asset data');
     case 'control':
@@ -71,20 +73,44 @@ export function signedAmount(e: AssetTx): string {
  * outputs are not listed one by one (a mint pays the minted coins and the control coin to the wallet, a swap its result
  * and its change): `self` says the wallet is on that side, the parties are the others (user feedback 2026-10-19).
  */
-export function counterparty(e: AssetTx): { dir: 'to' | 'from' | ''; parties: AssetTx['to']; self: boolean } {
+export function counterparty(e: AssetTx): { dir: 'to' | 'from' | ''; parties: AssetTx['to']; self: boolean; own: AssetTx['to'] } {
   const side = (list: AssetTx['to']) => {
     const seen = new Set<string>();
     const others = list.filter((p) => !p.mine && !seen.has(p.address) && (seen.add(p.address), true));
-    return { parties: others, self: list.some((p) => p.mine) };
+    const own = list.filter((p) => p.mine && !seen.has(p.address) && (seen.add(p.address), true));
+    return { parties: others, self: own.length > 0, own };
   };
   if (e.category === 'receive' || (e.sign > 0 && e.from.length)) return { dir: 'from', ...side(e.from) };
   if (e.sign < 0 || e.category === 'mint' || e.category === 'register') {
     const to = side(e.to);
     // What went out to others: the wallet's own outputs beside them are its change, not a destination.
-    if (to.parties.length) return { dir: 'to', parties: to.parties, self: false };
-    return to.self ? { dir: 'to', parties: [], self: true } : { dir: '', parties: [], self: false };
+    if (to.parties.length) return { dir: 'to', parties: to.parties, self: false, own: [] };
+    return to.self ? { dir: 'to', parties: [], self: true, own: to.own } : { dir: '', parties: [], self: false, own: [] };
   }
-  return { dir: '', parties: [], self: false };
+  return { dir: '', parties: [], self: false, own: [] };
+}
+
+/** An address shortened in the middle, its start and end kept ("tba1qxy…k9a2"), whole when short. */
+export function middleAddress(address: string, keep = 6): string {
+  return address.length > keep * 2 + 3 ? `${address.slice(0, keep)}…${address.slice(-keep)}` : address;
+}
+
+/** The roles of the wallet's own outputs in a move, as the details list them: what each address got of the asset, its CHN change. */
+export function ownAddresses(e: AssetTx): { address: string; roles: string[] }[] {
+  const out = new Map<string, Set<string>>();
+  const add = (address: string, role: string) => {
+    if (!address || address === 'unknown') return;
+    const set = out.get(address) ?? new Set<string>();
+    set.add(role);
+    out.set(address, set);
+  };
+  for (const p of e.to) {
+    if (!p.mine) continue;
+    if (p.roles?.length) for (const r of p.roles) add(p.address, r === 'control coin' ? t('control coin') : t('asset'));
+    else add(p.address, t('asset'));
+  }
+  for (const a of e.change ?? []) add(a, t('change'));
+  return [...out].map(([address, roles]) => ({ address, roles: [...roles] }));
 }
 
 /** An address in a few characters: its start and its end ("tba1q…a9x"), whole when short. */
@@ -127,7 +153,7 @@ function makeChainTx(moves: AssetTx[]): ChainTx | undefined {
   const parties = (e: AssetTx) => counterparty(e).parties.map((p) => p.address);
   return {
     type: categoryText(moves[0]),
-    search: moves.map((e) => [e.label ?? '', e.seq ? `#${e.seq}` : '', e.asset ?? '', categoryText(e), ...parties(e)].join(' ')).join(' '),
+    search: moves.map((e) => [e.label ?? '', e.display_name ?? '', e.seq ? `#${e.seq}` : '', e.asset ?? '', categoryText(e), ...parties(e)].join(' ')).join(' '),
     csv: [
       moves.map((e) => e.label ?? '').join('; '),
       moves.map((e) => e.seq ?? '').join('; '),
@@ -144,6 +170,15 @@ function makeChainTx(moves: AssetTx[]): ChainTx | undefined {
 export function chainTxHidden(txid: string): boolean {
   const moves = assetMovesOf(txid);
   return moves.length > 0 && moves.every((e) => !!e.asset && hiddenAsset(e.asset, e.label));
+}
+
+/**
+ * The CHN side of an asset operation in its details (user feedback 2026-10-19): no Debit or Credit of nothing, the output
+ * index (of the CHN record, meaningless for the asset) under "Raw", and in Simple mode only the status and the fee.
+ */
+export function chainTxDetails(txid: string): { hideZero: boolean; raw: Record<string, string>; simpleRows?: string[] } | undefined {
+  if (!assetMovesOf(txid).length) return undefined;
+  return { hideZero: true, raw: { 'Output index': 'Output index of the CHN record' }, simpleRows: ['Status', 'Date', 'Transaction fee'] };
 }
 
 /** What the notice of an asset received offers (Ignore this asset) and warns of (a name like one the wallet holds). */

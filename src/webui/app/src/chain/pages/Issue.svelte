@@ -20,8 +20,8 @@
   import AssetBadge from '../ba/AssetBadge.svelte';
   import UnitsInput from '../ba/UnitsInput.svelte';
   import LogoPicker, { type PickedLogo } from '../ba/LogoPicker.svelte';
-  import { amountParam, DATA_FIELDS, hashName, dataProblems, dataToSet, formatUnits, MAX_AMOUNT, MAX_DECIMALS, MAX_INFO, nameProblem, smallestAmount, type DataField } from '../ba/model';
-  import { ba, notePending, pendingOf, pendingOpOf, recentlyRegistered, refreshBitAssets, registerParams, startBitAssets, type PendingIssue } from '../ba/store.svelte';
+  import { amountParam, DATA_FIELDS, displayNameProblem, hashName, dataProblems, dataToSet, formatUnits, MAX_AMOUNT, MAX_DECIMALS, MAX_DISPLAY_NAME_BYTES, MAX_INFO, MAX_TICKER, MIN_TICKER, nameProblem, normalizeDisplayName, smallestAmount, tickerOf, tickerProblem, type DataField } from '../ba/model';
+  import { ba, tickersActive, notePending, pendingOf, pendingOpOf, recentlyRegistered, refreshBitAssets, registerParams, startBitAssets, type PendingIssue } from '../ba/store.svelte';
   import Term from '../../components/Term.svelte';
   import { simpleMode } from '../../lib/uimode.svelte';
   import '../ba/terms';
@@ -47,10 +47,19 @@
   ];
   let step = $state<Step>('name');
 
-  // --- The name ---
+  // --- The name: from ticker_height a ticker (2 to 12 of A-Z, 0-9, uppercased as typed), and a display name ---
+  const tickers = $derived(tickersActive());
   let name = $state('');
   let availability = $state<'' | 'checking' | 'free' | 'taken' | 'mine'>('');
-  const problem = $derived(nameProblem(name));
+  const problem = $derived(tickers ? tickerProblem(name) || nameProblem(name) : nameProblem(name));
+  function typed(text: string) {
+    name = tickers ? tickerOf(text) : text;
+  }
+  // Optional, not unique; sent in NFC (the rules take NFC only).
+  let displayName = $state('');
+  const display = $derived(normalizeDisplayName(displayName));
+  const displayProblem = $derived(tickers ? displayNameProblem(display) : '');
+  const displayBytes = $derived(new TextEncoder().encode(display).length);
   let check = 0;
   $effect(() => {
     const text = name;
@@ -127,7 +136,7 @@
   const spacing = $derived(blockSeconds(node.recent, app.info?.blockSpacing ?? 600));
 
   const canNext = $derived.by(() => {
-    if (step === 'name') return !!name && !problem && availability === 'free';
+    if (step === 'name') return !!name && !problem && availability === 'free' && !displayProblem;
     if (step === 'supply') return supplyValue !== null && Number.isInteger(decimals) && decimals >= 0 && decimals <= MAX_DECIMALS;
     if (step === 'about') return Object.keys(problems).length === 0;
     return true;
@@ -164,7 +173,8 @@
         supply: amountParam(supplyValue, decimals),
         decimals,
         data: dataToSet(fields),
-        public: published,
+        public: tickers ? true : published,
+        ...(tickers && display ? { display_name: display } : {}),
         time: Math.floor(Date.now() / 1000),
         reservation: '',
         ...(logo && logosSoon ? { logo: logo.base64 } : {}),
@@ -197,6 +207,7 @@
 
   function again() {
     name = '';
+    displayName = '';
     supplyText = '';
     decimals = 2;
     fields = { info: '', commitment: '', ipv4: '', ipv6: '', encryptionkey: '', signingkey: '' };
@@ -233,16 +244,25 @@
         {#if step === 'name'}
           <form class="ba-form" onsubmit={(e) => { e.preventDefault(); next(); }}>
             <div class="field">
-              <label for="issue-name">Its name</label>
-              <input id="issue-name" class="big" type="text" maxlength="64" placeholder="Such as GOLD" autocomplete="off" spellcheck="false" bind:value={name} aria-invalid={problem ? 'true' : undefined} />
+              <label for="issue-name">{tickers ? 'Ticker' : 'Its name'}</label>
+              <input id="issue-name" class="big" class:ticker={tickers} type="text" maxlength={tickers ? MAX_TICKER : 64} placeholder="Such as GOLD" autocomplete="off" autocapitalize="characters" spellcheck="false" value={name} oninput={(e) => typed(e.currentTarget.value)} aria-invalid={problem ? 'true' : undefined} aria-describedby="issue-name-hint" />
               {#if problem}<span class="error">{t(problem)}</span>
               {:else if availability === 'checking'}<span class="hint">Checking…</span>
               {:else if availability === 'free'}<span class="hint ba-good"><Icon name="check" size={14} /> <SafeText text={name} /> is free</span>
               {:else if availability === 'taken'}<span class="error"><SafeText text={name} /> is taken</span>
               {:else if availability === 'mine'}<span class="error">This wallet is creating <SafeText text={name} /> already: see My assets.</span>
-              {:else}<span class="hint">1 to 64 plain characters (ASCII), no space at either end; not CHN, not "0x…", not like a number such as 1739-0029.</span>{/if}
+              {:else if tickers}<span class="hint" id="issue-name-hint"><span translate="no">{MIN_TICKER}–{MAX_TICKER}</span> letters A–Z and digits 0–9, such as GOLD or BTC2; unique, first come first served.</span>
+              {:else}<span class="hint" id="issue-name-hint">1 to 64 plain characters (ASCII), no space at either end; not CHN, not "0x…", not like a number such as 1739-0029.</span>{/if}
             </div>
-            <p class="ba-help">The asset is known by the hash of its name. Nobody can take a name between your two steps: the reservation hides it.</p>
+            {#if tickers}
+              <div class="field">
+                <label for="issue-display">Display name <span class="faint">(optional)</span></label>
+                <input id="issue-display" type="text" placeholder="Such as Gold Bar Token, 1 g" autocomplete="off" bind:value={displayName} aria-invalid={displayProblem ? 'true' : undefined} />
+                {#if displayProblem}<span class="error">{t(displayProblem)}</span>
+                {:else}<span class="hint"><span translate="no">{displayBytes} / {MAX_DISPLAY_NAME_BYTES}</span> bytes. Shown after the ticker; not unique: other assets may have the same. The controller can change it later.</span>{/if}
+              </div>
+            {/if}
+            <p class="ba-help">{tickers ? 'The asset is known by its ticker (the hash of it).' : 'The asset is known by the hash of its name.'} Nobody can take a name between your two steps: the reservation hides it.</p>
             <div class="row"><button type="submit" class="btn primary" disabled={!canNext}>Next</button></div>
           </form>
         {:else if step === 'supply'}
@@ -278,13 +298,15 @@
                 <span class="hint">This network has no logos of assets yet.</span>
               {/if}
             </div>
-            {#if simple && !advanced}
+            {#if tickers}
+              <p class="ba-help">Its ticker is listed, so that anyone can find it.</p>
+            {:else if simple && !advanced}
               <p class="ba-help">Its name is listed, so that anyone can find it.</p>
             {:else}
             <label class="check"><input type="checkbox" bind:checked={published} /> <span>Publish the name, so that it is listed and found by name</span></label>
             {/if}
-            {#if !published}<p class="ba-help">A private name: only its hash and number are on the chain. Whoever knows the name finds it; the list of assets shows its hash.</p>{/if}
-            <button type="button" class="btn ghost small more" aria-expanded={advanced} onclick={() => (advanced = !advanced)}><Icon name={advanced ? 'chevron' : 'chevron-right'} size={14} /> {#if simple}More options: a private name, the issuer's commitment, addresses and keys{:else}The issuer's commitment, addresses and keys{/if}</button>
+            {#if !published && !tickers}<p class="ba-help">A private name: only its hash and number are on the chain. Whoever knows the name finds it; the list of assets shows its hash.</p>{/if}
+            <button type="button" class="btn ghost small more" aria-expanded={advanced} onclick={() => (advanced = !advanced)}><Icon name={advanced ? 'chevron' : 'chevron-right'} size={14} /> {#if simple && !tickers}More options: a private name, the issuer's commitment, addresses and keys{:else if simple}More options: the issuer's commitment, addresses and keys{:else}The issuer's commitment, addresses and keys{/if}</button>
             {#if advanced}
               {#each DATA_FIELDS.filter((f) => f !== 'info') as f (f)}
                 <div class="field">
@@ -300,10 +322,11 @@
           <div class="ba-form">
             <h2>Review</h2>
             <dl class="ba-lines">
-              <dt>Name</dt><dd><SafeText text={name} /></dd>
+              <dt>{tickers ? 'Ticker' : 'Name'}</dt><dd><SafeText class="ticker-text" text={name} /></dd>
+              {#if tickers}<dt>Display name</dt><dd>{#if display}<SafeText text={display} />{:else}<span class="faint">None</span>{/if}</dd>{/if}
               <dt>Initial supply</dt><dd>{formatUnits(supplyValue ?? 0n, decimals)}</dd>
               <dt>Decimals</dt><dd>{decimals}</dd>
-              <dt>The name</dt><dd>{published ? 'Published' : 'Private: only its hash'}</dd>
+              {#if !tickers}<dt>The name</dt><dd>{published ? 'Published' : 'Private: only its hash'}</dd>{/if}
               {#if logo && logosSoon}<dt>Logo</dt><dd class="logo-line"><img class="logo-review" src={logo.url} alt="" width="64" height="64" /> {logo.kind}, {(logo.size / 1024).toFixed(1)} KB</dd>{/if}
               {#each DATA_FIELDS.filter((f) => fields[f].trim()) as f (f)}
                 <dt>{t(FIELD_NAMES[f])}</dt><dd><SafeText class="ba-mono" text={fields[f]} /></dd>
@@ -333,13 +356,13 @@
       {#if step !== 'done'}
         <aside class="panel preview" aria-label="Preview">
           <span class="muted small">Preview</span>
-          <AssetBadge id={previewId} label={name || '?'} preview={logosSoon ? (logo?.url ?? '') : ''} />
+          <AssetBadge id={previewId} label={name || '?'} display={tickers ? display : ''} preview={logosSoon ? (logo?.url ?? '') : ''} />
           {#if fields.info.trim()}<SafeText class="blurb" text={fields.info} />{:else}<span class="faint small">No description.</span>{/if}
           <dl class="ba-lines">
             <dt>Supply</dt><dd>{supplyValue !== null ? formatUnits(supplyValue, decimals) : '–'}</dd>
             <dt>Smallest amount</dt><dd>{smallestAmount(decimals)}</dd>
             <dt>Control coin</dt><dd>Yours</dd>
-            <dt>Listed</dt><dd>{published ? 'By its name' : 'By its hash'}</dd>
+            <dt>Listed</dt><dd>{tickers ? 'By its ticker and display name' : published ? 'By its name' : 'By its hash'}</dd>
           </dl>
         </aside>
       {/if}
@@ -364,6 +387,16 @@
   .big {
     font-size: 1.3rem;
     padding: 0.55rem 0.7rem;
+  }
+  .big.ticker {
+    font-family: var(--font-mono);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    max-width: 16rem;
+  }
+  .wizard :global(.ticker-text) {
+    font-weight: 700;
+    letter-spacing: 0.03em;
   }
   .more {
     align-self: flex-start;

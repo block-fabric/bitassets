@@ -141,7 +141,8 @@
     <header class="panel hero">
       <AssetBadge {id} label={asset.label} size="l" showLabel={false} logo={asset.logo?.hash} />
       <div class="who">
-        <h2 class="name"><SafeText text={asset.label} /></h2>
+        <h2 class="name"><SafeText class="ticker" text={asset.label} /></h2>
+        {#if asset.display_name}<p class="display-name muted" data-testid="asset-display-name"><SafeText text={asset.display_name} /></p>{/if}
         <div class="tags">
           <span class="ba-tag" translate="no">#{asset.seq}</span>
           {#if asset.fixed}<span class="ba-tag accent">Fixed supply</span>{:else}<span class="ba-tag">Mintable</span>{/if}
@@ -155,6 +156,7 @@
         {#if holding && approx(holding.balance) > 0}<button type="button" class="btn" onclick={send}><Icon name="send" size={15} /> Send</button>{/if}
         {#if holding && approx(holding.balance) > 0}<button type="button" class="btn" onclick={sell}><Icon name="gavel" size={15} /> Sell by auction</button>{/if}
         {#if controlled}<button type="button" class="btn" onclick={() => goTo('my-assets', '', id)}><Icon name="crown" size={15} /> Manage</button>{/if}
+        {#if controlled && !asset.fixed && ba.info?.tickers_active}<button type="button" class="btn" onclick={() => goTo('my-assets', '', id)}><Icon name="edit" size={15} /> {asset.display_name ? 'Change display name' : 'Add a display name'}</button>{/if}
         {#if controlled && !asset.fixed && (ba.info?.logo_height ?? -1) >= 0}<button type="button" class="btn" onclick={() => goTo('my-assets', '', id)}><Icon name="picture" size={15} /> {asset.logo ? 'Change logo' : 'Add a logo'}</button>{/if}
         <!-- Hide it in this wallet's lists (display only: the coins stay), or every asset of its name (ba/hide.svelte.ts). -->
         {#if wallets.current !== null}
@@ -335,6 +337,12 @@
   .name {
     margin: 0;
     font-size: 1.7rem;
+    overflow-wrap: anywhere;
+    letter-spacing: 0.01em;
+  }
+  .display-name {
+    margin: -0.2rem 0 0;
+    font-size: 1.05rem;
     overflow-wrap: anywhere;
   }
   .tags {
