@@ -937,8 +937,8 @@ describe.runIf(CHAIN.name === 'BitAssets')('the pages of BitAssets', () => {
     await waitFor(() => expect(screen.getByRole('heading', { name: 'My assets' })).toBeTruthy());
     expect(screen.getByRole('heading', { name: 'Markets' })).toBeTruthy();
     expect(screen.getByRole('heading', { name: 'Auctions' })).toBeTruthy();
-    // 200 GOLD at 0.1 CHN.
-    expect(screen.getByText('20 CHN')).toBeTruthy();
+    // 200 GOLD at 0.1 CHN: its worth in its row of My assets (no totals: user feedback 2026-10-19).
+    await waitFor(() => expect(document.querySelector('[data-testid="held-row"] .c-value')?.textContent).toBe('20'));
   });
 
   it('the assets the wallet holds, on the Home and the Overview: by worth, with their numbers and balances', async () => {
@@ -946,7 +946,13 @@ describe.runIf(CHAIN.name === 'BitAssets')('the pages of BitAssets', () => {
       const shown = which === 'home' ? render(LocalCards) : render(LocalOverview);
       await loaded();
       const held = await waitFor(() => screen.getByTestId('held-assets'));
-      expect(within(held).getByRole('heading', { name: 'Your assets' })).toBeTruthy();
+      // On the Home the table is the My assets card (one card, user feedback 2026-10-19); Your assets on the Overview.
+      expect(within(held).getByRole('heading', { name: which === 'home' ? 'My assets' : 'Your assets' })).toBeTruthy();
+      if (which === 'home') {
+        expect(screen.getAllByRole('heading', { name: 'My assets' })).toHaveLength(1);
+        expect(screen.queryByText('Assets held')).toBeNull();
+        expect(screen.queryByText('Being issued')).toBeNull();
+      }
       const rows = [...held.querySelectorAll('tbody tr')].map((r) => r.textContent ?? '');
       // GOLD first (a pool prices it: 200 at 0.1 CHN), then SILVER (no price: –).
       expect(rows[0]).toContain('GOLD');
@@ -1415,14 +1421,17 @@ describe('tickers and display names', () => {
         if (!r.length) throw new Error('no rows');
         return r;
       });
+      // Image, Ticker (crown, #number), Name, Quantity, CHN worth.
+      expect([...held.querySelectorAll('thead th')].map((c) => c.textContent?.trim())).toEqual(['Image', 'Ticker', 'Name', 'Quantity', 'CHN worth']);
       const cells = [...rows[0].querySelectorAll('td')].map((c) => c.textContent?.trim() ?? '');
-      expect(cells[0]).toContain('GOLD');
-      expect(cells[0]).toContain('#1739-0029');
-      expect(cells[1]).toBe('Gold Bar Token, 1 g');
-      expect(cells[2]).toBe('200.00');
-      expect(cells[3]).toBe('20');
+      expect(rows[0].querySelector('.c-img .badge-asset')).not.toBeNull();
+      expect(cells[1]).toContain('GOLD');
+      expect(cells[1]).toContain('#1739-0029');
+      expect(cells[2]).toBe('Gold Bar Token, 1 g');
+      expect(cells[3]).toBe('200.00');
+      expect(cells[4]).toBe('20');
       // The crown beside the logo, in the same cell, with its tooltip; SILVER is not controlled, and has no price.
-      expect(rows[0].querySelector('.c-asset [title="You control this asset"]')).not.toBeNull();
+      expect(rows[0].querySelector('.c-ticker [title="You control this asset"]')).not.toBeNull();
       expect(rows[1].querySelector('[title="You control this asset"]')).toBeNull();
       expect(rows[1].querySelector('.c-value')?.textContent).toBe('–');
       // Only controlled: an inline chip with its crown.
@@ -1439,5 +1448,51 @@ describe('tickers and display names', () => {
     await loaded();
     const grid = await screen.findByRole('list', { name: 'Assets' });
     await waitFor(() => expect(grid.textContent).toMatch(/GOLD\s*·\s*Gold Bar Token, 1 g\s*#1739-0029/));
+  });
+
+  it('the ticker and the display name never run together: a separator wherever both show (user feedback 2026-10-19)', async () => {
+    assets[0] = { ...assets[0], display_name: 'Gold Bar Token, 1 g' };
+    const SEP = /GOLD\s+·\s+Gold Bar Token, 1 g/;
+    // My assets → Holdings: the heading of the asset picked ("GOLDGold Bar Token, 1 g" before).
+    let shown = render(MyAssets);
+    await loaded();
+    const panel = await screen.findByRole('region', { name: 'Manage GOLD' });
+    await waitFor(() => expect(panel.querySelector('h2')?.textContent).toMatch(SEP));
+    expect(panel.querySelector('h2')?.textContent).not.toContain('GOLDGold');
+    shown.unmount();
+    // The picker of an asset (Swap): each option.
+    shown = render(Trade);
+    await loaded();
+    await fireEvent.click(document.querySelector('#swap-get')!);
+    const option = await waitFor(() => {
+      const o = document.querySelector<HTMLElement>(`[role="option"][data-id="${GOLD}"]`);
+      if (!o) throw new Error('no option');
+      return o;
+    });
+    expect(option.textContent).toMatch(SEP);
+    shown.unmount();
+    // The badge (lists, pools, auctions, activity, details): the dot after the ticker.
+    shown = render(Assets);
+    await loaded();
+    const badge = await waitFor(() => {
+      const b = [...document.querySelectorAll<HTMLElement>('.badge-asset')].find((x) => x.textContent?.includes('Gold Bar'));
+      if (!b) throw new Error('no badge');
+      return b;
+    });
+    expect(badge.textContent).toMatch(/GOLD\s*·\s+Gold Bar Token, 1 g/);
+    shown.unmount();
+    // Home and Overview: the ticker and the name in cells of their own.
+    for (const which of ['home', 'overview']) {
+      shown = which === 'home' ? render(LocalCards) : render(LocalOverview);
+      await loaded();
+      const row = await waitFor(() => {
+        const r = document.querySelector<HTMLElement>('[data-testid="held-row"]');
+        if (!r) throw new Error('no row');
+        return r;
+      });
+      expect(row.querySelector('.c-ticker')?.textContent).not.toContain('Gold Bar');
+      expect(row.querySelector('.c-name')?.textContent?.trim()).toBe('Gold Bar Token, 1 g');
+      shown.unmount();
+    }
   });
 });

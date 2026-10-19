@@ -47,7 +47,7 @@
   {#if showLabel}
     <span class="words">
       <SafeText class="label" text={label} />
-      {#if shownDisplay}<span class="display muted" title={shownDisplay}><span class="dot" aria-hidden="true">·</span> <SafeText text={shownDisplay} /></span>{/if}
+      {#if shownDisplay}<span class="display muted" title={shownDisplay}><span class="dot" aria-hidden="true">·</span>{' '}<SafeText text={shownDisplay} /></span>{/if}
       {#if seq}<span class="seq faint" translate="no">#{seq}</span>{/if}
     </span>
   {/if}

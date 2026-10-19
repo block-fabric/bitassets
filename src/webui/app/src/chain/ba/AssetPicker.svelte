@@ -8,6 +8,7 @@
   import Icon from '../../components/Icon.svelte';
   import SafeText from '../../components/SafeText.svelte';
   import AssetBadge from './AssetBadge.svelte';
+  import AssetName from './AssetName.svelte';
   import { pickerRows, type PickChip, type PickChoice, type PickRow } from './picker';
   import { isFavourite, loadPicks, notePicked, picks, toggleFavourite } from './picks.svelte';
   import { displayNameOf } from './store.svelte';
@@ -212,8 +213,7 @@
                   <AssetBadge id={c.id} label={c.label} size="s" showLabel={false} />
                   <span class="name">
                     {#if c.seq}<span class="seq" translate="no">#{c.seq}</span>{/if}
-                    <SafeText class="ticker" text={c.label} />
-                    {#if c.display}<SafeText class="display" text={c.display} />{/if}
+                    <AssetName label={c.label} display={c.display ?? ''} displayClass="display" />
                   </span>
                   {#if c.warn}<span class="warn" title={c.warn}><Icon name="alert" size={14} label={c.warn} /></span>{/if}
                   {#if c.held}<span class="held" translate="no">{c.held}</span>{/if}
@@ -273,7 +273,6 @@
     font-weight: 600;
   }
   .name :global(.display) {
-    margin-left: 0.4rem;
     color: var(--text-muted);
     font-weight: 400;
   }

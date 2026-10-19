@@ -17,7 +17,9 @@
   import HiddenToggle from './HiddenToggle.svelte';
   import { withoutHidden } from './visible.svelte';
 
-  let { compact = false }: { compact?: boolean } = $props();
+  // home: titled "My assets" (on the Home this table is the My assets card: user feedback 2026-10-19, one card, not
+  // two); "Your assets" on the Overview.
+  let { compact = false, home = false }: { compact?: boolean; home?: boolean } = $props();
   $effect(() => startBitAssets());
 
   const simple = $derived(simpleMode() || compact);
@@ -31,7 +33,7 @@
 
 <section class="panel held" aria-labelledby="held-title" data-testid="held-assets">
   <div class="head">
-    <h2 id="held-title">Your assets</h2>
+    <h2 id="held-title">{#if home}My assets{:else}Your assets{/if}</h2>
     {#if held.rows.length > 0}<button type="button" class="btn ghost small" onclick={() => go('my-assets')}>View all <Icon name="arrow" size={14} /></button>{/if}
   </div>
   <HiddenToggle count={visible.hidden} bind:show={showHidden} />
@@ -48,22 +50,22 @@
   {:else}
     <!-- One compact row per asset (user feedback 2026-10-19): its logo, the crown if the wallet controls it, its ticker
          with its number, its display name, its balance and its worth; narrow, the name goes first, then the worth. -->
-    <table class="held-table" aria-labelledby="held-title">
-      <thead class="sr-only"><tr><th scope="col">Asset</th><th scope="col" class="c-name">Name</th><th scope="col">Balance</th><th scope="col" class="c-value">Value (CHN)</th></tr></thead>
+    <table class="held-table" class:compact={simple} aria-labelledby="held-title">
+      <thead class:sr-only={simple}><tr><th scope="col" class="c-img"><span class="sr-only">Image</span></th><th scope="col" class="c-ticker">Ticker</th><th scope="col" class="c-name">Name</th><th scope="col" class="c-balance num">Quantity</th><th scope="col" class="c-value num">CHN worth</th></tr></thead>
       <tbody>
         {#each shown as r (r.holding.asset)}
           {@const display = displayNameOf(r.holding.asset) ?? ''}
-          <tr class="hrow" data-testid="held-row" onclick={() => goTo('assets', '', r.holding.asset)}>
-            <td class="c-asset">
-              <button type="button" class="asset" title={assetTitle(r.holding.label, display, r.seq)} onclick={(e) => { e.stopPropagation(); goTo('assets', '', r.holding.asset); }}>
-                <AssetBadge id={r.holding.asset} label={r.holding.label} size="s" showLabel={false} />
+          <tr class="hrow" data-testid="held-row" title={assetTitle(r.holding.label, display, r.seq)} onclick={() => goTo('assets', '', r.holding.asset)}>
+            <td class="c-img"><AssetBadge id={r.holding.asset} label={r.holding.label} size="s" showLabel={false} /></td>
+            <td class="c-ticker">
+              <button type="button" class="asset" onclick={(e) => { e.stopPropagation(); goTo('assets', '', r.holding.asset); }}>
                 {#if r.holding.control}<span class="crown" title="You control this asset"><Icon name="crown" size={12} label="You control this asset" /></span>{/if}
                 <SafeText class="ticker" text={r.holding.label} />
                 {#if r.seq}<span class="seq faint" translate="no">#{r.seq}</span>{/if}
               </button>
             </td>
             <td class="c-name muted" title={display}>{#if display}<SafeText text={display} />{/if}</td>
-            <td class="c-balance num" translate="no">{formatAmount(r.holding.balance, r.holding.decimals, { trim: false })}{#if r.pending} <span class="ba-warn on-way" title="Spendable after the next block">+{formatAmount(r.holding.pending, r.holding.decimals, { trim: false })}</span>{/if}</td>
+            <td class="c-balance num" translate="no">{formatAmount(r.holding.balance, r.holding.decimals, { trim: false })}{#if r.pending}{' '}<span class="ba-warn on-way" title="Spendable after the next block">+{formatAmount(r.holding.pending, r.holding.decimals, { trim: false })}</span>{/if}</td>
             <td class="c-value num" translate="no">{r.value !== undefined ? formatPrice(r.value) : '–'}</td>
           </tr>
         {/each}
@@ -81,6 +83,12 @@
         {/each}
       </p>
     {/if}
+  {/if}
+  {#if home && wallets.current !== null}
+    <div class="actions">
+      <button type="button" class="btn small" onclick={() => go('issue')}><Icon name="issue" size={15} /> {simpleMode() ? 'Create a token' : 'Issue'}</button>
+      <button type="button" class="btn ghost small" onclick={() => go('send')}>Send</button>
+    </div>
   {/if}
 </section>
 
@@ -128,17 +136,35 @@
     text-overflow: ellipsis;
     vertical-align: middle;
   }
-  .c-asset {
-    width: 42%;
+  .c-img {
+    width: 2.2rem;
+  }
+  .hrow td.c-img {
+    padding-inline-end: 0;
+    text-overflow: clip;
+  }
+  .c-ticker {
+    width: 32%;
   }
   .c-name {
-    width: 26%;
+    width: 28%;
   }
   .c-balance {
-    width: 20%;
+    width: 22%;
   }
   .c-value {
-    width: 12%;
+    width: 18%;
+  }
+  thead th {
+    padding: 0 0.35rem 0.3rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-align: start;
+    white-space: nowrap;
+  }
+  thead th.num {
+    text-align: end;
   }
   .asset {
     display: inline-flex;
@@ -206,16 +232,16 @@
     .c-name {
       display: none;
     }
-    .c-asset {
-      width: 58%;
+    .c-ticker {
+      width: 52%;
     }
   }
   @container held (max-width: 21rem) {
     .c-value {
       display: none;
     }
-    .c-asset {
-      width: 62%;
+    .c-ticker {
+      width: 56%;
     }
     .c-balance {
       width: 38%;
@@ -230,6 +256,11 @@
   }
   .controlled {
     margin: 0;
+  }
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
   }
   .empty {
     display: flex;

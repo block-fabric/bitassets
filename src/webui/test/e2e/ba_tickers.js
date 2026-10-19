@@ -122,12 +122,13 @@
     await shot('asset-page');
 
     await go('home');
-    await waitFor('Your assets on the Home, a compact row', () => $('[data-testid="held-row"]') && text('[data-testid="held-assets"]').includes(DISPLAY), 60000);
+    await waitFor('My assets on the Home (one card: the table), a compact row', () => $('[data-testid="held-row"]') && text('[data-testid="held-assets"]').includes(DISPLAY), 60000);
     const row = $('[data-testid="held-row"]');
     const height = row.getBoundingClientRect().height;
-    await check('one row per asset, about 36 px, the crown inline before the ticker', height <= 42 && !!$('.c-asset [title="You control this asset"]', row) && /GOLD\s*#/.test(row.textContent), `${height} px: ${row.textContent}`);
+    await check('one row per asset, about 36 px, the crown inline before the ticker', height <= 42 && !!$('.c-ticker [title="You control this asset"]', row) && /GOLD\s*#/.test(row.textContent), `${height} px: ${row.textContent}`);
     const dashes = $$('[data-testid="held-assets"] *').filter((el) => el.children.length === 0 && el.textContent.trim() === '–').map((el) => `${el.tagName}.${el.className} ${Math.round(el.getBoundingClientRect().top - row.getBoundingClientRect().top)}`);
     await check('nothing under the rows (no stray line): the value in its row', dashes.every((d) => d.includes('c-value') && Math.abs(Number(d.split(' ').pop())) <= 12), JSON.stringify(dashes));
+    await check('the Home has one My assets card, the table, no totals', $$('h2').filter((h) => h.textContent.trim() === 'My assets').length === 1 && !document.body.textContent.includes('Assets held') && $$('[data-testid="held-assets"] thead th').map((th) => th.textContent.trim()).join('|') === 'Image|Ticker|Name|Quantity|CHN worth', $$('[data-testid="held-assets"] thead th').map((th) => th.textContent.trim()).join('|'));
     const chips = $$('[data-testid="controlled-only"] .chip');
     await check('an asset only controlled: a chip with its crown', chips.some((c) => c.textContent.includes('SILV') && $('[title="You control this asset"]', c)), text('[data-testid="held-assets"]'));
     await sleep(500);
@@ -140,6 +141,8 @@
     // --- The controller changes the display name ---
     await go('my-assets', 'holdings');
     const panel = () => $('section[aria-label="Manage GOLD"]');
+    await waitFor('the asset picked in Holdings', () => panel(), 30000);
+    await check('its heading: the ticker, a separator, the display name', /^GOLD · /.test($('h2', panel()).textContent.trim()), $('h2', panel()).textContent);
     await click('Change its display name', panel);
     set(await waitFor('the display name field', () => $('#manage-display')), 'Gold Bar');
     await sleep(400);
