@@ -164,7 +164,7 @@
     <AssetView id={shown} onback={() => (shown = null)} />
   {:else}
     <header class="page-head">
-      <h1>Assets</h1>
+      <h1>Explore assets</h1>
       {#if ba.info}<span class="muted">{formatCount(ba.info.assets)} assets · {formatCount(ba.info.pools)} pools · {formatCount(ba.info.auctions)} auctions · next block {formatCount(ba.info.height)}</span>{/if}
     </header>
 

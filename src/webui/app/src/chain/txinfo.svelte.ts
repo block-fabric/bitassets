@@ -64,11 +64,30 @@ export function signedAmount(e: AssetTx): string {
   return `${e.sign < 0 ? '−' : e.sign > 0 ? '+' : ''}${bound}${text}`;
 }
 
-/** The other side of a move: where it went (a send), who paid it (a receive). */
-export function counterparty(e: AssetTx): { dir: 'to' | 'from' | ''; parties: AssetTx['to'] } {
-  if (e.category === 'receive' || (e.sign > 0 && e.from.length)) return { dir: 'from', parties: e.from };
-  if (e.sign < 0 || e.category === 'mint') return { dir: 'to', parties: e.to.filter((p) => !p.mine || e.category === 'mint') };
-  return { dir: '', parties: [] };
+/**
+ * The other side of a move: where it went (a send, a mint), who paid it (a receive). Each address once; the wallet's own
+ * outputs are not listed one by one (a mint pays the minted coins and the control coin to the wallet, a swap its result
+ * and its change): `self` says the wallet is on that side, the parties are the others (user feedback 2026-10-19).
+ */
+export function counterparty(e: AssetTx): { dir: 'to' | 'from' | ''; parties: AssetTx['to']; self: boolean } {
+  const side = (list: AssetTx['to']) => {
+    const seen = new Set<string>();
+    const others = list.filter((p) => !p.mine && !seen.has(p.address) && (seen.add(p.address), true));
+    return { parties: others, self: list.some((p) => p.mine) };
+  };
+  if (e.category === 'receive' || (e.sign > 0 && e.from.length)) return { dir: 'from', ...side(e.from) };
+  if (e.sign < 0 || e.category === 'mint' || e.category === 'register') {
+    const to = side(e.to);
+    // What went out to others: the wallet's own outputs beside them are its change, not a destination.
+    if (to.parties.length) return { dir: 'to', parties: to.parties, self: false };
+    return to.self ? { dir: 'to', parties: [], self: true } : { dir: '', parties: [], self: false };
+  }
+  return { dir: '', parties: [], self: false };
+}
+
+/** An address in a few characters: its start and its end ("tba1q…a9x"), whole when short. */
+export function shortAddress(address: string): string {
+  return address.length > 16 ? `${address.slice(0, 8)}…${address.slice(-4)}` : address;
 }
 
 let byTxid = new Map<string, AssetTx[]>();
@@ -96,7 +115,7 @@ export function chainTxOf(txid: string): ChainTx | undefined {
       moves.map((e) => e.label ?? '').join('; '),
       moves.map((e) => e.seq ?? '').join('; '),
       moves.map((e) => signedAmount(e).replace('−', '-')).join('; '),
-      moves.map((e) => { const c = counterparty(e); return c.dir ? `${c.dir} ${c.parties.map((p) => p.address).join(' ')}` : ''; }).join('; '),
+      moves.map((e) => { const c = counterparty(e); return c.dir ? `${c.dir} ${[...c.parties.map((p) => p.address), ...(c.self ? ['this wallet'] : [])].join(' ')}` : ''; }).join('; '),
     ],
   };
 }
