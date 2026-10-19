@@ -313,6 +313,8 @@
     // --- The details of a transaction: the asset it moved (user feedback 2026-10-19, items 13-15) ---
     await go('transactions');
     for (const [type, shotName] of [['Registered', 'ba-details-registered'], ['Minted', 'ba-details-minted'], ['Auction bid', 'ba-details-bid']]) {
+      // Found by its type (the search finds what the chain knows of a transaction): the row in view.
+      set(await waitFor('the search of the history', () => $('input[aria-label="Search"]')), type);
       const row = await waitFor(`a row "${type}"`, () => $$('[role="row"]').find((r) => r.textContent.includes(type)), 30000);
       // The wallet's own outputs are "this wallet", once: never two of its addresses in the row.
       await check(`${type}: the row names the wallet once`, (row.textContent.match(/this wallet/g) || []).length <= 1, row.textContent.slice(0, 200));
@@ -326,6 +328,7 @@
       else document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
       await sleep(400);
     }
+    set($('input[aria-label="Search"]'), '');
 
     await rpc('setbmm', [false]);
     await log(`ASSET ${gold.asset}`);

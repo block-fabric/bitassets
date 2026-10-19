@@ -3,7 +3,7 @@
 // to the wallet shown; the notice of it offers "Ignore this asset"; then Home, My assets, the Transactions page (one
 // line for the hidden transaction) and Settings → Asset filters, with pictures; unignored, it shows again.
 (async () => {
-  const { rpc, host, sleep, T, waitFor, check, snapshot, text, finish } = E2E;
+  const { rpc, host, sleep, log, T, waitFor, check, snapshot, text, finish } = E2E;
   const $ = (sel, root = document) => root.querySelector(sel);
   const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
   const W = 'ba';
@@ -50,7 +50,14 @@
     await waitFor('the spam registered', async () => ((await rpc('listmyassets', [], S)).assets || []).some((a) => a.asset === reg.asset && a.balance > 0), 120000);
     await go('home');
     const to = await rpc('getnewaddress', [], W);
-    await rpc('sendasset', [to, `0x${reg.asset}`, 500], S);
+    const sent = await rpc('sendasset', [to, `0x${reg.asset}`, 500], S);
+    // What the node lists of an asset sent (item 11): the sender's halves of one transaction, a send and a receive of
+    // its own outputs (the asset's change), which the notices merge.
+    const halves = (await rpc('listtransactions', ['*', 20], S)).filter((x) => x.txid === sent.txid).map((x) => `${x.category} ${x.amount}`);
+    await log(`HALVES of an asset sent: ${JSON.stringify(halves)}`);
+    // And as the app's history lists it (the records of the host: what the notices were made of).
+    const recs = await host('wallet.transactions', { wallet: S, txids: [sent.txid] });
+    await log(`RECORDS of an asset sent: ${JSON.stringify((recs.records || []).map((r) => [r[2], r[6], r[7]]))}`);
 
     // Its notice offers to ignore it.
     const ignore = await waitFor('the notice of the asset received, with "Ignore this asset"', () => $$('button').find((b) => b.textContent.trim() === 'Ignore this asset'), 120000);
@@ -81,6 +88,6 @@
     await rpc('setbmm', [false]);
     await finish();
   } catch (e) {
-    await finish(e);
+    await finish(e instanceof Error ? e : new Error(e && e.message ? `${e.message} (${e.code})` : JSON.stringify(e)));
   }
 })();
