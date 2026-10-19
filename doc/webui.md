@@ -534,6 +534,9 @@ template keeps empty, and nowhere else, so that a merge of the template never co
    of the home), and menu items in `LOCAL_COMMANDS`. The page then is in the sidebars (in its
    section), the workspace (its area), the palette, the menus (those of `chain` in the menu of the
    chain, before the tools: the `chainBeforeTools` tests check every list) and `go('<id>')` opens it.
+   A page may be a tab of another page of the chain (`tabOf: { page, tab }`: BitAssets' Register new asset under
+   My assets): it then leaves the navigation, and `go('<id>')`, its commands and its quick action open that page
+   on that tab (the page shows it there; `ownTab('<id>')` reads its own tab).
 2. **src/webui/app/src/chain/LocalPages.svelte**: imports the page components (in
    `src/chain/pages/`, say) and shows the one of `page`.
 3. **src/webui/local.cpp**: the RPC methods the pages call (`RpcMethods`, added to the page's
