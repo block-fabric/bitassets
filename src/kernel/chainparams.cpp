@@ -345,14 +345,16 @@ public:
         };
 
         // This chain is a sidechain of the Chains testnet.
-        MakeSidechain({.slot = 4, .genesis_message = "BitAssets testnet 17/Oct/2026: a fresh start", .genesis_time = 1792210200,
+        // A new genesis at each restart of the test network: 19/Oct/2026 19:45 UTC, every rule from the first
+        // block (was "BitAssets testnet 17/Oct/2026: a fresh start", 1792210200).
+        MakeSidechain({.slot = 4, .genesis_message = "BitAssets testnet 19/Oct/2026: tickers and logos from the first block", .genesis_time = 1792439100,
                        .message_start = {0x62, 0x61, 0x73, 0x02}, .default_port = 19355, .bech32_hrp = "tba"});
         // The mainchain of the test network votes on a withdrawal bundle within 600 blocks.
         consensus.sidechain.bundle_retry_delay = 20;
         consensus.sidechain.bitassets_reveal_depth = 3;
-        // The logos of assets: the test network runs since before them (kernel/testnet_activation.h).
-        consensus.sidechain.logo_height = TESTNET_LOGO_HEIGHT;
-        consensus.sidechain.ticker_height = TESTNET_TICKER_HEIGHT;
+        // Logos, tickers and display names from the first block (the test network restarted on 19/Oct/2026).
+        consensus.sidechain.logo_height = 0;
+        consensus.sidechain.ticker_height = 0;
         // The height of the mainchain block that activated the slot; nothing is left out at 0.
         consensus.sidechain.main_activation_height = TESTNET_MAIN_ACTIVATION_HEIGHT; // set once slot 4 activates on the reset test network (kernel/testnet_activation.h)
         // A tenth of the testnet mainchain's withdrawal_min_score (300); proposals within an hour.

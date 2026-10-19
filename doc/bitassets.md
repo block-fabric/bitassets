@@ -163,8 +163,7 @@ exactly the bytes shown, nothing new to sign.
 **Activation.** From `SidechainParams::logo_height`: before it a marker that sets a logo is not
 valid (`bad-ba-logo-inactive`), as no such marker was; nodes have to be upgraded before the chain
 reaches it (an older node refuses a block with one). Main network and signet: 0 (not launched).
-Test network: `TESTNET_LOGO_HEIGHT` in `src/kernel/testnet_activation.h`, a placeholder (never)
-until the deploy sets it a few blocks above the tip. Regtest: 0, or
+Test network: 0 too (restarted from a new genesis on 19/Oct/2026). Regtest: 0, or
 `-testactivationheight=logo@<height>`. `getbitassetsinfo` says `logo_height` (-1: never).
 
 **State and storage.** The state records each asset's logo (table 0x90: SHA-256 of the bytes,
@@ -234,10 +233,7 @@ change it). Reasons: `bad-ba-display-name` (not one), `bad-ba-display-name-asset
 
 **Activation.** Before `SidechainParams::ticker_height`, a marker that sets a display name is not
 valid (`bad-ba-display-name-inactive`), and names are as before. Main network and signet: 0 (not
-launched). Test network: `TESTNET_TICKER_HEIGHT` in `src/kernel/testnet_activation.h`, a placeholder
-(never) until the deploy sets it a few blocks above the tip: every node has to be upgraded before the
-chain reaches it (an older node refuses a block that sets a display name, and takes registrations
-that are not tickers: a split). Regtest: never, or `-testactivationheight=ticker@<height>` (the
+launched). Test network: 0 too (restarted from a new genesis on 19/Oct/2026). Regtest: never, or `-testactivationheight=ticker@<height>` (the
 tests of before register names that are not tickers). `getbitassetsinfo` says `ticker_height` (-1:
 never), `tickers_active` (the next block), `min_ticker_length`, `max_ticker_length` and
 `max_display_name_bytes`. Like `logo_height`, the height counts in the fingerprint of the parameters
