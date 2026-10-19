@@ -68,6 +68,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "burnasset", 1, "amount" },
     { "updateasset", 1, "data" },
     { "setassetlogo", 2, "options" },
+    { "setassetlogo", 2, "fee_rate" },
     { "listassettransactions", 0, "count" },
     { "listassettransactions", 1, "skip" },
     { "fixassetsupply", 1, "confirm" },
