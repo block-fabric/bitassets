@@ -45,7 +45,8 @@
       {@const asset = e.asset ? ba.assets.find((a) => a.asset === e.asset) : undefined}
       <dl class="facts">
         <dt>Operation</dt>
-        <dd>{categoryText(e)}</dd>
+        <!-- Already in the language shown (categoryText translates it). -->
+        <dd><span translate="no">{categoryText(e)}</span></dd>
         {#if e.asset}
           <dt>Asset</dt>
           <dd class="asset">
