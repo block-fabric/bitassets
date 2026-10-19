@@ -553,6 +553,8 @@ these too never conflict:
 | `src/chain/LocalCards.svelte` | Its cards on the home of the dashboard, under the kit's (views/home/SideHome.svelte) |
 | `src/chain/LocalOverview.svelte` | What it shows on the wallet's Overview, after the balances, across the page (BitAssets, Layers: Your assets) |
 | `src/chain/txinfo.svelte.ts`, `src/chain/LocalTxCell.svelte` | What it knows of a transaction of the wallet (from one call per wallet): its type in the Transactions page, a column of its own, a filter of the Type list, the search, columns of the CSV export (BitAssets, Layers: asset transfers with the other side) |
+| `src/chain/settings.ts` + `src/chain/LocalSettings.svelte` | Its own tabs of Settings (`LOCAL_SETTINGS_TABS`) and what they show (BitAssets, Layers: Asset filters, the assets a wallet hides) |
+| `src/chain/txinfo.svelte.ts` optional exports | `chainTxHidden(txid)`: a transaction the chain hides (an ignored asset's): the Transactions page folds it into "N hidden transactions", the notices leave it out; `chainTxNotice(txid)`: actions of its notice (Ignore this asset) and a warning (a look-alike). The template exports neither |
 | `src/chain/LocalTxDetails.svelte` | Its part of the details of a transaction of the wallet (the dialog of the Transactions page, the detail panel), above the coin's: BitAssets and Layers show the asset moved, its amount, the other side and the operation's own facts |
 | `src/chain/LocalSend.svelte` | What it sends beside its coin (an asset, a name), at the top of Send; `active` set while its own form takes the place of the kit's |
 | `chain/local.ts` `shortcut: 'Alt+6'` | Alt+6 and on open its pages (lib/keyboard.ts), never over the kit's Alt+1 to Alt+5 |
