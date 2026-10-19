@@ -1546,6 +1546,7 @@ RPCMethod listassettransactions()
     const std::vector<RPCResult> party{
         {RPCResult::Type::STR, "address", "An address, \"unknown\" where the outputs a transaction spent cannot be read (a pruned block)"},
         {RPCResult::Type::BOOL, "mine", "Whether it is this wallet's"},
+        {RPCResult::Type::ARR, "roles", "What its outputs carry of the asset: \"asset\" (units), \"control coin\"", {{RPCResult::Type::STR, "", ""}}},
     };
     return RPCMethod{
         "listassettransactions",
@@ -1568,6 +1569,7 @@ RPCMethod listassettransactions()
             {RPCResult::Type::STR, "category", "send, receive, register, mint, burn, swap, pool_add, pool_remove, auction, bid, collect, logo, display_name, update, control, reserve, release"},
             {RPCResult::Type::STR_HEX, "asset", /*optional=*/true, "The asset (none for a reservation)"},
             {RPCResult::Type::STR, "label", /*optional=*/true, "Its label"},
+            {RPCResult::Type::STR, "display_name", /*optional=*/true, "Its display name, if it has one"},
             {RPCResult::Type::STR, "seq", /*optional=*/true, "Its number"},
             {RPCResult::Type::NUM, "decimals", /*optional=*/true, ""},
             {RPCResult::Type::NUM, "amount", /*optional=*/true, "How much of it moved, in whole assets (exact)"},
@@ -1578,6 +1580,7 @@ RPCMethod listassettransactions()
             {RPCResult::Type::ARR, "to", "Where the asset went (outputs of others first)", {{RPCResult::Type::OBJ, "", "", party}}},
             {RPCResult::Type::ARR, "from", "Who paid the transaction, for what the wallet received", {{RPCResult::Type::OBJ, "", "", party}}},
             {RPCResult::Type::BOOL, "abandoned", ""},
+            {RPCResult::Type::ARR, "change", /*optional=*/true, "The wallet's own outputs of CHN that carry no token (its change), when it paid the transaction", {{RPCResult::Type::STR, "", "An address"}}},
         }}}},
         RPCExamples{HelpExampleCli("listassettransactions", "") + HelpExampleCli("listassettransactions", "20 0 \"GOLD\"")},
         [&](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
@@ -1595,6 +1598,7 @@ RPCMethod listassettransactions()
     struct Party {
         std::string address;
         bool mine;
+        std::vector<std::string> roles{};
     };
     struct Row {
         int64_t time;
@@ -1610,6 +1614,8 @@ RPCMethod listassettransactions()
         std::optional<CAmount> fee;
         std::vector<Party> to, from;
         bool abandoned;
+        //! The wallet's own outputs of CHN that carry nothing (its change), when it paid the transaction.
+        std::vector<std::string> change{};
     };
     struct Seen {
         CTransactionRef tx;
@@ -1662,6 +1668,13 @@ RPCMethod listassettransactions()
         const auto base{[&](std::string category) {
             Row r{s.time, txid, s.confirmations, s.block, std::move(category)};
             r.abandoned = s.abandoned;
+            if (s.any_mine) {
+                for (uint32_t n{0}; n < tx.vout.size(); ++n) {
+                    if (!s.owned[n] || tokens.contains(n) || bitassets::IsMarkerScript(tx.vout[n].scriptPubKey)) continue;
+                    std::string a{address(tx.vout[n].scriptPubKey)};
+                    if (std::ranges::find(r.change, a) == r.change.end()) r.change.push_back(std::move(a));
+                }
+            }
             if (s.all_mine) r.fee = s.debit - tx.GetValueOut();
             return r;
         }};
@@ -1678,12 +1691,18 @@ RPCMethod listassettransactions()
             r.at_most = at_most;
             for (const auto& [n, t] : tokens) {
                 if (t.id != asset || (t.kind != Token::Kind::ASSET && t.kind != Token::Kind::CONTROL)) continue;
-                const Party p{address(tx.vout[n].scriptPubKey), s.owned[n]};
+                const std::string role{t.kind == Token::Kind::ASSET ? "asset" : "control coin"};
+                const Party p{address(tx.vout[n].scriptPubKey), s.owned[n], {role}};
                 // Change back to the wallet is no destination of a send.
                 if (sign < 0 && p.mine) continue;
                 // What came in: to the wallet's outputs (the sender's change is theirs).
                 if (sign > 0 && !p.mine && !s.any_mine) continue;
-                if (std::none_of(r.to.begin(), r.to.end(), [&](const Party& q) { return q.address == p.address; })) r.to.push_back(p);
+                const auto same{std::find_if(r.to.begin(), r.to.end(), [&](const Party& q) { return q.address == p.address; })};
+                if (same == r.to.end()) {
+                    r.to.push_back(p);
+                } else if (std::ranges::find(same->roles, role) == same->roles.end()) {
+                    same->roles.push_back(role);
+                }
             }
             std::stable_partition(r.to.begin(), r.to.end(), [](const Party& p) { return !p.mine; });
             rows.push_back(std::move(r));
@@ -1828,6 +1847,7 @@ RPCMethod listassettransactions()
             const uint8_t decimals{record ? record->decimals : uint8_t{0}};
             obj.pushKV("asset", r.asset->GetHex());
             obj.pushKV("label", bitassets::AssetLabel(*r.asset, record ? &*record : nullptr));
+            if (const auto display{record ? pwallet->chain().getBitAssetDisplayName(*r.asset) : std::nullopt}) obj.pushKV("display_name", display->text);
             if (record) obj.pushKV("seq", bitassets::FormatSeq(record->seq));
             obj.pushKV("decimals", decimals);
             if (r.has_amount) obj.pushKV("amount", bitassets::AmountToJSON(r.amount, decimals));
@@ -1842,6 +1862,9 @@ RPCMethod listassettransactions()
                 UniValue o(UniValue::VOBJ);
                 o.pushKV("address", p.address);
                 o.pushKV("mine", p.mine);
+                UniValue roles(UniValue::VARR);
+                for (const std::string& role : p.roles) roles.push_back(role);
+                o.pushKV("roles", std::move(roles));
                 arr.push_back(std::move(o));
             }
             return arr;
@@ -1849,6 +1872,11 @@ RPCMethod listassettransactions()
         obj.pushKV("to", parties(r.to));
         obj.pushKV("from", parties(r.from));
         obj.pushKV("abandoned", r.abandoned);
+        if (!r.change.empty()) {
+            UniValue change(UniValue::VARR);
+            for (const std::string& a : r.change) change.push_back(a);
+            obj.pushKV("change", std::move(change));
+        }
         result.push_back(std::move(obj));
     }
     return result;

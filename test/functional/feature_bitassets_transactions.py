@@ -56,7 +56,7 @@ class BitAssetsTransactionsTest(BitAssetsTest):
         assert_equal(len(received), 1)
         r = received[0]
         assert_equal((r["category"], r["sign"], r["amount"], r["asset"], r["seq"], r["confirmations"]), ("receive", 1, Decimal("12.50"), gold["asset"], gold["seq"], 0))
-        assert_equal(r["to"], [{"address": to, "mine": True}])
+        assert_equal(r["to"], [{"address": to, "mine": True, "roles": ["asset"]}])
         senders = {f["address"] for f in r["from"]}
         assert senders and all(side.getaddressinfo(a)["ismine"] for a in senders)
         assert all(not f["mine"] for f in r["from"])
@@ -70,7 +70,10 @@ class BitAssetsTransactionsTest(BitAssetsTest):
 
         s = next(e for e in side.listassettransactions() if e["txid"] == sent)
         assert_equal((s["category"], s["sign"], s["amount"], s["label"]), ("send", -1, Decimal("12.50"), "GOLD"))
-        assert_equal(s["to"], [{"address": to, "mine": False}])
+        assert_equal(s["to"], [{"address": to, "mine": False, "roles": ["asset"]}])
+        # The sender's change of CHN, its own (the change of GOLD is no destination of the send).
+        assert s["change"] and all(side.getaddressinfo(a)["ismine"] for a in s["change"])
+        assert "change" not in r
         assert_greater_than(s["fee"], 0)
         assert_equal(s["fee"], -side.gettransaction(sent)["fee"])
 
@@ -86,6 +89,9 @@ class BitAssetsTransactionsTest(BitAssetsTest):
         assert_equal([(e["sign"], e.get("amount")) for e in rows][:4], [(0, None), (-1, Decimal("2.00")), (1, Decimal("5.00")), (-1, Decimal("12.50"))])
         register = next(e for e in rows if e["category"] == "register")
         assert_equal((register["sign"], register["amount"]), (1, Decimal("1000.00")))
+        # Its outputs, the wallet's, each with what it carries: the units and the control coin.
+        assert all(p["mine"] for p in register["to"])
+        assert_equal(sorted(role for p in register["to"] for role in p["roles"]), ["asset", "control coin"])
         assert any(e["category"] == "reserve" and "asset" not in e for e in rows)
 
         self.log.info("Filters and pages")
