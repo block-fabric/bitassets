@@ -32,6 +32,13 @@
       button('Hide', overlay).click();
       await sleep(300);
     }
+    // The notices of the transactions made on the way, out of the picture.
+    for (let i = 0; i < 10; i++) {
+      const close = $$('.toasts button[aria-label="Dismiss"]');
+      if (!close.length) break;
+      close.forEach((b) => b.click());
+      await sleep(150);
+    }
     await snapshot(name);
   }
   const W = 'ba';
@@ -51,6 +58,8 @@
     await host('peg.deposit', { destination: deposit.depositaddress, amount: '20' });
     await rpc('setbmm', [true, await rpc('getnewaddress', [], W), true]);
     await waitFor('the deposit credited', async () => (await rpc('getbalances', [], W)).mine.trusted >= 20, 240000);
+    // An asset to control without holding any (no supply): reserved now, registered once deep enough.
+    await rpc('reserveasset', ['silv'], W);
     const info = await rpc('getbitassetsinfo');
     await check('tickers are in the rules (ticker@0)', info.ticker_height === 0 && info.tickers_active === true, JSON.stringify(info));
 
@@ -58,6 +67,7 @@
     await go('issue');
     await waitFor('the ticker field', () => /Ticker/.test(text('.issue')) && $('#issue-name'), 30000);
     set($('#issue-name'), 'gold');
+    await sleep(100);
     await check('the ticker is uppercased as typed', $('#issue-name').value === 'GOLD', $('#issue-name').value);
     await waitFor('the ticker free', () => text('.issue').includes('is free'), 20000);
     set(await waitFor('the display name field', () => $('#issue-display')), 'Gold‮Bar');
@@ -90,6 +100,14 @@
       }
     }, 240000);
     await waitFor('GOLD in the wallet', async () => (await rpc('listmyassets', [], W)).assets.some((h) => h.label === 'GOLD'), 60000);
+    await rpc('registerasset', ['SILV', 0, 0, {}, true, null, 'Silver dust'], W);
+    await waitFor('SILV registered', async () => {
+      try {
+        return (await rpc('getasset', ['SILV'])).display_name === 'Silver dust';
+      } catch {
+        return false;
+      }
+    }, 120000);
 
     // --- Where assets show ---
     await go('assets');
@@ -108,6 +126,10 @@
     const row = $('[data-testid="held-row"]');
     const height = row.getBoundingClientRect().height;
     await check('one row per asset, about 36 px, the crown inline before the ticker', height <= 42 && !!$('.c-asset [title="You control this asset"]', row) && /GOLD\s*#/.test(row.textContent), `${height} px: ${row.textContent}`);
+    const dashes = $$('[data-testid="held-assets"] *').filter((el) => el.children.length === 0 && el.textContent.trim() === '–').map((el) => `${el.tagName}.${el.className} ${Math.round(el.getBoundingClientRect().top - row.getBoundingClientRect().top)}`);
+    await check('nothing under the rows (no stray line): the value in its row', dashes.every((d) => d.includes('c-value') && Math.abs(Number(d.split(' ').pop())) <= 12), JSON.stringify(dashes));
+    const chips = $$('[data-testid="controlled-only"] .chip');
+    await check('an asset only controlled: a chip with its crown', chips.some((c) => c.textContent.includes('SILV') && $('[title="You control this asset"]', c)), text('[data-testid="held-assets"]'));
     await sleep(500);
     await shot('home-your-assets');
     await go('overview');
@@ -130,20 +152,22 @@
     // --- Transactions: this wallet's address, opened in the explorer; the registration's details ---
     await go('transactions');
     set(await waitFor('the type filter', () => $('select[aria-label="Type"]')), 'chain');
-    const chip = await waitFor('a "this wallet" chip with an address', () => $$('[data-testid="this-wallet"]').find((c) => /this wallet · \S+/.test(c.textContent)), 60000);
-    const regs = (await rpc('listassettransactions', [], W)).find((e) => e.category === 'register');
+    const goldRow = () => $$('[role="row"]').find((r) => r.textContent.includes('Registered') && r.textContent.includes('GOLD'));
+    const chip = await waitFor('a "this wallet" chip with an address, in the row of GOLD\'s registration', () => goldRow() && $$('[data-testid="this-wallet"]', goldRow()).find((c) => /this wallet · \S+/.test(c.textContent)), 60000);
+    const regs = (await rpc('listassettransactions', [], W)).find((e) => e.category === 'register' && e.label === 'GOLD');
     const own = regs.to.filter((p) => p.mine).map((p) => p.address);
     await check('the chip names an address of the wallet, all of them in its tooltip', own.every((a) => chip.title.includes(a)), `${chip.title} / ${own}`);
     await sleep(500);
     await shot('transactions-this-wallet');
     chip.focus();
     chip.click();
-    await waitFor('the explorer, at that address', () => T().nav.page === 'explorer' && own.some((a) => document.body.textContent.includes(a)), 30000);
+    const view = await waitFor('the explorer, at that address (the wallet\'s view of it)', () => T().nav.page === 'explorer' && $$('section[aria-label="Address"]').find((v) => own.some((a) => v.textContent.includes(a))), 30000);
+    view.scrollIntoView({ block: 'start' });
     await sleep(1200);
     await shot('explorer-wallet-address');
     await go('transactions');
     set(await waitFor('the type filter', () => $('select[aria-label="Type"]')), 'chain');
-    const reg = await waitFor('the row "Registered"', () => $$('[role="row"]').find((r) => r.textContent.includes('Registered')), 60000);
+    const reg = await waitFor('the row of GOLD\'s registration', goldRow, 60000);
     reg.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
     const ownList = await waitFor('the wallet\'s addresses in the details', () => $('[data-testid="own-addresses"]'), 20000);
     const movement = $('[data-testid="asset-movement"]').textContent;

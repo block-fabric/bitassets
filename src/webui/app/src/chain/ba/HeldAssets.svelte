@@ -48,14 +48,14 @@
   {:else}
     <!-- One compact row per asset (user feedback 2026-10-19): its logo, the crown if the wallet controls it, its ticker
          with its number, its display name, its balance and its worth; narrow, the name goes first, then the worth. -->
-    <table class="rows" aria-labelledby="held-title">
+    <table class="held-table" aria-labelledby="held-title">
       <thead class="sr-only"><tr><th scope="col">Asset</th><th scope="col" class="c-name">Name</th><th scope="col">Balance</th><th scope="col" class="c-value">Value (CHN)</th></tr></thead>
       <tbody>
         {#each shown as r (r.holding.asset)}
           {@const display = displayNameOf(r.holding.asset) ?? ''}
-          <tr class="row" data-testid="held-row" onclick={() => goTo('assets', '', r.holding.asset)}>
+          <tr class="hrow" data-testid="held-row" onclick={() => goTo('assets', '', r.holding.asset)}>
             <td class="c-asset">
-              <button type="button" class="link asset" title={assetTitle(r.holding.label, display, r.seq)} onclick={(e) => { e.stopPropagation(); goTo('assets', '', r.holding.asset); }}>
+              <button type="button" class="asset" title={assetTitle(r.holding.label, display, r.seq)} onclick={(e) => { e.stopPropagation(); goTo('assets', '', r.holding.asset); }}>
                 <AssetBadge id={r.holding.asset} label={r.holding.label} size="s" showLabel={false} />
                 {#if r.holding.control}<span class="crown" title="You control this asset"><Icon name="crown" size={12} label="You control this asset" /></span>{/if}
                 <SafeText class="ticker" text={r.holding.label} />
@@ -105,23 +105,23 @@
   .held {
     container: held / inline-size;
   }
-  .rows {
+  .held-table {
     width: 100%;
     border-collapse: collapse;
     table-layout: fixed;
   }
-  .row {
+  .hrow {
     height: 2.25rem;
     cursor: pointer;
     border-top: 1px solid var(--line);
   }
-  .row:first-child {
+  .hrow:first-child {
     border-top: none;
   }
-  .row:hover {
+  .hrow:hover {
     background: var(--surface-2);
   }
-  .row td {
+  .hrow td {
     padding: 0 0.35rem;
     white-space: nowrap;
     overflow: hidden;
@@ -148,6 +148,16 @@
     min-width: 0;
     color: inherit;
     text-decoration: none;
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
+    cursor: pointer;
+  }
+  .asset:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: var(--radius-s, 4px);
   }
   .asset :global(.ticker),
   .chip :global(.ticker) {

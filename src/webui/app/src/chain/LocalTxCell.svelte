@@ -115,6 +115,12 @@
   }
   .self {
     cursor: pointer;
+    background: transparent;
+    color: var(--text-muted);
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     font: inherit;
     font-size: 0.8rem;
   }

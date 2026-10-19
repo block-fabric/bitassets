@@ -52,8 +52,15 @@
   let name = $state('');
   let availability = $state<'' | 'checking' | 'free' | 'taken' | 'mine'>('');
   const problem = $derived(tickers ? tickerProblem(name) || nameProblem(name) : nameProblem(name));
-  function typed(text: string) {
+  function typed(input: HTMLInputElement) {
+    const text = input.value;
     name = tickers ? tickerOf(text) : text;
+    // Uppercased in the field too, where the caret is (the state may not change: "gold" typed over "GOLD").
+    if (input.value !== name) {
+      const at = input.selectionStart;
+      input.value = name;
+      if (at !== null) input.setSelectionRange(at, at);
+    }
   }
   // Optional, not unique; sent in NFC (the rules take NFC only).
   let displayName = $state('');
@@ -245,7 +252,7 @@
           <form class="ba-form" onsubmit={(e) => { e.preventDefault(); next(); }}>
             <div class="field">
               <label for="issue-name">{tickers ? 'Ticker' : 'Its name'}</label>
-              <input id="issue-name" class="big" class:ticker={tickers} type="text" maxlength={tickers ? MAX_TICKER : 64} placeholder="Such as GOLD" autocomplete="off" autocapitalize="characters" spellcheck="false" value={name} oninput={(e) => typed(e.currentTarget.value)} aria-invalid={problem ? 'true' : undefined} aria-describedby="issue-name-hint" />
+              <input id="issue-name" class="big" class:ticker={tickers} type="text" maxlength={tickers ? MAX_TICKER : 64} placeholder="Such as GOLD" autocomplete="off" autocapitalize="characters" spellcheck="false" value={name} oninput={(e) => typed(e.currentTarget)} aria-invalid={problem ? 'true' : undefined} aria-describedby="issue-name-hint" />
               {#if problem}<span class="error">{t(problem)}</span>
               {:else if availability === 'checking'}<span class="hint">Checking…</span>
               {:else if availability === 'free'}<span class="hint ba-good"><Icon name="check" size={14} /> <SafeText text={name} /> is free</span>

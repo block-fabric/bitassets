@@ -41,7 +41,7 @@
     const amount = e.amount !== undefined ? formatAmount(e.amount, e.decimals ?? 0, { trim: false }) : '';
     switch (e.category) {
       case 'register':
-        return amount ? t('Registered %1 · %2 created', name, amount) : t('Registered %1', name);
+        return amount && Number(e.amount) > 0 ? t('Registered %1 · %2 created', name, amount) : t('Registered %1', name);
       case 'mint':
         return t('Minted %1 %2', amount, name);
       case 'burn':
