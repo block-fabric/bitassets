@@ -2,7 +2,7 @@
 // the wizard registers LOGO with a picture the picker crops and encodes (picked as a file, as a user does), its one
 // confirmation shows the logo in the host's dialog; the asset list, the Home and the Overview show it, with what the wallet
 // holds; LOGO sent to a second wallet is a "Sent asset" row with the destination in the Transactions page, and a
-// "Received asset" row with the sender in the other wallet's. Pictures in Midnight, Advanced (window.__E2E_SHOTS names
+// "Received asset" row with the sender in the other wallet's (the address shortened in the middle, whole in its tooltip). Pictures in Midnight, Advanced (window.__E2E_SHOTS names
 // them for doc and media).
 (async () => {
   const { host, rpc, sleep, T, waitFor, check, snapshot, text, finish } = E2E;
@@ -143,10 +143,17 @@
     await go('transactions');
     const typeSelect = await waitFor('the type filter', () => $('select[aria-label="Type"]'));
     set(typeSelect, 'chain');
-    await waitFor('a Sent asset row with its destination', () => text('.transactions').includes('Sent asset') && text('.transactions').includes(to), 60000);
+    // The other side of a move in the table: its address shortened in the middle (user feedback 2026-10-19, as
+    // shortAddress of chain/txinfo.svelte.ts), the whole address in its tooltip.
+    const rowsOf = () => $$('.transactions [role="row"]').slice(1);
+    const shortOf = (address) => (address.length > 16 ? `${address.slice(0, 8)}…${address.slice(-4)}` : address);
+    const showsParty = (word, address) => rowsOf().some((r) => {
+      const party = r.textContent.includes(word) && $('[data-testid="asset-moves"] .party', r);
+      return !!party && party.textContent.includes(shortOf(address)) && party.title.split(' ').includes(address);
+    });
+    await waitFor('a Sent asset row with its destination', () => showsParty('Sent asset', to), 60000);
     await sleep(600);
     // One row per transaction (the wallet's own halves of it merged), and the amount always whole in view.
-    const rowsOf = () => $$('.transactions [role="row"]').slice(1);
     const count = (word) => rowsOf().filter((r) => r.textContent.includes(word)).length;
     await check('one row per transaction: one send, one registration, one reservation', count('Sent asset') === 1 && count('Registered') === 1 && count('Name reserved') === 1, JSON.stringify(rowsOf().map((r) => r.textContent.replace(/\s+/g, ' ').slice(0, 80))));
     const amountsInView = () => {
@@ -175,7 +182,7 @@
     set(await waitFor('the type filter', () => $('select[aria-label="Type"]')), 'chain');
     const senders = (await rpc('listassettransactions', [], OTHER)).find((e) => e.txid === sent.txid).from.map((f) => f.address);
     await check('the receiver knows who paid', senders.length > 0 && senders[0] !== 'unknown', JSON.stringify(senders));
-    await waitFor('a Received asset row with the sender', () => text('.transactions').includes('Received asset') && text('.transactions').includes(senders[0]), 60000);
+    await waitFor('a Received asset row with the sender', () => showsParty('Received asset', senders[0]), 60000);
     await check('one row for what came in', $$('.transactions [role="row"]').slice(1).filter((r) => r.textContent.includes('Received asset')).length === 1, '');
     await sleep(600);
     await shot('transactions-received-asset');
