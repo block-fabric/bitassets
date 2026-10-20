@@ -57,7 +57,7 @@ class LocalDescribeConfirmationTest(BitcoinTestFramework):
         self.log.info("a call changed after its question is refused, its token used up")
         method, params, d = first
         changed = dict(d["request"])
-        changed["params"] = dict(d["request"]["params"], params=[p + "x" if isinstance(p, str) else p for p in params])
+        changed["params"] = dict(d["request"]["params"], params=[p + "x" if isinstance(p, str) else (p * 2 if isinstance(p, (int, float)) and not isinstance(p, bool) else p) for p in params])
         assert_raises_rpc_error(REFUSED, "not the one that was confirmed", node.webuihost, changed, d["token"])
         assert_raises_rpc_error(REFUSED, "not known", node.webuihost, d["request"], d["token"])
 
