@@ -184,6 +184,7 @@ BASE_SCRIPTS = [
     'feature_sidechain_rules.py',
     'feature_sidechain_payouts.py',
     'rpc_describeconfirmation.py',
+    'rpc_describeconfirmation_bitassets.py',
     'feature_sidechain_record.py',
     'feature_sidechain_mining_nofunds.py',
     'feature_drivechain_rebuild.py',
